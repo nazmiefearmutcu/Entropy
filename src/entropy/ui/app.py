@@ -24,6 +24,7 @@ from .widgets.charts import Candle, PriceChart, VolumeChart
 from .widgets.console import AlgoConsole
 from .widgets.gauges import GaugeBar
 from .widgets.header import HeaderBar
+from .widgets.modals import ErrorScreen, HelpScreen, SettingsScreen
 from .widgets.status_bar import StatusBar, format_telemetry
 
 _S = 1_000_000_000
@@ -55,6 +56,7 @@ class EntropyApp(App[None]):
         self._vol_candles = self._price_candles
         self._spikes = 0
         self._snap_drops = 0
+        self._error_text = "No errors."
 
     def compose(self) -> ComposeResult:
         yield HeaderBar(id="header")
@@ -158,6 +160,11 @@ class EntropyApp(App[None]):
         task = await start_feed(self._sink)
         await task
 
-    def action_settings(self) -> None: ...
-    def action_help(self) -> None: ...
-    def action_errors(self) -> None: ...
+    def action_help(self) -> None:
+        self.push_screen(HelpScreen(id="help"))
+
+    def action_settings(self) -> None:
+        self.push_screen(SettingsScreen(id="settings"))
+
+    def action_errors(self) -> None:
+        self.push_screen(ErrorScreen(self._error_text, id="errors"))
