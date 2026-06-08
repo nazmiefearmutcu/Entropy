@@ -23,8 +23,7 @@ def test_golden_long_then_flip_to_short():
     assert abs(flip[0].trade_pnl - (-2.0)) < 1e-9                 # 99-101
 
 def test_short_sign_matches_gif():
-    s = Strategy(StrategyConfig(symbol="T", fast=2, slow=3))
-    # directly exercise pnl helper via a short then close
+    # directly exercise the pnl helper for the SHORT/LONG sign convention
     from entropy.strategy.engine import _gross_pnl
     assert abs(_gross_pnl(Side.SHORT, 748.300, 748.435, 1.0) - (-0.135)) < 1e-9
     assert abs(_gross_pnl(Side.LONG, 749.886, 750.025, 1.0) - 0.139) < 1e-9

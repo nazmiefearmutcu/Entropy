@@ -1,5 +1,6 @@
 # tests/feeds/test_equity_feed.py
 import asyncio
+import contextlib
 
 import pytest
 from crypcodile.schema.enums import Side
@@ -16,10 +17,8 @@ async def test_feed_emits_trades_into_sink():
     task = asyncio.create_task(feed.run())
     await asyncio.sleep(0.05)
     task.cancel()
-    try:
+    with contextlib.suppress(asyncio.CancelledError):
         await task
-    except asyncio.CancelledError:
-        pass
     recs = [sink.q.get_nowait() for _ in range(sink.q.qsize())]
     assert recs, "expected some trades"
     r = recs[0]
