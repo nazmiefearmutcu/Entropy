@@ -7,6 +7,9 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, RichLog, Static
 
 from .theme import ENTROPY_THEME
+from .widgets.gauges import GaugeBar
+from .widgets.header import HeaderBar
+from .widgets.status_bar import StatusBar
 
 
 class EntropyApp(App[None]):
@@ -23,7 +26,7 @@ class EntropyApp(App[None]):
         super().__init__(*args, **kwargs)
 
     def compose(self) -> ComposeResult:
-        yield Static("Entropy", id="header")
+        yield HeaderBar(id="header")
         with Horizontal(id="body"):
             yield RichLog(
                 id="console", markup=True, highlight=False,
@@ -31,7 +34,7 @@ class EntropyApp(App[None]):
             )
             with Vertical(id="center"):
                 yield Static("", id="ticker")
-                yield Static("", id="gauges")
+                yield GaugeBar(id="gauges")
                 yield Static("", id="hist")
                 with Horizontal(id="boards"):
                     yield DataTable(id="new_lows")
@@ -39,7 +42,7 @@ class EntropyApp(App[None]):
             with Vertical(id="charts"):
                 yield Static("", id="price")
                 yield Static("", id="volume")
-        yield Static("", id="status")
+        yield StatusBar(id="status")
 
     def on_mount(self) -> None:
         self.register_theme(ENTROPY_THEME)
