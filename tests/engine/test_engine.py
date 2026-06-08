@@ -27,6 +27,20 @@ def test_snapshot_has_breadth_and_boards():
     assert any(r.symbol == "AAA" for r in snap.top_movers)
 
 
+def test_per_window_counts_and_ticker():
+    e = Engine()
+    e.on_trade("AAA", 100.0, 1.0, "buy", 0)          # baseline
+    e.on_trade("AAA", 101.0, 1.0, "buy", S)          # new highs across all windows
+    e.on_trade("AAA", 102.0, 1.0, "buy", 2 * S)      # more new highs
+    snap = e.snapshot()
+    # every rolling window registered new-high activity for AAA
+    assert snap.breadth.nh_counts["30s"] >= 2
+    assert set(snap.breadth.nh_counts) == {"30s", "1m", "5m", "20m"}
+    # ticker groups exist per window with AAA as a top symbol
+    g30 = next(g for g in snap.ticker if g.window == "30s")
+    assert g30.entries and g30.entries[0][0] == "AAA" and g30.entries[0][1] >= 2
+
+
 def test_quote_returns_last_price_and_pct():
     e = Engine()
     assert e.quote("SPY") is None              # unseen

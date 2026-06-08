@@ -7,7 +7,7 @@ from crypcodile.schema.records import Trade
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable
 
 from entropy.app import AppConfig
 from entropy.engine.candles import CandleAggregator
@@ -25,8 +25,10 @@ from .widgets.charts import Candle, PriceChart, VolumeChart
 from .widgets.console import AlgoConsole
 from .widgets.gauges import GaugeBar
 from .widgets.header import HeaderBar
+from .widgets.highlow_gauges import HighLowGauges
 from .widgets.modals import ErrorScreen, HelpScreen, SettingsScreen
 from .widgets.status_bar import StatusBar, format_telemetry
+from .widgets.ticker_strip import TickerStrip
 
 _S = 1_000_000_000
 _CANDLE_INTERVAL_NS = _S  # 1s rolling candles for the live charts
@@ -70,9 +72,9 @@ class EntropyApp(App[None]):
         with Horizontal(id="body"):
             yield AlgoConsole(id="console")
             with Vertical(id="center"):
-                yield Static("", id="ticker")
+                yield TickerStrip(id="ticker")
                 yield GaugeBar(id="gauges")
-                yield Static("", id="hist")
+                yield HighLowGauges(id="hist")
                 with Horizontal(id="boards"):
                     yield DataTable(id="new_lows")
                     yield DataTable(id="session_highs")
@@ -107,6 +109,10 @@ class EntropyApp(App[None]):
         )
         status.sell_pct = snap.breadth.sell_pct
         self.query_one("#gauges", GaugeBar).value = snap.breadth.sell_pct / 100.0
+        self.query_one("#ticker", TickerStrip).groups = snap.ticker
+        hist = self.query_one("#hist", HighLowGauges)
+        hist.nh_counts = snap.breadth.nh_counts
+        hist.nl_counts = snap.breadth.nl_counts
         refresh_board(self.query_one("#new_lows", DataTable), snap.new_lows)
         refresh_board(self.query_one("#session_highs", DataTable), snap.new_highs)
         bars = self._price_candles.bars()

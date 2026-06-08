@@ -15,7 +15,8 @@ _WIN_ORDER = (WindowName.S30, WindowName.M1, WindowName.M5, WindowName.M20)
 
 class _Tape:
     __slots__ = ("maxw", "minw", "session", "mom", "last_ts", "last_price",
-                 "nh_count", "nl_count", "last_mom_pct", "_cooldown")
+                 "nh_count", "nl_count", "nh_by_win", "nl_by_win",
+                 "last_mom_pct", "_cooldown")
 
     def __init__(self, cfg: EngineConfig) -> None:
         self.maxw = [MonotonicExtreme(cfg.windows_ns[w.value], +1) for w in _WIN_ORDER]
@@ -26,6 +27,9 @@ class _Tape:
         self.last_price = 0.0
         self.nh_count = 0
         self.nl_count = 0
+        # cumulative new-high / new-low event counts per rolling window (indexed by _WIN_ORDER)
+        self.nh_by_win = [0, 0, 0, 0]
+        self.nl_by_win = [0, 0, 0, 0]
         self.last_mom_pct = 0.0
         self._cooldown: dict[str, int] = {}
 
@@ -40,12 +44,20 @@ class BreadthSnapshot(msgspec.Struct, frozen=True):
     nl_counts: dict[str, int]
 
 
+class TickerGroup(msgspec.Struct, frozen=True):
+    """Top symbols by new-high/low activity within one rolling window — drives
+    the header ticker strip (e.g. '30s: GWW 15  APP 13  SPOT 12')."""
+    window: str
+    entries: tuple[tuple[str, int], ...]   # (symbol, combined nh+nl count in window)
+
+
 class EngineSnapshot(msgspec.Struct, frozen=True):
     ts_ns: int
     breadth: BreadthSnapshot
     top_movers: tuple[LeaderRow, ...]
     new_highs: tuple[LeaderRow, ...]
     new_lows: tuple[LeaderRow, ...]
+    ticker: tuple[TickerGroup, ...]
 
 
 class Engine:
@@ -81,20 +93,22 @@ class Engine:
             t.mom.push(ts, price)
             t.last_price = price
             return events
-        for w, me in zip(_WIN_ORDER, t.maxw, strict=False):
+        for i, (w, me) in enumerate(zip(_WIN_ORDER, t.maxw, strict=False)):
             prior = me.peek()
             if me.step(ts, price):
                 events.append(
                     NewHigh(symbol=symbol, ts_ns=ts, price=price, window=w, prev_extreme=prior)
                 )
                 t.nh_count += 1
-        for w, me in zip(_WIN_ORDER, t.minw, strict=False):
+                t.nh_by_win[i] += 1
+        for i, (w, me) in enumerate(zip(_WIN_ORDER, t.minw, strict=False)):
             prior = me.peek()
             if me.step(ts, price):
                 events.append(
                     NewLow(symbol=symbol, ts_ns=ts, price=price, window=w, prev_extreme=prior)
                 )
                 t.nl_count += 1
+                t.nl_by_win[i] += 1
         sh, sl = t.session.step(price)
         if sh:
             events.append(NewHigh(symbol=symbol, ts_ns=ts, price=price, window=WindowName.SESSION))
@@ -149,16 +163,35 @@ class Engine:
         rate = self.breadth.event_rate()
         accel = self.breadth.accel(self._prev_event_rate)
         self._prev_event_rate = rate
+        # Per-window aggregate new-high / new-low symbol-activity counts (dual gauges)
+        # and the top-symbol ticker groups (the "30s: SYM n  SYM n" strip).
+        nh_counts: dict[str, int] = {}
+        nl_counts: dict[str, int] = {}
+        ticker: list[TickerGroup] = []
+        tk = 6  # symbols shown per window in the strip
+        for i, w in enumerate(_WIN_ORDER):
+            nh_counts[w.value] = sum(tp.nh_by_win[i] for _, tp in items)
+            nl_counts[w.value] = sum(tp.nl_by_win[i] for _, tp in items)
+            top_syms = heapq.nlargest(
+                tk, items, key=lambda kv: kv[1].nh_by_win[i] + kv[1].nl_by_win[i]
+            )
+            entries = tuple(
+                (s, tp.nh_by_win[i] + tp.nl_by_win[i])
+                for s, tp in top_syms
+                if tp.nh_by_win[i] + tp.nl_by_win[i] > 0
+            )
+            ticker.append(TickerGroup(window=w.value, entries=entries))
         breadth = BreadthSnapshot(
             sell_pct=self.breadth.sell_pct(), buy_pct=self.breadth.buy_pct(),
             raw_hz=self.breadth.raw_hz(), prev30s_rate=rate, accel=accel,
-            nh_counts={}, nl_counts={})
+            nh_counts=nh_counts, nl_counts=nl_counts)
         last_ts = max((t.last_ts for t in self._tapes.values()), default=0)
         return EngineSnapshot(
             ts_ns=last_ts, breadth=breadth,
             top_movers=mk(top, lambda tp: tp.nh_count + tp.nl_count),
             new_highs=mk(highs, lambda tp: tp.nh_count),
-            new_lows=mk(lows, lambda tp: tp.nl_count))
+            new_lows=mk(lows, lambda tp: tp.nl_count),
+            ticker=tuple(ticker))
 
     def quote(self, symbol: str) -> tuple[float, float] | None:
         """Last price and session %-change for one symbol, or None if unseen.
@@ -176,4 +209,6 @@ class Engine:
             t.session = SessionExtreme()
             t.nh_count = 0
             t.nl_count = 0
+            t.nh_by_win = [0, 0, 0, 0]
+            t.nl_by_win = [0, 0, 0, 0]
         self._seen.clear()
