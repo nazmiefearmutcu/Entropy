@@ -1,0 +1,14 @@
+Screen { background: black; color: #c8c8c8; layout: vertical; }
+#header  { height: 3; background: black; border: none; padding: 0 1; }
+#body    { height: 1fr; layout: horizontal; }
+#console { width: 32; background: black; border: none; padding: 0; }
+#center  { width: 1fr; layout: vertical; }
+#ticker  { height: 2; border: none; padding: 0; }
+#gauges  { height: 4; border: none; padding: 0; }
+#hist    { height: 4; border: none; padding: 0; }
+#boards  { height: 1fr; layout: horizontal; }
+#boards DataTable { width: 1fr; height: 1fr; border: none; padding: 0; }
+#charts  { width: 48; layout: vertical; }
+#price   { height: 2fr; border: none; }
+#volume  { height: 1fr; border: none; }
+#status  { height: 1; background: black; border: none; padding: 0 1; }
