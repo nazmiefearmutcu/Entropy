@@ -1,6 +1,8 @@
 import pytest
+
+from entropy.strategy.engine import EventKind, StrategyEvent
 from entropy.ui.widgets.console import AlgoConsole
-from entropy.strategy.engine import StrategyEvent, EventKind
+
 
 @pytest.mark.asyncio
 async def test_console_writes_event_line():

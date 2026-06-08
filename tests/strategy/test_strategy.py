@@ -1,5 +1,5 @@
-from entropy.strategy.engine import Strategy, StrategyConfig, Bar, Side
-from entropy.strategy.engine import EventKind
+from entropy.strategy.engine import Bar, EventKind, Side, Strategy, StrategyConfig
+
 
 def _warm(s, closes, t0=0, dt=1):
     return s.warmup([Bar(ts_ns=(t0 + i) * dt, close=c) for i, c in enumerate(closes)])

@@ -1,10 +1,13 @@
 # tests/feeds/test_equity_feed.py
 import asyncio
+
 import pytest
-from crypcodile.schema.records import Trade
 from crypcodile.schema.enums import Side
+from crypcodile.schema.records import Trade
+
 from entropy.feeds.bus import QueueSink
-from entropy.feeds.equities.feed import EquitySimFeed, EXCHANGE
+from entropy.feeds.equities.feed import EXCHANGE, EquitySimFeed
+
 
 @pytest.mark.asyncio
 async def test_feed_emits_trades_into_sink():

@@ -1,5 +1,6 @@
-from entropy.ui.widgets.boards import row_text
 from entropy.engine.leaderboard import LeaderRow
+from entropy.ui.widgets.boards import row_text
+
 
 def test_row_text_colors_by_sign():
     cells = row_text(LeaderRow("AAPL", 5, 191.2, 2.4))

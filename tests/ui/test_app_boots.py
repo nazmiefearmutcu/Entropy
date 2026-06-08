@@ -1,5 +1,7 @@
 import pytest
+
 from entropy.ui.app import EntropyApp
+
 
 @pytest.mark.asyncio
 async def test_app_boots_and_has_panels():

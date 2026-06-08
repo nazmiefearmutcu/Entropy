@@ -1,5 +1,5 @@
 from entropy.engine.engine import Engine
-from entropy.engine.events import NewHigh, NewLow
+from entropy.engine.events import NewHigh
 
 S = 1_000_000_000
 

@@ -1,5 +1,7 @@
 import random
-from entropy.feeds.equities.universe import UNIVERSE, INDICES, SECTORS, build_params
+
+from entropy.feeds.equities.universe import INDICES, UNIVERSE, build_params
+
 
 def test_universe_has_indices_and_many_stocks():
     assert INDICES == ("SPY", "QQQ", "IWM")

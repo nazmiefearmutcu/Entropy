@@ -1,6 +1,8 @@
 import pytest
-from entropy.ui.app import EntropyApp
+
 from entropy.app import AppConfig
+from entropy.ui.app import EntropyApp
+
 
 @pytest.mark.asyncio
 async def test_help_modal_opens_and_closes():
