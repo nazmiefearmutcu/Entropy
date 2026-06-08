@@ -27,6 +27,17 @@ def test_snapshot_has_breadth_and_boards():
     assert any(r.symbol == "AAA" for r in snap.top_movers)
 
 
+def test_quote_returns_last_price_and_pct():
+    e = Engine()
+    assert e.quote("SPY") is None              # unseen
+    e.on_trade("SPY", 100.0, 1.0, "buy", 0)    # baseline sets first price
+    e.on_trade("SPY", 102.0, 1.0, "buy", S)
+    q = e.quote("SPY")
+    assert q is not None
+    price, pct = q
+    assert price == 102.0 and abs(pct - 2.0) < 1e-9   # (102-100)/100 * 100
+
+
 def test_determinism_same_input_same_events():
     seq = [("AAA", 100.0, 1.0, "buy", 0), ("AAA", 102.0, 1.0, "buy", S),
            ("AAA", 99.0, 1.0, "sell", 2 * S)]

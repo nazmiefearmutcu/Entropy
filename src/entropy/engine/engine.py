@@ -160,6 +160,17 @@ class Engine:
             new_highs=mk(highs, lambda tp: tp.nh_count),
             new_lows=mk(lows, lambda tp: tp.nl_count))
 
+    def quote(self, symbol: str) -> tuple[float, float] | None:
+        """Last price and session %-change for one symbol, or None if unseen.
+
+        Lets the UI always show fixed reference quotes (e.g. SPY/QQQ/IWM) that
+        are too low-volatility to appear in the leaderboards.
+        """
+        t = self._tapes.get(symbol)
+        if t is None:
+            return None
+        return t.last_price, t.session.pct_chg(t.last_price) * 100
+
     def reset_session(self, ts_ns: int | None = None) -> None:
         for t in self._tapes.values():
             t.session = SessionExtreme()

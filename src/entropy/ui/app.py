@@ -114,20 +114,17 @@ class EntropyApp(App[None]):
             Candle(t=b.t, o=b.o, h=b.h, l=b.l, c=b.c) for b in bars
         ]
         self.query_one("#volume", VolumeChart).bars = [(b.t, b.vol) for b in bars]
-        self._update_header(snap)
+        self._update_header()
 
-    def _update_header(self, snap: Any) -> None:
+    def _update_header(self) -> None:
         header = self.query_one("#header", HeaderBar)
         header.clock = time.strftime("%H:%M:%S")
-        by_sym: dict[str, Any] = {}
-        for board in (snap.top_movers, snap.new_highs, snap.new_lows):
-            for r in board:
-                by_sym.setdefault(r.symbol, r)
         parts = []
         for sym in INDICES:
-            r = by_sym.get(sym)
-            if r is not None:
-                parts.append(f"{sym} {r.price:.2f} ({r.pct_chg:+.2f}%)")
+            q = self.engine.quote(sym)   # always-on index quotes (too calm for boards)
+            if q is not None:
+                price, pct = q
+                parts.append(f"{sym} {price:.2f} ({pct:+.2f}%)")
         header.quotes = "   ".join(parts)
 
     def _push_info(self, text: str, color: str = "white") -> None:
