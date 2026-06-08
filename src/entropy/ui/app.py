@@ -16,7 +16,8 @@ from entropy.feeds.bus import QueueSink
 from entropy.feeds.crypto import start_feed
 from entropy.feeds.equities.feed import EquitySimFeed
 from entropy.feeds.equities.universe import INDICES
-from entropy.strategy.engine import Strategy, StrategyConfig
+from entropy.feeds.warmup import warmup_klines
+from entropy.strategy.engine import Bar, EventKind, Strategy, StrategyConfig, StrategyEvent
 
 from .theme import ENTROPY_THEME
 from .widgets.boards import refresh_board
@@ -29,6 +30,8 @@ from .widgets.status_bar import StatusBar, format_telemetry
 
 _S = 1_000_000_000
 _CANDLE_INTERVAL_NS = _S  # 1s rolling candles for the live charts
+_WARMUP_BARS = 24  # matches the GIF's "warmup: 24 bars" line
+_WARMUP_DT_NS = 60 * _S  # 1-minute synthetic warmup cadence
 
 
 class EntropyApp(App[None]):
@@ -49,6 +52,10 @@ class EntropyApp(App[None]):
         self._sink = QueueSink()
         self.engine = Engine(self.cfg.engine)
         self.strategy = Strategy(StrategyConfig(symbol=self.cfg.strategy_symbol))
+        # One Strategy per traded symbol: SPY (sim, clean fees) + BTC (real crypto, ~1bp).
+        self.crypto_strategy = Strategy(
+            StrategyConfig(symbol=self.cfg.crypto_strategy_symbol, fee_bps=1.0)
+        )
         self._equity = EquitySimFeed(
             self._sink, seed=self.cfg.seed, ticks_per_sec=self.cfg.equity_tps
         )
@@ -83,6 +90,7 @@ class EntropyApp(App[None]):
             t.cursor_type = "none"
             t.zebra_stripes = False
         self.set_interval(1 / 10, self.sample_snapshot)
+        self._warmup_strategies()
         self.run_drain()
         if self.cfg.enable_equities:
             self._run_equity_feed()
@@ -122,6 +130,50 @@ class EntropyApp(App[None]):
                 parts.append(f"{sym} {r.price:.2f} ({r.pct_chg:+.2f}%)")
         header.quotes = "   ".join(parts)
 
+    def _push_info(self, text: str, color: str = "white") -> None:
+        self.query_one("#console", AlgoConsole).push_info(text, color)
+
+    def _push_events(self, events: list[StrategyEvent]) -> None:
+        console = self.query_one("#console", AlgoConsole)
+        for e in events:
+            console.push_event(e)
+
+    def _synth_spy_bars(self) -> list[Bar]:
+        """Synthesize the strategy's warmup tail from the sim's current SPY price."""
+        sym = self.cfg.strategy_symbol
+        rt = self._equity.sim.rt.get(sym)
+        px = rt.px if rt is not None else 100.0
+        now = self._equity.clock_ns()
+        return [
+            Bar(ts_ns=now - (_WARMUP_BARS - 1 - i) * _WARMUP_DT_NS, close=px)
+            for i in range(_WARMUP_BARS)
+        ]
+
+    def _warmup_strategies(self) -> None:
+        # SPY warms instantly from synthesized sim bars; push its INFO + watching line.
+        self._push_events(self.strategy.warmup(self._synth_spy_bars()))
+        self._push_info(f"watching [{self.cfg.strategy_symbol}]")
+        if self.cfg.enable_crypto:
+            self._warmup_crypto()
+
+    @work(group="warmup")
+    async def _warmup_crypto(self) -> None:
+        raw = self.cfg.crypto_strategy_symbol.split(":", 1)[-1]
+        try:
+            bars = await warmup_klines(raw)
+        except Exception as exc:  # network/REST hiccup — warmup is best-effort.
+            self._error_text = f"crypto warmup failed: {exc}"
+            return
+        if not bars:
+            return
+        events = self.crypto_strategy.warmup(bars)
+        info = [e for e in events if e.kind is EventKind.INFO]
+        self._push_events(info)
+
+    def _feed_status(self, text: str, color: str = "white") -> None:
+        """Surface transport connect/disconnect noise as console INFO lines."""
+        self._push_info(text, color)
+
     @work(exclusive=True, group="drain")
     async def run_drain(self) -> None:
         q = self._sink.q
@@ -140,7 +192,12 @@ class EntropyApp(App[None]):
                 self._route_candle(r)
 
     def _on_strategy(self, r: Trade) -> None:
-        sevs = self.strategy.on_price(r.symbol, r.price, r.local_ts)
+        strat = (
+            self.crypto_strategy
+            if r.symbol == self.cfg.crypto_strategy_symbol
+            else self.strategy
+        )
+        sevs = strat.on_price(r.symbol, r.price, r.local_ts)
         if not sevs:
             return
         console = self.query_one("#console", AlgoConsole)
@@ -157,8 +214,14 @@ class EntropyApp(App[None]):
 
     @work(group="feeds")
     async def _run_crypto_feed(self) -> None:
-        task = await start_feed(self._sink)
-        await task
+        # Reconnect noise lives in the console layer (keeps the engine pure).
+        self._feed_status("connecting…")
+        try:
+            task = await start_feed(self._sink)
+            await task
+        except Exception as exc:
+            self._feed_status(f"disconnect: {exc}", "red")
+            self._error_text = f"crypto feed: {exc}"
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen(id="help"))
