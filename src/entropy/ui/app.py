@@ -7,6 +7,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, RichLog, Static
 
 from .theme import ENTROPY_THEME
+from .widgets.charts import PriceChart, VolumeChart
 from .widgets.gauges import GaugeBar
 from .widgets.header import HeaderBar
 from .widgets.status_bar import StatusBar
@@ -40,8 +41,8 @@ class EntropyApp(App[None]):
                     yield DataTable(id="new_lows")
                     yield DataTable(id="session_highs")
             with Vertical(id="charts"):
-                yield Static("", id="price")
-                yield Static("", id="volume")
+                yield PriceChart(id="price")
+                yield VolumeChart(id="volume")
         yield StatusBar(id="status")
 
     def on_mount(self) -> None:
