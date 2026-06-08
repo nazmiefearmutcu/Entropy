@@ -1,5 +1,5 @@
 from entropy.engine.engine import Engine
-from entropy.engine.events import NewHigh
+from entropy.engine.events import NewHigh, NewLow
 
 S = 1_000_000_000
 
@@ -25,6 +25,16 @@ def test_snapshot_has_breadth_and_boards():
     assert snap.breadth.buy_pct >= 0 and snap.breadth.sell_pct >= 0
     assert isinstance(snap.new_highs, tuple)
     assert any(r.symbol == "AAA" for r in snap.top_movers)
+
+
+def test_prev_extreme_is_none_after_window_gap():
+    # After a gap longer than the window span, the old extreme has expired, so a
+    # new extreme must report prev_extreme=None (not the stale pre-eviction value).
+    e = Engine()
+    e.on_trade("AAA", 500.0, 1.0, "buy", 0)            # baseline at 500
+    evs = e.on_trade("AAA", 100.0, 1.0, "sell", 60 * S)  # 60s later -> 500 evicted from 30s win
+    nl_30s = next(x for x in evs if isinstance(x, NewLow) and x.window.value == "30s")
+    assert nl_30s.prev_extreme is None                 # not the stale 500.0
 
 
 def test_per_window_counts_and_ticker():

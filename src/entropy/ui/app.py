@@ -7,7 +7,7 @@ from crypcodile.schema.records import Trade
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Static
 
 from entropy.app import AppConfig
 from entropy.engine.candles import CandleAggregator
@@ -23,9 +23,9 @@ from .theme import ENTROPY_THEME
 from .widgets.boards import refresh_board
 from .widgets.charts import Candle, PriceChart, VolumeChart
 from .widgets.console import AlgoConsole
-from .widgets.gauges import GaugeBar
 from .widgets.header import HeaderBar
 from .widgets.highlow_gauges import HighLowGauges
+from .widgets.histogram import EventHistogram
 from .widgets.modals import ErrorScreen, HelpScreen, SettingsScreen
 from .widgets.status_bar import StatusBar, format_telemetry
 from .widgets.ticker_strip import TickerStrip
@@ -61,8 +61,8 @@ class EntropyApp(App[None]):
         self._equity = EquitySimFeed(
             self._sink, seed=self.cfg.seed, ticks_per_sec=self.cfg.equity_tps
         )
-        self._price_candles = CandleAggregator(_CANDLE_INTERVAL_NS)
-        self._vol_candles = self._price_candles
+        self._price_candles = CandleAggregator(_CANDLE_INTERVAL_NS)   # SPY (sim)
+        self._crypto_candles = CandleAggregator(_CANDLE_INTERVAL_NS)  # BTC (live crypto)
         self._spikes = 0
         self._snap_drops = 0
         self._error_text = "No errors."
@@ -73,14 +73,20 @@ class EntropyApp(App[None]):
             yield AlgoConsole(id="console")
             with Vertical(id="center"):
                 yield TickerStrip(id="ticker")
-                yield GaugeBar(id="gauges")
                 yield HighLowGauges(id="hist")
+                yield EventHistogram(id="event_hist")
                 with Horizontal(id="boards"):
-                    yield DataTable(id="new_lows")
-                    yield DataTable(id="session_highs")
+                    with Vertical(classes="board-col"):
+                        yield Static("On new lows", classes="board-title")
+                        yield DataTable(id="new_lows")
+                    with Vertical(classes="board-col"):
+                        yield Static("Session new highs", classes="board-title")
+                        yield DataTable(id="session_highs")
             with Vertical(id="charts"):
-                yield PriceChart(id="price")
+                yield PriceChart(id="price")        # BTC (live crypto)
                 yield VolumeChart(id="volume")
+                yield PriceChart(id="price2")       # SPY (sim)
+                yield VolumeChart(id="volume2")
         yield StatusBar(id="status")
 
     def on_mount(self) -> None:
@@ -98,6 +104,8 @@ class EntropyApp(App[None]):
             self._run_equity_feed()
         if self.cfg.enable_crypto:
             self._run_crypto_feed()
+        else:
+            self.query_one("#header", HeaderBar).sources = "equities only"
 
     def sample_snapshot(self) -> None:
         snap = self.engine.snapshot()
@@ -108,19 +116,23 @@ class EntropyApp(App[None]):
             dropped=self._sink.dropped,
         )
         status.sell_pct = snap.breadth.sell_pct
-        self.query_one("#gauges", GaugeBar).value = snap.breadth.sell_pct / 100.0
         self.query_one("#ticker", TickerStrip).groups = snap.ticker
+        self.query_one("#event_hist", EventHistogram).raw_hz = snap.breadth.raw_hz
         hist = self.query_one("#hist", HighLowGauges)
         hist.nh_counts = snap.breadth.nh_counts
         hist.nl_counts = snap.breadth.nl_counts
         refresh_board(self.query_one("#new_lows", DataTable), snap.new_lows)
         refresh_board(self.query_one("#session_highs", DataTable), snap.new_highs)
-        bars = self._price_candles.bars()
-        self.query_one("#price", PriceChart).candles = [
+        self._draw_chart("#price", "#volume", self._crypto_candles)   # BTC (live)
+        self._draw_chart("#price2", "#volume2", self._price_candles)  # SPY (sim)
+        self._update_header()
+
+    def _draw_chart(self, price_id: str, vol_id: str, agg: CandleAggregator) -> None:
+        bars = agg.bars()
+        self.query_one(price_id, PriceChart).candles = [
             Candle(t=b.t, o=b.o, h=b.h, l=b.l, c=b.c) for b in bars
         ]
-        self.query_one("#volume", VolumeChart).bars = [(b.t, b.vol) for b in bars]
-        self._update_header()
+        self.query_one(vol_id, VolumeChart).bars = [(b.t, b.vol) for b in bars]
 
     def _update_header(self) -> None:
         header = self.query_one("#header", HeaderBar)
@@ -210,6 +222,8 @@ class EntropyApp(App[None]):
     def _route_candle(self, r: Trade) -> None:
         if r.symbol == self.cfg.strategy_symbol:
             self._price_candles.add(r.local_ts, r.price, r.amount)
+        elif r.symbol == self.cfg.crypto_strategy_symbol:
+            self._crypto_candles.add(r.local_ts, r.price, r.amount)
 
     @work(group="feeds")
     async def _run_equity_feed(self) -> None:
@@ -219,10 +233,14 @@ class EntropyApp(App[None]):
     async def _run_crypto_feed(self) -> None:
         # Reconnect noise lives in the console layer (keeps the engine pure).
         self._feed_status("connecting…")
+        header = self.query_one("#header", HeaderBar)
         try:
             task = await start_feed(self._sink)
+            header.sources = "coinbase ●  binance ●"   # feed live
             await task
+            header.sources = "coinbase ○  binance ○"   # task ended cleanly
         except Exception as exc:
+            header.sources = "coinbase ○  binance ○"   # disconnected
             self._feed_status(f"disconnect: {exc}", "red")
             self._error_text = f"crypto feed: {exc}"
 

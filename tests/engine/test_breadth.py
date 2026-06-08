@@ -12,6 +12,16 @@ def test_sell_buy_pct_amount_weighted():
     assert abs(b.buy_pct() - 30.0) < 1e-9
 
 
+def test_sell_buy_pct_is_sliding_not_cumulative():
+    # Volume older than the 30s window must expire, so the gauge reflects RECENT
+    # flow, not the session total (which would converge to ~50%).
+    b = BreadthTracker(window_s=30)
+    b.add_trade("buy", 1000.0, 0)          # heavy buy at t=0s
+    assert abs(b.buy_pct() - 100.0) < 1e-9
+    b.add_trade("sell", 100.0, 60 * S)     # 60s later -> the t=0 buy has expired
+    assert abs(b.sell_pct() - 100.0) < 1e-9   # only the recent sell remains in-window
+
+
 def test_raw_hz_and_event_rate():
     b = BreadthTracker(window_s=30)
     for _ in range(4000):

@@ -94,6 +94,7 @@ class Engine:
             t.last_price = price
             return events
         for i, (w, me) in enumerate(zip(_WIN_ORDER, t.maxw, strict=False)):
+            me.evict(ts)            # evict BEFORE peek so prev_extreme reflects the live window
             prior = me.peek()
             if me.step(ts, price):
                 events.append(
@@ -102,6 +103,7 @@ class Engine:
                 t.nh_count += 1
                 t.nh_by_win[i] += 1
         for i, (w, me) in enumerate(zip(_WIN_ORDER, t.minw, strict=False)):
+            me.evict(ts)            # evict BEFORE peek (the evict inside step() is then a no-op)
             prior = me.peek()
             if me.step(ts, price):
                 events.append(
