@@ -4,10 +4,11 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, RichLog, Static
+from textual.widgets import DataTable, Static
 
 from .theme import ENTROPY_THEME
 from .widgets.charts import PriceChart, VolumeChart
+from .widgets.console import AlgoConsole
 from .widgets.gauges import GaugeBar
 from .widgets.header import HeaderBar
 from .widgets.status_bar import StatusBar
@@ -29,10 +30,7 @@ class EntropyApp(App[None]):
     def compose(self) -> ComposeResult:
         yield HeaderBar(id="header")
         with Horizontal(id="body"):
-            yield RichLog(
-                id="console", markup=True, highlight=False,
-                auto_scroll=True, max_lines=2000,
-            )
+            yield AlgoConsole(id="console")
             with Vertical(id="center"):
                 yield Static("", id="ticker")
                 yield GaugeBar(id="gauges")
