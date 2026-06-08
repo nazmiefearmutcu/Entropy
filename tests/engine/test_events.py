@@ -1,5 +1,6 @@
-from entropy.engine.events import NewHigh, NewLow, Spike, SnapDrop, EventKind, WindowName
 from entropy.config import EngineConfig
+from entropy.engine.events import EventKind, NewHigh, Spike, WindowName
+
 
 def test_event_structs_carry_fields():
     e = NewHigh(symbol="X", ts_ns=1, price=10.0, window=WindowName.S30, prev_extreme=9.0)

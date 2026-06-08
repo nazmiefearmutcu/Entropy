@@ -1,6 +1,7 @@
 # tests/engine/test_windows_extreme.py
 from entropy.engine.windows import MonotonicExtreme, SessionExtreme
 
+
 def test_rolling_max_new_high_trace():
     # span=100ns; verified expected new-high flags: T,T,F,F,T
     m = MonotonicExtreme(span_ns=100, kind=+1)

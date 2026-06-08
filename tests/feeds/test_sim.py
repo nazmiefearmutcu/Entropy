@@ -1,5 +1,7 @@
 import random
+
 from entropy.feeds.equities.sim import EquitySimulator
+
 
 def _clock():
     return 1_000_000_000_000_000_000

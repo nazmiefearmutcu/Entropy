@@ -33,6 +33,29 @@ def build_live(
     c.transport = AiohttpWsTransport(c.ws_url)   # REQUIRED — never auto-set
     return c
 
+async def _resolve_symbols(
+    connector: Connector,
+    registry: InstrumentRegistry,
+    whitelist: Sequence[str],
+    quote: str,
+) -> list[str]:
+    """Intersect the curated whitelist with the exchange's live instrument list.
+
+    Discovery is best-effort: if list_instruments() fails (stale REST endpoint,
+    404, or no connectivity) we fall back to the raw whitelist. The live WS feed
+    does not depend on discovery — it subscribes to the symbols directly — and
+    the normalizer's fallback canonical (e.g. "coinbase:BTC-USD") is exactly the
+    key the TUI uses, so the feed still works without a populated registry.
+    """
+    try:
+        insts: list[Instrument] = await connector.list_instruments()
+    except Exception:
+        return list(whitelist)
+    ok = {i.symbol_raw for i in insts if i.kind == Kind.SPOT and i.quote == quote}
+    for i in insts:
+        registry.add(i)
+    return [s for s in whitelist if s in ok]
+
 async def discover_universe(
     registry: InstrumentRegistry,
     cb_whitelist: Sequence[str] = COINBASE_MAJORS,
@@ -41,14 +64,8 @@ async def discover_universe(
     dummy = QueueSink()
     cb = CoinbaseConnector(symbols=[], channels=[], out=dummy, registry=registry)
     bn = BinanceConnector(symbols=[], channels=[], out=dummy, registry=registry, market="spot")
-    cb_insts: list[Instrument] = await cb.list_instruments()
-    bn_insts: list[Instrument] = await bn.list_instruments()
-    cb_ok = {i.symbol_raw for i in cb_insts if i.kind == Kind.SPOT and i.quote == "USD"}
-    bn_ok = {i.symbol_raw for i in bn_insts if i.kind == Kind.SPOT and i.quote == "USDT"}
-    for i in cb_insts + bn_insts:
-        registry.add(i)
-    cb_syms = [s for s in cb_whitelist if s in cb_ok]
-    bn_syms = [s for s in bn_whitelist if s in bn_ok]
+    cb_syms = await _resolve_symbols(cb, registry, cb_whitelist, "USD")
+    bn_syms = await _resolve_symbols(bn, registry, bn_whitelist, "USDT")
     return cb_syms, bn_syms
 
 async def start_feed(
