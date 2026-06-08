@@ -1,0 +1,32 @@
+[project]
+name = "entropy"
+version = "0.0.1"
+description = "Real-time terminal market scanner + algo console (Crypcodile feed)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "textual>=0.79",
+    "textual-plotext>=0.7",
+    "msgspec>=0.18",
+    "crypcodile",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-timeout>=2", "ruff>=0.6", "mypy>=1.11"]
+
+[tool.uv.sources]
+crypcodile = { path = "/Users/nazmi/Crypcodile", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/entropy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+timeout = 60

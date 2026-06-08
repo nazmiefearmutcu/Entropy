@@ -1,0 +1,1 @@
+Entropy is a real-time terminal (TUI) market scanner and algo console that streams live crypto via the Crypcodile engine, simulates US equities on the same record path, detects multi-window new highs/lows and momentum, ranks movers, runs a demo EMA scalping strategy, and renders live candlestick charts — all in a single asyncio process driven by Textual.
