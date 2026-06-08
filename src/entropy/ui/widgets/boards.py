@@ -13,7 +13,7 @@ def row_text(r: LeaderRow) -> tuple[Text, Text, Text, Text]:
             Text(f"{r.price:.2f}", justify="right"),
             Text(f"{r.pct_chg:+.2f}%", style=col, justify="right"))
 
-def refresh_board(table: "DataTable[object]", rows: tuple[LeaderRow, ...]) -> None:
+def refresh_board(table: DataTable[object], rows: tuple[LeaderRow, ...]) -> None:
     table.clear()
     for r in rows:
         table.add_row(*row_text(r))
