@@ -10,6 +10,6 @@ def test_aggregates_trades_into_bars():
     agg.add(65 * S, 101.0, 1.0)         # new bucket
     bars = agg.bars()
     assert len(bars) == 2
-    o, h, l, c = bars[0].o, bars[0].h, bars[0].l, bars[0].c
-    assert (o, h, l, c) == (100.0, 105.0, 98.0, 98.0)
+    o, h, low, c = bars[0].o, bars[0].h, bars[0].l, bars[0].c
+    assert (o, h, low, c) == (100.0, 105.0, 98.0, 98.0)
     assert bars[0].vol == 4.0
