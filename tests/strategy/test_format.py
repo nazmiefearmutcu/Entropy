@@ -1,5 +1,6 @@
-from entropy.strategy.engine import StrategyEvent, EventKind
+from entropy.strategy.engine import EventKind, StrategyEvent
 from entropy.strategy.format import render_event
+
 
 def test_open_long_format():
     e = StrategyEvent(EventKind.OPEN_LONG, 1, "SPY", 749.886, running_pnl=0.0)
