@@ -1,7 +1,8 @@
 # tests/feeds/test_bus.py
-import asyncio
 import pytest
+
 from entropy.feeds.bus import QueueSink
+
 
 @pytest.mark.asyncio
 async def test_put_enqueues_record():
