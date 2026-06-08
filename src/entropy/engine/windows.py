@@ -62,3 +62,26 @@ class SessionExtreme:
         if not self.first_price:
             return 0.0
         return (price - self.first_price) / self.first_price
+
+
+class MomentumHorizon:
+    """Maintains a (ts,price) deque; push() returns the reference price ~span
+    ago (the newest anchor at or older than now-span)."""
+    __slots__ = ("span_ns", "dq", "last_evicted")
+
+    def __init__(self, span_ns: int) -> None:
+        self.span_ns = span_ns
+        self.dq: deque[tuple[int, float]] = deque()
+        self.last_evicted: float | None = None
+
+    def push(self, ts_ns: int, price: float) -> float:
+        dq = self.dq
+        dq.append((ts_ns, price))
+        cutoff = ts_ns - self.span_ns
+        while len(dq) >= 2 and dq[1][0] <= cutoff:
+            self.last_evicted = dq.popleft()[1]
+        return dq[0][1]
+
+    def has_anchor(self, ts_ns: int) -> bool:
+        """True once at least one tick older than the cutoff exists."""
+        return bool(self.dq) and self.dq[0][0] <= ts_ns - self.span_ns
