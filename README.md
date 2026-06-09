@@ -226,6 +226,40 @@ leaderboard ranking, strategy EMA logic, equity simulator, and Textual widgets
 
 ---
 
+## Trading bot
+
+Entropy ships a terminal automatic trading bot that paper-trades the live feed on every tick.
+
+```bash
+# headless paper run (live crypto + sim equities)
+uv run python -m entropy.bot
+
+# with the TUI dashboard (colored risk banner, positions, P&L, trade log)
+uv run python -m entropy.bot --dashboard
+
+# pick a risk profile
+uv run python -m entropy.bot --risk aggressive
+```
+
+Risk profiles (`--risk`): **conservative** (green), **balanced** (yellow), **aggressive** (red).
+Each profile states exactly how much risk it takes (per-trade %, max positions, stop/target,
+total exposure, daily-loss kill-switch); the dashboard shows the active profile as an always-on
+colored banner, and changing it requires confirmation.
+
+> ⚠️  **Live trading is disabled by default.** Paper mode never touches real money. Enabling
+> live mode would place REAL orders with REAL money; you are solely responsible for all risk.
+> The bot will never enable or auto-trigger live trading on its own.
+
+Each launch writes a timestamped ledger under `runs/<mode>-<UTC>/`: `events.jsonl` (fills,
+rejects, risk changes, day rollovers — every record stamped with `mode`), `fills.csv`,
+`equity.csv` (the equity curve), and `meta.json`. Paper and live runs never share a directory.
+
+> **Note:** paper fills are *idealized* — each order fills instantly at the reference price ±
+> a fixed slippage, plus a flat fee. Real markets have latency, partial fills, and variable
+> spreads, so paper results are an optimistic upper bound, not a forecast of live performance.
+
+---
+
 ## License
 
 Apache-2.0

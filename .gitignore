@@ -8,3 +8,4 @@ data/
 lake/
 *.parquet
 .DS_Store
+runs/
