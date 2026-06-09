@@ -104,3 +104,30 @@ def test_kill_switch_halts_after_daily_loss():
     assert not d.approved
     assert "halt" in d.reason.lower()
     assert rm.halted
+
+
+def test_exit_allowed_even_when_halted():
+    # A kill-switch must block new RISK but still permit closing (de-risking) a position.
+    rm = RiskManager(make_custom(max_daily_loss_pct=5.0, max_total_exposure_pct=100.0))
+    p = Portfolio(1000.0)
+    p.open("SPY", PositionSide.LONG, 1.0, 100.0, 99.0, 101.0, 1, 0.0)
+    p.realized_pnl = -60.0  # -6% day → past the 5% limit
+    blocked = rm.evaluate(_sig(SignalAction.ENTER_LONG, "X"), p, mark_px=10.0, ts_ns=2)
+    assert not blocked.approved and "halt" in blocked.reason.lower()
+    exit_dec = rm.evaluate(_sig(SignalAction.EXIT, "SPY"), p, mark_px=95.0, ts_ns=3)
+    assert exit_dec.approved
+    assert exit_dec.order is not None
+    assert exit_dec.order.intent is OrderIntent.CLOSE
+
+
+def test_reset_day_clears_halt_and_resumes_trading():
+    rm = RiskManager(make_custom(max_daily_loss_pct=5.0, max_total_exposure_pct=100.0))
+    p = Portfolio(1000.0)
+    p.realized_pnl = -60.0
+    rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=10.0, ts_ns=1)  # trips the halt
+    assert rm.halted
+    p.reset_day()   # new trading day: baseline rolls forward
+    rm.reset_day()  # kill-switch cleared
+    assert not rm.halted
+    resumed = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=10.0, ts_ns=2)
+    assert resumed.approved  # trading resumes after rollover

@@ -9,7 +9,7 @@ from textual.containers import Vertical
 from ..config import BotConfig
 from ..runner import BotRunner
 from .confirm import ConfirmRiskScreen
-from .widgets import PnLPanel, PositionsTable, RiskBanner, TradeLog
+from .widgets import ModeBanner, PnLPanel, PositionsTable, RiskBanner, TradeLog
 
 _KEY_TO_PROFILE = {"1": "conservative", "2": "balanced", "3": "aggressive"}
 
@@ -30,12 +30,14 @@ class BotDashboard(App[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
+            yield ModeBanner(id="mode-banner")
             yield RiskBanner(id="risk-banner")
             yield PnLPanel(id="pnl")
             yield PositionsTable(id="positions")
             yield TradeLog(id="trades")
 
     def on_mount(self) -> None:
+        self.query_one(ModeBanner).set_mode(self.cfg.mode)
         self.query_one(RiskBanner).set_profile(self.runner.risk.profile)
         self.set_interval(1 / 10, self._sample)
         self._run_feeds()

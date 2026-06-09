@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import time
 
 from .config import BotConfig, LiveConfig
 from .execution.live import LIVE_WARNING
@@ -32,11 +33,13 @@ def main(argv: list[str] | None = None) -> None:
     if ns.mode == "live":
         print(LIVE_WARNING)
     cfg = build_config(ns)
+    # A fresh timestamped run dir per launch so paper and live ledgers never mix.
+    run_dir = f"runs/{ns.mode}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+    bot = BotRunner(cfg, run_dir=run_dir)
     if ns.dashboard:
         from .ui.app import BotDashboard
-        BotDashboard(cfg).run()
+        BotDashboard(cfg, runner=bot).run()
         return
-    bot = BotRunner(cfg)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(bot.run())
 

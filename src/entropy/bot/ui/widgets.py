@@ -8,6 +8,25 @@ from ..portfolio import PortfolioSnapshot
 from ..risk.profiles import BALANCED, RiskProfile
 
 
+class ModeBanner(Static):
+    """Always-on PAPER/LIVE indicator so simulated results are never mistaken for real money."""
+
+    mode: reactive[str] = reactive("paper")
+
+    def set_mode(self, mode: str) -> None:
+        self.mode = mode
+        if self.is_attached:
+            self.update(self.banner_text())
+
+    def banner_text(self) -> Text:
+        is_live = self.mode == "live"
+        label = "LIVE — REAL MONEY" if is_live else "PAPER (simulated, no real money)"
+        return Text(f"MODE: {label}", style=f"bold {'red' if is_live else 'green'}")
+
+    def on_mount(self) -> None:
+        self.update(self.banner_text())
+
+
 class RiskBanner(Static):
     """Always-on, colored risk-level banner."""
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 
 import msgspec
 from crypcodile.schema.records import Trade
@@ -12,7 +13,7 @@ from entropy.feeds.equities.feed import EquitySimFeed
 
 from .config import BotConfig, build_strategies
 from .execution.base import ExecutionAdapter
-from .execution.live import LiveExecutor
+from .execution.live import LiveExecutor, LiveTradingDisabledError
 from .execution.paper import PaperExecutor
 from .ledger import Ledger
 from .orders import Order, OrderIntent, OrderSide
@@ -47,11 +48,12 @@ class BotRunner:
         self.risk = RiskManager(config.profile())
         self.executor = _make_executor(config)
         self.strategies = build_strategies(config)
-        self.ledger = Ledger(run_dir)
+        self.ledger = Ledger(run_dir, mode=config.mode)
         self._sink = QueueSink()
         self._equity = EquitySimFeed(self._sink, seed=config.seed, ticks_per_sec=config.equity_tps)
         self.ticks = 0
         self._last_ts_ns = 0
+        self._utc_day = time.strftime("%Y-%m-%d", time.gmtime())
 
     # ---- synchronous hot path -------------------------------------------------
     def on_trade(self, symbol: str, price: float, amount: float, side: str, ts_ns: int) -> None:
@@ -72,7 +74,17 @@ class BotRunner:
                     self.ledger.record_reject(sig.symbol, decision.reason)
 
     def _execute(self, order: Order) -> None:
-        fill = self.executor.submit(order)
+        try:
+            fill = self.executor.submit(order)
+        except (LiveTradingDisabledError, NotImplementedError) as exc:
+            # Live execution is guarded / intentionally unimplemented. Record the block
+            # HONESTLY and do NOT fabricate a fill or mutate the portfolio — a blocked
+            # order must never look like a real one.
+            self.ledger.record_event("live_blocked", {
+                "symbol": order.symbol, "intent": order.intent.value,
+                "reason": str(exc).splitlines()[0],
+            })
+            return
         if order.intent is OrderIntent.OPEN:
             pos_side = PositionSide.LONG if order.side is OrderSide.BUY else PositionSide.SHORT
             stop_px, tp_px = self.risk.stop_tp_prices(pos_side, fill.price)
@@ -104,9 +116,20 @@ class BotRunner:
             if isinstance(r, Trade):
                 self.on_trade(r.symbol, r.price, r.amount, r.side.value, r.local_ts)
 
+    def _maybe_rollover_day(self) -> None:
+        """On a UTC date change, reset the daily baseline + clear the kill-switch so the
+        daily-loss limit is genuinely per-day (not cumulative-since-start)."""
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        if day != self._utc_day:
+            self._utc_day = day
+            self.portfolio.reset_day()
+            self.risk.reset_day()
+            self.ledger.record_event("day_rollover", {"day": day})
+
     async def _record_equity_loop(self, period_s: float = 1.0) -> None:
         while True:
             await asyncio.sleep(period_s)
+            self._maybe_rollover_day()
             self.ledger.record_equity(self.portfolio.snapshot(self._last_ts_ns))
 
     async def run(self) -> None:

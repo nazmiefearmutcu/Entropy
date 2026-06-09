@@ -19,14 +19,22 @@ class Ledger:
     fills and the equity curve. All writes are synchronous appends (call off the hot path
     for equity; fills are rare)."""
 
-    def __init__(self, run_dir: str) -> None:
+    def __init__(self, run_dir: str, mode: str = "paper") -> None:
         os.makedirs(run_dir, exist_ok=True)
         self.run_dir = run_dir
+        self.mode = mode  # "paper" | "live" — stamped on every record so runs are never confused
         self._events = os.path.join(run_dir, "events.jsonl")
         self._fills = os.path.join(run_dir, "fills.csv")
         self._equity = os.path.join(run_dir, "equity.csv")
         self._init_csv(self._fills, _FILL_HEADER)
         self._init_csv(self._equity, _EQUITY_HEADER)
+        self._write_meta()
+
+    def _write_meta(self) -> None:
+        meta_path = os.path.join(self.run_dir, "meta.json")
+        if not os.path.exists(meta_path):
+            with open(meta_path, "w") as fh:
+                json.dump({"mode": self.mode}, fh)
 
     @staticmethod
     def _init_csv(path: str, header: list[str]) -> None:
@@ -36,7 +44,7 @@ class Ledger:
 
     def record_event(self, kind: str, payload: dict[str, Any]) -> None:
         with open(self._events, "a") as fh:
-            fh.write(json.dumps({"kind": kind, **payload}) + "\n")
+            fh.write(json.dumps({"kind": kind, "mode": self.mode, **payload}) + "\n")
 
     def record_fill(self, fill: Fill, intent: OrderIntent) -> None:
         with open(self._fills, "a", newline="") as fh:

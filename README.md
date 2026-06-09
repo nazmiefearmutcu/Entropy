@@ -250,8 +250,13 @@ colored banner, and changing it requires confirmation.
 > live mode would place REAL orders with REAL money; you are solely responsible for all risk.
 > The bot will never enable or auto-trigger live trading on its own.
 
-Each run writes a ledger under `runs/`: `events.jsonl` (fills, rejects, risk changes),
-`fills.csv`, and `equity.csv` (the equity curve).
+Each launch writes a timestamped ledger under `runs/<mode>-<UTC>/`: `events.jsonl` (fills,
+rejects, risk changes, day rollovers — every record stamped with `mode`), `fills.csv`,
+`equity.csv` (the equity curve), and `meta.json`. Paper and live runs never share a directory.
+
+> **Note:** paper fills are *idealized* — each order fills instantly at the reference price ±
+> a fixed slippage, plus a flat fee. Real markets have latency, partial fills, and variable
+> spreads, so paper results are an optimistic upper bound, not a forecast of live performance.
 
 ---
 

@@ -26,6 +26,14 @@ class RiskManager:
     def set_profile(self, profile: RiskProfile) -> None:
         self.profile = profile
 
+    def reset_day(self) -> None:
+        """Clear the daily-loss kill-switch at the start of a new trading day.
+
+        The kill-switch latches within a day (a tripped limit stays tripped until the
+        day rolls over); the runner calls this on a UTC date change so the limit is
+        genuinely *daily* rather than cumulative-since-start."""
+        self.halted = False
+
     def _next_id(self) -> str:
         self._order_seq += 1
         return f"o{self._order_seq}"
@@ -44,15 +52,19 @@ class RiskManager:
 
     def evaluate(self, signal: Signal, portfolio: Portfolio,
                  mark_px: float, ts_ns: int) -> RiskDecision:
-        if self._kill_switch(portfolio):
-            return RiskDecision(False, None, "halted: daily loss limit reached")
-
         pos = portfolio.positions.get(signal.symbol)
+
+        # Risk-REDUCING exits are always allowed — even after the kill-switch halts new
+        # trading you must be able to close (de-risk) an open position. Only risk-
+        # INCREASING entries are gated by the daily-loss kill-switch below.
         if signal.action is SignalAction.EXIT:
             if pos is None:
                 return RiskDecision(False, None, "no open position to exit")
             close_ord = self._close_order(pos, mark_px, ts_ns, signal.strategy)
             return RiskDecision(True, close_ord, "exit")
+
+        if self._kill_switch(portfolio):
+            return RiskDecision(False, None, "halted: daily loss limit reached")
 
         if pos is not None:
             return RiskDecision(False, None, f"already in position for {signal.symbol}")
