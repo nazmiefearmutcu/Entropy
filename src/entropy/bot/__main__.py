@@ -31,7 +31,7 @@ def build_config(ns: argparse.Namespace) -> BotConfig:
 def main(argv: list[str] | None = None) -> None:
     ns = _parse_args(argv)
     if ns.mode == "live":
-        print(LIVE_WARNING)
+        print(LIVE_WARNING, flush=True)  # safety warning must surface even when stdout is piped
     cfg = build_config(ns)
     # A fresh timestamped run dir per launch so paper and live ledgers never mix.
     run_dir = f"runs/{ns.mode}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
