@@ -38,8 +38,10 @@ def _make_executor(cfg: BotConfig) -> ExecutionAdapter:
 
 
 class BotRunner:
-    def __init__(self, config: BotConfig, run_dir: str = "runs/latest") -> None:
+    def __init__(self, config: BotConfig, run_dir: str = "runs/latest",
+                 equity_record_period_s: float = 1.0) -> None:
         self.config = config
+        self._equity_record_period_s = equity_record_period_s
         self.engine = Engine()
         self.portfolio = Portfolio(config.starting_cash)
         self.risk = RiskManager(config.profile())
@@ -110,7 +112,7 @@ class BotRunner:
     async def run(self) -> None:
         tasks: list[asyncio.Task[None]] = [
             asyncio.create_task(self._drain()),
-            asyncio.create_task(self._record_equity_loop()),
+            asyncio.create_task(self._record_equity_loop(self._equity_record_period_s)),
         ]
         if self.config.enable_equities:
             tasks.append(asyncio.create_task(self._equity.run()))
