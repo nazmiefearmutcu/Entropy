@@ -92,27 +92,3 @@ Screen { background: $background; color: $foreground; layout: vertical; }
     color: $error;
 }
 
-/* Settings Confirmation Screen styling */
-#confirm-container {
-    width: 50;
-    height: auto;
-    background: $panel;
-    border: double $primary;
-    padding: 1 2;
-    align: center middle;
-}
-#confirm-message {
-    width: 1fr;
-    content-align: center middle;
-    text-align: center;
-    margin-bottom: 1;
-}
-#confirm-buttons {
-    layout: horizontal;
-    height: 3;
-    align: center middle;
-}
-#confirm-buttons Button {
-    margin: 0 1;
-}
-
