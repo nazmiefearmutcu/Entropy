@@ -50,11 +50,13 @@ class EventHistogram(Widget):
         w = self.size.width
         if not self._history:
             return Strip([Segment(" " * w)], w)
-        peak = max(self._history) or 1.0
+        peak = max([2000.0, *self._history])
         cur = self._history[-1]
         ratio = cur / peak
         label = f" {cur:>6.0f} Hz"
         bar = fill(ratio, max(0, w - len(label)))
-        color = "#f0c040" if ratio > 0.75 else "#26d626"
+        warning = self.app.theme_variables.get("warning", "#f0c040")
+        success = self.app.theme_variables.get("success", "#26d626")
+        color = warning if ratio > 0.75 else success
         return Strip([Segment(bar, Style(color=color)),
                       Segment(label, Style(color="#7a7a7a"))], w)

@@ -6,23 +6,31 @@ from rich.text import Text
 from textual.reactive import reactive
 from textual.widget import Widget
 
-# Window label colors, cycling so each group is visually distinct.
-_WIN_STYLE = {"30s": "#26d626", "1m": "#e6c200", "5m": "#39b0ff", "20m": "#ff7ab3"}
 
+def format_groups(groups: tuple[Any, ...], app: Any | None = None) -> Text:
+    """Render per-window ticker groups as 'WIN: SYM n  SYM n | WIN: ...'."""
+    if app is not None and hasattr(app, "theme_variables"):
+        success = app.theme_variables.get("success", "#26d626")
+        accent = app.theme_variables.get("accent", "#e6c200")
+        primary = app.theme_variables.get("primary", "#39b0ff")
+        secondary = app.theme_variables.get("secondary", "#ff7ab3")
+        foreground = app.theme_variables.get("foreground", "#c8c8c8")
+    else:
+        success = "#26d626"
+        accent = "#e6c200"
+        primary = "#39b0ff"
+        secondary = "#ff7ab3"
+        foreground = "#c8c8c8"
+    
+    win_style = {"30s": success, "1m": accent, "5m": primary, "20m": secondary}
 
-def format_groups(groups: tuple[Any, ...]) -> Text:
-    """Render per-window ticker groups as 'WIN: SYM n  SYM n | WIN: ...'.
-
-    `groups` is an EngineSnapshot.ticker tuple of objects with `.window` (str)
-    and `.entries` (tuple of (symbol, count)).
-    """
     out = Text(no_wrap=True, overflow="ellipsis")
     for gi, g in enumerate(groups):
         if gi:
             out.append("  ")
-        out.append(f"{g.window}: ", style=f"bold {_WIN_STYLE.get(g.window, '#c8c8c8')}")
+        out.append(f"{g.window}: ", style=f"bold {win_style.get(g.window, foreground)}")
         for sym, cnt in g.entries:
-            out.append(f"{sym} ", style="#c8c8c8")
+            out.append(f"{sym} ", style=foreground)
             out.append(f"{cnt} ", style="bold #ffffff")
     return out
 
@@ -36,4 +44,4 @@ class TickerStrip(Widget):
         self.refresh()
 
     def render(self) -> Text:
-        return format_groups(self.groups)
+        return format_groups(self.groups, self.app)

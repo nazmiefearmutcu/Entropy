@@ -13,6 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
+entropy = "entropy.__main__:main"
 entropy-bot = "entropy.bot.__main__:main"
 
 [dependency-groups]

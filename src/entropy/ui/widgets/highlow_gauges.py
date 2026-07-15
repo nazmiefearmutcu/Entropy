@@ -37,6 +37,10 @@ class HighLowGauges(Widget):
         nh, nl = self.nh_counts, self.nl_counts
         peak = max([1, *nh.values(), *nl.values()])
         half = max(4, (self.size.width - 8) // 2)
+        
+        success = self.app.theme_variables.get("success", "#26d626")
+        error = self.app.theme_variables.get("error", "#ff3b3b")
+        
         out = Text(no_wrap=True)
         for wi, w in enumerate(_WINDOWS):
             if wi:
@@ -44,7 +48,7 @@ class HighLowGauges(Widget):
             lows = bar(nl.get(w, 0), peak, half)
             highs = bar(nh.get(w, 0), peak, half)
             out.append(f"{w:>3} ", style="#7a7a7a")
-            out.append(f"{lows:>{half}}", style="#ff3b3b")  # right-aligned, grows leftward
+            out.append(f"{lows:>{half}}", style=error)  # right-aligned, grows leftward
             out.append("▏", style="#444444")
-            out.append(f"{highs:<{half}}", style="#26d626")  # left-aligned, grows rightward
+            out.append(f"{highs:<{half}}", style=success)  # left-aligned, grows rightward
         return out

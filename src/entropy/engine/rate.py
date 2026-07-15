@@ -5,28 +5,33 @@ from collections import deque
 
 
 class RateMeter:
-    """Sliding events/sec over window_s using 1-second integer buckets. O(1) add."""
+    """Sliding events/sec over window_s using a high-precision rolling queue of timestamps."""
 
-    __slots__ = ("window_s", "buckets", "total")
+    __slots__ = ("window_s", "window_ns", "timestamps")
 
     def __init__(self, window_s: int) -> None:
         self.window_s = window_s
-        self.buckets: deque[list[int]] = deque()  # [sec, count]
-        self.total = 0
+        self.window_ns = window_s * 1_000_000_000
+        self.timestamps: deque[int] = deque()
+
+    @property
+    def total(self) -> int:
+        return len(self.timestamps)
 
     def add(self, ts_ns: int, n: int = 1) -> None:
-        sec = ts_ns // 1_000_000_000
-        if self.buckets and self.buckets[-1][0] == sec:
-            self.buckets[-1][1] += n
-        else:
-            self.buckets.append([sec, n])
-        self.total += n
-        cutoff = sec - self.window_s
-        while self.buckets and self.buckets[0][0] < cutoff:
-            self.total -= self.buckets.popleft()[1]
+        for _ in range(n):
+            self.timestamps.append(ts_ns)
+        
+        # Evict timestamps older than window_ns
+        cutoff = ts_ns - self.window_ns
+        while self.timestamps and self.timestamps[0] < cutoff:
+            self.timestamps.popleft()
 
     def rate_per_s(self) -> float:
-        if not self.buckets:
+        if not self.timestamps:
             return 0.0
-        span = self.buckets[-1][0] - self.buckets[0][0] + 1
-        return self.total / span
+        
+        # Calculate time span in seconds
+        elapsed = (self.timestamps[-1] - self.timestamps[0]) / 1_000_000_000
+        span = elapsed + 1.0  # Add 1.0 to align with discrete bucket duration logic
+        return len(self.timestamps) / span

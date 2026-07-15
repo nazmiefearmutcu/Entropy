@@ -9,3 +9,9 @@ lake/
 *.parquet
 .DS_Store
 runs/
+# runtime artifacts
+entropy_console.log
+entropy_trades.csv
+.agents/
+.uv-cache/
+.uv_cache/

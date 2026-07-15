@@ -8,6 +8,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Static
+from textual.css.query import NoMatches
 
 from entropy.app import AppConfig
 from entropy.engine.candles import CandleAggregator
@@ -67,6 +68,12 @@ class EntropyApp(App[None]):
         self._snap_drops = 0
         self._error_text = "No errors."
 
+    def query_default(self, selector: str, expect_type: Any) -> Any:
+        try:
+            return self.get_screen("_default").query_one(selector, expect_type)
+        except Exception:
+            return self.query_one(selector, expect_type)
+
     def compose(self) -> ComposeResult:
         yield HeaderBar(id="header")
         with Horizontal(id="body"):
@@ -90,8 +97,20 @@ class EntropyApp(App[None]):
         yield StatusBar(id="status")
 
     def on_mount(self) -> None:
-        self.register_theme(ENTROPY_THEME)
-        self.theme = "entropy"
+        from entropy.bot.ledger import init_trade_csv
+        init_trade_csv(self.cfg.trade_csv_path)
+
+        from .theme import ALL_THEMES
+        for th in ALL_THEMES:
+            self.register_theme(th)
+        self.theme = self.cfg.theme
+        
+        # Apply initial settings
+        self.query_one("#price", PriceChart).chart_type = self.cfg.chart_type
+        self.query_one("#price2", PriceChart).chart_type = self.cfg.chart_type
+        self.query_one("#volume", VolumeChart).display = self.cfg.show_volume
+        self.query_one("#volume2", VolumeChart).display = self.cfg.show_volume
+
         for tid in ("new_lows", "session_highs"):
             t = self.query_one("#" + tid, DataTable)
             t.add_columns("Symbol", "Count", "Price", "%Chg")
@@ -108,50 +127,65 @@ class EntropyApp(App[None]):
             self.query_one("#header", HeaderBar).sources = "equities only"
 
     def sample_snapshot(self) -> None:
-        snap = self.engine.snapshot()
-        status = self.query_one("#status", StatusBar)
-        status.telemetry = format_telemetry(
-            raw_hz=snap.breadth.raw_hz, prev30s=snap.breadth.prev30s_rate,
-            snap_drops=self._snap_drops, spikes=self._spikes, accel=snap.breadth.accel,
-            dropped=self._sink.dropped,
-        )
-        status.sell_pct = snap.breadth.sell_pct
-        self.query_one("#ticker", TickerStrip).groups = snap.ticker
-        self.query_one("#event_hist", EventHistogram).raw_hz = snap.breadth.raw_hz
-        hist = self.query_one("#hist", HighLowGauges)
-        hist.nh_counts = snap.breadth.nh_counts
-        hist.nl_counts = snap.breadth.nl_counts
-        refresh_board(self.query_one("#new_lows", DataTable), snap.new_lows)
-        refresh_board(self.query_one("#session_highs", DataTable), snap.new_highs)
-        self._draw_chart("#price", "#volume", self._crypto_candles)   # BTC (live)
-        self._draw_chart("#price2", "#volume2", self._price_candles)  # SPY (sim)
-        self._update_header()
+        try:
+            snap = self.engine.snapshot()
+            status = self.query_default("#status", StatusBar)
+            status.telemetry = format_telemetry(
+                raw_hz=snap.breadth.raw_hz, prev30s=snap.breadth.prev30s_rate,
+                snap_drops=self._snap_drops, spikes=self._spikes, accel=snap.breadth.accel,
+                dropped=self._sink.dropped,
+            )
+            status.sell_pct = snap.breadth.sell_pct
+            self.query_default("#ticker", TickerStrip).groups = snap.ticker
+            self.query_default("#event_hist", EventHistogram).raw_hz = snap.breadth.raw_hz
+            hist = self.query_default("#hist", HighLowGauges)
+            hist.nh_counts = snap.breadth.nh_counts
+            hist.nl_counts = snap.breadth.nl_counts
+            refresh_board(self.query_default("#new_lows", DataTable), snap.new_lows, self)
+            refresh_board(self.query_default("#session_highs", DataTable), snap.new_highs, self)
+            self._draw_chart("#price", "#volume", self._crypto_candles)   # BTC (live)
+            self._draw_chart("#price2", "#volume2", self._price_candles)  # SPY (sim)
+            self._update_header()
+        except NoMatches:
+            pass
 
     def _draw_chart(self, price_id: str, vol_id: str, agg: CandleAggregator) -> None:
         bars = agg.bars()
-        self.query_one(price_id, PriceChart).candles = [
-            Candle(t=b.t, o=b.o, h=b.h, l=b.l, c=b.c) for b in bars
-        ]
-        self.query_one(vol_id, VolumeChart).bars = [(b.t, b.vol) for b in bars]
+        try:
+            self.query_default(price_id, PriceChart).candles = [
+                Candle(t=b.t, o=b.o, h=b.h, l=b.l, c=b.c) for b in bars
+            ]
+            self.query_default(vol_id, VolumeChart).bars = [(b.t, b.vol) for b in bars]
+        except NoMatches:
+            pass
 
     def _update_header(self) -> None:
-        header = self.query_one("#header", HeaderBar)
-        header.clock = time.strftime("%H:%M:%S")
-        parts = []
-        for sym in INDICES:
-            q = self.engine.quote(sym)   # always-on index quotes (too calm for boards)
-            if q is not None:
-                price, pct = q
-                parts.append(f"{sym} {price:.2f} ({pct:+.2f}%)")
-        header.quotes = "   ".join(parts)
+        try:
+            header = self.query_default("#header", HeaderBar)
+            header.clock = time.strftime("%H:%M:%S")
+            parts = []
+            for sym in INDICES:
+                q = self.engine.quote(sym)   # always-on index quotes (too calm for boards)
+                if q is not None:
+                    price, pct = q
+                    parts.append(f"{sym} {price:.2f} ({pct:+.2f}%)")
+            header.quotes = "   ".join(parts)
+        except NoMatches:
+            pass
 
     def _push_info(self, text: str, color: str = "white") -> None:
-        self.query_one("#console", AlgoConsole).push_info(text, color)
+        try:
+            self.query_default("#console", AlgoConsole).push_info(text, color)
+        except NoMatches:
+            pass
 
     def _push_events(self, events: list[StrategyEvent]) -> None:
-        console = self.query_one("#console", AlgoConsole)
-        for e in events:
-            console.push_event(e)
+        try:
+            console = self.query_default("#console", AlgoConsole)
+            for e in events:
+                console.push_event(e)
+        except NoMatches:
+            pass
 
     def _synth_spy_bars(self) -> list[Bar]:
         """Synthesize the strategy's warmup tail from the sim's current SPY price."""
@@ -215,9 +249,24 @@ class EntropyApp(App[None]):
         sevs = strat.on_price(r.symbol, r.price, r.local_ts)
         if not sevs:
             return
-        console = self.query_one("#console", AlgoConsole)
+
+        from entropy.bot.ledger import record_trade_open, record_trade_close
         for se in sevs:
-            console.push_event(se)
+            if se.kind is EventKind.OPEN_LONG:
+                record_trade_open(self.cfg.trade_csv_path, se.symbol, "LONG", se.price)
+            elif se.kind is EventKind.OPEN_SHORT:
+                record_trade_open(self.cfg.trade_csv_path, se.symbol, "SHORT", se.price)
+            elif se.kind is EventKind.CLOSE_LONG:
+                record_trade_close(self.cfg.trade_csv_path, se.symbol, "LONG", se.price)
+            elif se.kind is EventKind.CLOSE_SHORT:
+                record_trade_close(self.cfg.trade_csv_path, se.symbol, "SHORT", se.price)
+
+        try:
+            console = self.query_default("#console", AlgoConsole)
+            for se in sevs:
+                console.push_event(se)
+        except NoMatches:
+            pass
 
     def _route_candle(self, r: Trade) -> None:
         if r.symbol == self.cfg.strategy_symbol:
@@ -233,14 +282,20 @@ class EntropyApp(App[None]):
     async def _run_crypto_feed(self) -> None:
         # Reconnect noise lives in the console layer (keeps the engine pure).
         self._feed_status("connecting…")
-        header = self.query_one("#header", HeaderBar)
+        try:
+            header = self.query_default("#header", HeaderBar)
+        except Exception:
+            header = None
         try:
             task = await start_feed(self._sink)
-            header.sources = "coinbase ●  binance ●"   # feed live
+            if header is not None:
+                header.sources = "coinbase ●  binance ●"   # feed live
             await task
-            header.sources = "coinbase ○  binance ○"   # task ended cleanly
+            if header is not None:
+                header.sources = "coinbase ○  binance ○"   # task ended cleanly
         except Exception as exc:
-            header.sources = "coinbase ○  binance ○"   # disconnected
+            if header is not None:
+                header.sources = "coinbase ○  binance ○"   # disconnected
             self._feed_status(f"disconnect: {exc}", "red")
             self._error_text = f"crypto feed: {exc}"
 

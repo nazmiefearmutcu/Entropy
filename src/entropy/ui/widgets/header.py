@@ -12,9 +12,13 @@ class HeaderBar(Widget):
     def watch_clock(self, *_: object) -> None: self.refresh()
     def watch_quotes(self, *_: object) -> None: self.refresh()
     def render(self) -> Text:
+        accent = self.app.theme_variables.get("accent", "#e6c200")
+        foreground = self.app.theme_variables.get("foreground", "#c8c8c8")
+        success = self.app.theme_variables.get("success", "#26d626")
+        
         t = Text()
-        t.append("Entropy  ", style="bold #e6c200")
-        t.append(self.clock + "   ", style="#c8c8c8")
-        t.append(self.sources + "\n", style="#26d626")
-        t.append(self.quotes, style="#c8c8c8")
+        t.append("Entropy  ", style=f"bold {accent}")
+        t.append(self.clock + "   ", style=foreground)
+        t.append(self.sources + "\n", style=success)
+        t.append(self.quotes, style=foreground)
         return t

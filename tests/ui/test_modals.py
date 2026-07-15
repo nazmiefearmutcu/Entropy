@@ -12,3 +12,13 @@ async def test_help_modal_opens_and_closes():
         assert app.screen.id == "help"
         await pilot.press("escape")
         assert app.screen.id != "help"
+
+
+@pytest.mark.asyncio
+async def test_settings_modal_opens_and_closes():
+    app = EntropyApp(AppConfig(enable_crypto=False))
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        assert app.screen.id == "settings"
+        await pilot.press("escape")
+        assert app.screen.id != "settings"

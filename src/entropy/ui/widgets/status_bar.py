@@ -39,15 +39,20 @@ class StatusBar(Widget):
     def render(self) -> Text:
         sp = self.sell_pct
         bp = 100.0 - sp
+        
+        success = self.app.theme_variables.get("success", "#26d626")
+        error = self.app.theme_variables.get("error", "#ff3b3b")
+        foreground = self.app.theme_variables.get("foreground", "#c8c8c8")
+        
         # dual split bar: red sell fill grows left, green buy fill grows right
         sell_bar = fill_cells(sp / 100.0, _BAR_HALF)[::-1]
         buy_bar = fill_cells(bp / 100.0, _BAR_HALF)
         t = Text()
-        t.append(f"S {sp:.0f}% ", style="bold #ff3b3b")
-        t.append(sell_bar, style="#ff3b3b")
+        t.append(f"S {sp:.0f}% ", style=f"bold {error}")
+        t.append(sell_bar, style=error)
         t.append("▏", style="#444444")
-        t.append(buy_bar, style="#26d626")
-        t.append(f" B {bp:.0f}%   ", style="bold #26d626")
-        t.append(self.telemetry + "   ", style="#c8c8c8")
+        t.append(buy_bar, style=success)
+        t.append(f" B {bp:.0f}%   ", style=f"bold {success}")
+        t.append(self.telemetry + "   ", style=foreground)
         t.append(self.hints, style="#7a7a7a")
         return t

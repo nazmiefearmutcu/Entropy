@@ -17,9 +17,15 @@ class Candle:
 class PriceChart(PlotextPlot):
     # always_update so a same-length list reassignment each frame still repaints.
     candles: reactive[list[Candle]] = reactive(list, always_update=True)
+    chart_type: reactive[str] = reactive("candlestick")
+    
     def watch_candles(self, _old: list[Candle], new: list[Candle]) -> None:
         if new:
             self.replot()
+            
+    def watch_chart_type(self, _old: str, new: str) -> None:
+        self.replot()
+        
     def replot(self) -> None:
         import datetime as dt
         self.plt.clear_data()
@@ -28,7 +34,11 @@ class PriceChart(PlotextPlot):
         ds = [dt.datetime.fromtimestamp(c.t / 1e9).strftime("%H:%M:%S") for c in self.candles]
         data = {"Open": [c.o for c in self.candles], "Close": [c.c for c in self.candles],
                 "High": [c.h for c in self.candles], "Low": [c.l for c in self.candles]}
-        self.plt.candlestick(ds, data)
+        
+        if self.chart_type == "line":
+            self.plt.plot(ds, data["Close"])
+        else:
+            self.plt.candlestick(ds, data)
         self.refresh()
 
 class VolumeChart(PlotextPlot):
