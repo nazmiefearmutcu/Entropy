@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import msgspec
 from crypcodile.schema.records import Trade
 from textual import work
 from textual.app import App, ComposeResult
@@ -11,8 +12,10 @@ from textual.widgets import DataTable, Static
 from textual.css.query import NoMatches
 
 from entropy.app import AppConfig
+from entropy.config import EngineConfig
 from entropy.engine.candles import CandleAggregator
 from entropy.engine.engine import Engine
+from entropy.engine.timeframe import get_timeframe
 from entropy.feeds.bus import QueueSink
 from entropy.feeds.crypto import start_feed
 from entropy.feeds.equities.feed import EquitySimFeed
@@ -31,8 +34,6 @@ from .widgets.modals import ErrorScreen, HelpScreen, SettingsScreen
 from .widgets.status_bar import StatusBar, format_telemetry
 from .widgets.ticker_strip import TickerStrip
 
-_S = 1_000_000_000
-
 
 class EntropyApp(App[None]):
     CSS_PATH = "entropy.tcss"
@@ -49,14 +50,21 @@ class EntropyApp(App[None]):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.cfg = config or AppConfig()
-        from entropy.engine.timeframe import get_timeframe
-        from entropy.config import EngineConfig
         self._tf = get_timeframe(self.cfg.timeframe)
         self._candle_interval_ns = self._tf.bar_ns
         self._warmup_bars = self._tf.warmup_bars
         self._warmup_dt_ns = self._tf.bar_ns
         self._sink = QueueSink()
-        self.engine = Engine(EngineConfig.from_timeframe(self._tf))
+        self.engine = Engine(
+            msgspec.structs.replace(
+                self.cfg.engine,
+                windows_ns=EngineConfig.from_timeframe(self._tf).windows_ns,
+                window_labels=self._tf.window_labels,
+                momentum_horizon_s=self._tf.momentum_horizon_s,
+                breadth_window_s=self._tf.breadth_window_s,
+                momentum_cooldown_ns=self._tf.momentum_cooldown_ns,
+            )
+        )
         self.strategy = Strategy(StrategyConfig(symbol=self.cfg.strategy_symbol))
         # One Strategy per traded symbol: SPY (sim, clean fees) + BTC (real crypto, ~1bp).
         self.crypto_strategy = Strategy(
