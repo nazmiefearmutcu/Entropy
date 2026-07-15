@@ -9,7 +9,7 @@ _DAY = 24 * _HOUR
 
 
 class TimeframeSpec(msgspec.Struct, frozen=True):
-    """All timeframe-derived engine parameters, keyed by a timeframe name."""
+    """Timeframe-derived engine parameters for a single timeframe."""
 
     name: str
     bar_ns: int
@@ -42,11 +42,11 @@ def _spec(
 
 
 TIMEFRAMES: dict[str, TimeframeSpec] = {
-    "1m": _spec("1m", _MIN, ("1m", "5m", "15m"), (_MIN, 5 * _MIN, 15 * _MIN), 30.0, 60, 30.0),
-    "5m": _spec("5m", 5 * _MIN, ("5m", "15m", "1h"), (5 * _MIN, 15 * _MIN, _HOUR), 150.0, 300, 150.0),
-    "15m": _spec("15m", 15 * _MIN, ("15m", "1h", "4h"), (15 * _MIN, _HOUR, 4 * _HOUR), 450.0, 900, 450.0),
-    "1h": _spec("1h", _HOUR, ("1h", "4h", "1d"), (_HOUR, 4 * _HOUR, _DAY), 1800.0, 3600, 1800.0),
-    "4h": _spec("4h", 4 * _HOUR, ("4h", "12h", "1d"), (4 * _HOUR, 12 * _HOUR, _DAY), 7200.0, 14400, 7200.0),
+    "1m": _spec("1m", bar_ns=_MIN, labels=("1m", "5m", "15m"), spans=(_MIN, 5 * _MIN, 15 * _MIN), horizon_s=30.0, breadth_s=60, cooldown_s=30.0),
+    "5m": _spec("5m", bar_ns=5 * _MIN, labels=("5m", "15m", "1h"), spans=(5 * _MIN, 15 * _MIN, _HOUR), horizon_s=150.0, breadth_s=300, cooldown_s=150.0),
+    "15m": _spec("15m", bar_ns=15 * _MIN, labels=("15m", "1h", "4h"), spans=(15 * _MIN, _HOUR, 4 * _HOUR), horizon_s=450.0, breadth_s=900, cooldown_s=450.0),
+    "1h": _spec("1h", bar_ns=_HOUR, labels=("1h", "4h", "1d"), spans=(_HOUR, 4 * _HOUR, _DAY), horizon_s=1800.0, breadth_s=3600, cooldown_s=1800.0),
+    "4h": _spec("4h", bar_ns=4 * _HOUR, labels=("4h", "12h", "1d"), spans=(4 * _HOUR, 12 * _HOUR, _DAY), horizon_s=7200.0, breadth_s=14400, cooldown_s=7200.0),
 }
 
 DEFAULT_TIMEFRAME = "15m"
