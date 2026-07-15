@@ -2,6 +2,7 @@ import pytest
 from textual.widgets import Select, Switch, Input
 
 from entropy.app import AppConfig
+from entropy.config import EngineConfig
 from entropy.ui.app import EntropyApp
 from entropy.ui.widgets.modals import SettingsScreen
 from entropy.ui.widgets.charts import PriceChart, VolumeChart
@@ -136,5 +137,62 @@ async def test_unchanged_timeframe_keeps_same_engine_object():
         assert app.engine is engine_before
         assert app._price_candles is price_agg_before
         assert app.engine.cfg.snapdrop_pct == 0.25
+
+        await pilot.press("q")
+
+
+@pytest.mark.asyncio
+async def test_combined_timeframe_and_symbol_change_warms_once(monkeypatch):
+    app = EntropyApp(AppConfig(enable_crypto=False))
+    async with app.run_test(size=(120, 60)):
+        calls = {"n": 0}
+        orig = app._warmup_strategies
+        def counting() -> None:
+            calls["n"] += 1
+            orig()
+        monkeypatch.setattr(app, "_warmup_strategies", counting)
+        app._apply_settings(
+            theme="entropy", chart_type="candlestick", show_volume=True,
+            timeframe="1h", enable_equities=True, enable_crypto=False, equity_tps=4000,
+            strategy_symbol="QQQ", crypto_strategy_symbol=app.cfg.crypto_strategy_symbol,
+            spike_pct=0.40, snapdrop_pct=0.40,
+        )
+        assert app.cfg.timeframe == "1h"
+        assert app.strategy.cfg.symbol == "QQQ"
+        assert calls["n"] == 1  # single warmup despite timeframe AND symbol both changing
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_preserves_non_form_engine_fields():
+    """A timeframe change overlays the tf-derived windows/scalars + form
+    spike/snapdrop onto the EXISTING engine config; non-form fields that the
+    Settings form never surfaces (upmove/downmove/leaderboard_k/accel_eps)
+    must survive untouched rather than reset to their bare defaults."""
+    custom_engine = EngineConfig(
+        upmove_pct=0.99, downmove_pct=0.88, leaderboard_k=7, accel_eps=0.42,
+    )
+    app = EntropyApp(AppConfig(enable_crypto=False, engine=custom_engine))
+    async with app.run_test(size=(120, 60)) as pilot:
+        assert app.cfg.engine.leaderboard_k == 7
+
+        await pilot.press("s")
+        settings_screen = app.screen
+        settings_screen.query_one("#set-timeframe", Select).value = "1h"
+        settings_screen.query_one("#set-spike", Input).value = "0.5"
+        await pilot.pause()
+        await pilot.click("#btn-save")
+        await pilot.pause()
+
+        eng = app.cfg.engine
+        # Form + timeframe-derived fields updated...
+        assert eng.spike_pct == 0.5
+        assert eng.window_labels == ("1h", "4h", "1d")
+        # ...but the non-form fields were preserved, not reset to defaults.
+        assert eng.upmove_pct == 0.99
+        assert eng.downmove_pct == 0.88
+        assert eng.leaderboard_k == 7
+        assert eng.accel_eps == 0.42
+        # The live engine object carries the same preserved config.
+        assert app.engine.cfg.leaderboard_k == 7
 
         await pilot.press("q")

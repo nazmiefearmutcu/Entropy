@@ -6,6 +6,8 @@ from textual.screen import ModalScreen
 from textual.containers import Vertical, Horizontal
 from textual.widgets import Static, Label, Select, Switch, Input, Button
 
+from entropy.engine.timeframe import TIMEFRAMES
+
 _HELP = """Entropy — keys:
   s  Settings    ?/h  Help    e  Errors    q  Quit
 Scanner: new highs/lows over 3 rolling windows + session (timeframe-selectable); spikes & snap-drops.
@@ -34,7 +36,6 @@ class SettingsScreen(ModalScreen[None]):
         self._saving = False
 
     def compose(self) -> ComposeResult:
-        from entropy.engine.timeframe import TIMEFRAMES
         cfg = self.app.cfg  # type: ignore
         theme_options = [
             ("Entropy (Default)", "entropy"), ("Dracula", "dracula"),

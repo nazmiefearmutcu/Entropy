@@ -328,8 +328,17 @@ class EntropyApp(App[None]):
     ) -> None:
         tf_changed = timeframe != self.cfg.timeframe
         spec = get_timeframe(timeframe)
+        # Overlay timeframe-derived windows/scalars + form spike/snapdrop onto the existing
+        # engine config so non-form fields (upmove/downmove/leaderboard_k/accel_eps) are preserved.
         new_engine_cfg = msgspec.structs.replace(
-            EngineConfig.from_timeframe(spec), spike_pct=spike_pct, snapdrop_pct=snapdrop_pct,
+            self.cfg.engine,
+            windows_ns=EngineConfig.from_timeframe(spec).windows_ns,
+            window_labels=spec.window_labels,
+            momentum_horizon_s=spec.momentum_horizon_s,
+            breadth_window_s=spec.breadth_window_s,
+            momentum_cooldown_ns=spec.momentum_cooldown_ns,
+            spike_pct=spike_pct,
+            snapdrop_pct=snapdrop_pct,
         )
         self.cfg = msgspec.structs.replace(
             self.cfg, theme=theme, chart_type=chart_type, show_volume=show_volume,
@@ -345,6 +354,15 @@ class EntropyApp(App[None]):
         if self._equity is not None:
             self._equity.tps = equity_tps
 
+        # Rebuild strategies for changed symbols FIRST (no warmup yet) so the timeframe-change
+        # warmup below runs exactly once against the new strategy objects.
+        strat_symbol_changed = self.strategy.cfg.symbol != strategy_symbol
+        crypto_symbol_changed = self.crypto_strategy.cfg.symbol != crypto_strategy_symbol
+        if strat_symbol_changed:
+            self.strategy = Strategy(StrategyConfig(symbol=strategy_symbol))
+        if crypto_symbol_changed:
+            self.crypto_strategy = Strategy(StrategyConfig(symbol=crypto_strategy_symbol, fee_bps=1.0))
+
         if tf_changed:
             self._tf = spec
             self.engine = Engine(new_engine_cfg)
@@ -354,13 +372,11 @@ class EntropyApp(App[None]):
             self._price_candles = CandleAggregator(spec.bar_ns)
             self._crypto_candles = CandleAggregator(spec.bar_ns)
             self.query_default("#hist", HighLowGauges).window_labels = spec.window_labels
-            self._warmup_strategies()
+            self._warmup_strategies()  # warms equity + (if enabled) crypto once, with new symbols
         else:
             self.engine.cfg = new_engine_cfg
-
-        if self.strategy.cfg.symbol != strategy_symbol:
-            self.strategy = Strategy(StrategyConfig(symbol=strategy_symbol))
-            self._warmup_strategies()
-        if self.crypto_strategy.cfg.symbol != crypto_strategy_symbol:
-            self.crypto_strategy = Strategy(StrategyConfig(symbol=crypto_strategy_symbol, fee_bps=1.0))
-            self._warmup_crypto()
+            if strat_symbol_changed:
+                self._push_events(self.strategy.warmup(self._synth_spy_bars()))
+                self._push_info(f"watching [{strategy_symbol}]")
+            if crypto_symbol_changed:
+                self._warmup_crypto()
