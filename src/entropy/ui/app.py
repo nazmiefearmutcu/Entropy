@@ -32,9 +32,6 @@ from .widgets.status_bar import StatusBar, format_telemetry
 from .widgets.ticker_strip import TickerStrip
 
 _S = 1_000_000_000
-_CANDLE_INTERVAL_NS = _S  # 1s rolling candles for the live charts
-_WARMUP_BARS = 24  # matches the GIF's "warmup: 24 bars" line
-_WARMUP_DT_NS = 60 * _S  # 1-minute synthetic warmup cadence
 
 
 class EntropyApp(App[None]):
@@ -52,8 +49,14 @@ class EntropyApp(App[None]):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.cfg = config or AppConfig()
+        from entropy.engine.timeframe import get_timeframe
+        from entropy.config import EngineConfig
+        self._tf = get_timeframe(self.cfg.timeframe)
+        self._candle_interval_ns = self._tf.bar_ns
+        self._warmup_bars = self._tf.warmup_bars
+        self._warmup_dt_ns = self._tf.bar_ns
         self._sink = QueueSink()
-        self.engine = Engine(self.cfg.engine)
+        self.engine = Engine(EngineConfig.from_timeframe(self._tf))
         self.strategy = Strategy(StrategyConfig(symbol=self.cfg.strategy_symbol))
         # One Strategy per traded symbol: SPY (sim, clean fees) + BTC (real crypto, ~1bp).
         self.crypto_strategy = Strategy(
@@ -62,8 +65,8 @@ class EntropyApp(App[None]):
         self._equity = EquitySimFeed(
             self._sink, seed=self.cfg.seed, ticks_per_sec=self.cfg.equity_tps
         )
-        self._price_candles = CandleAggregator(_CANDLE_INTERVAL_NS)   # SPY (sim)
-        self._crypto_candles = CandleAggregator(_CANDLE_INTERVAL_NS)  # BTC (live crypto)
+        self._price_candles = CandleAggregator(self._candle_interval_ns)   # SPY (sim)
+        self._crypto_candles = CandleAggregator(self._candle_interval_ns)  # BTC (live crypto)
         self._spikes = 0
         self._snap_drops = 0
         self._error_text = "No errors."
@@ -194,8 +197,8 @@ class EntropyApp(App[None]):
         px = rt.px if rt is not None else 100.0
         now = self._equity.clock_ns()
         return [
-            Bar(ts_ns=now - (_WARMUP_BARS - 1 - i) * _WARMUP_DT_NS, close=px)
-            for i in range(_WARMUP_BARS)
+            Bar(ts_ns=now - (self._warmup_bars - 1 - i) * self._warmup_dt_ns, close=px)
+            for i in range(self._warmup_bars)
         ]
 
     def _warmup_strategies(self) -> None:

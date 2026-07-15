@@ -18,4 +18,5 @@ class AppConfig(msgspec.Struct, frozen=True):
     risk_profile: str = "medium"
     console_log_path: str = "entropy_console.log"
     trade_csv_path: str = "entropy_trades.csv"
+    timeframe: str = "15m"
     engine: EngineConfig = msgspec.field(default_factory=EngineConfig)
