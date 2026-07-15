@@ -10,7 +10,7 @@ from .events import DownMove, Event, NewHigh, NewLow, SnapDrop, Spike, UpMove, W
 from .leaderboard import LeaderRow
 from .windows import MomentumHorizon, MonotonicExtreme, SessionExtreme
 
-_WIN_ORDER = (WindowName.S30, WindowName.M1, WindowName.M5, WindowName.M20)
+_WIN_ORDER = (WindowName.W0, WindowName.W1, WindowName.W2)
 
 
 class _Tape:
@@ -27,9 +27,10 @@ class _Tape:
         self.last_price = 0.0
         self.nh_count = 0
         self.nl_count = 0
-        # cumulative new-high / new-low event counts per rolling window (indexed by _WIN_ORDER)
-        self.nh_by_win = [0, 0, 0, 0]
-        self.nl_by_win = [0, 0, 0, 0]
+        from collections import deque
+        # rolling deques of timestamps for new-high / new-low events per window (indexed by _WIN_ORDER)
+        self.nh_by_win = [deque() for _ in range(3)]
+        self.nl_by_win = [deque() for _ in range(3)]
         self.last_mom_pct = 0.0
         self._cooldown: dict[str, int] = {}
 
@@ -101,7 +102,7 @@ class Engine:
                     NewHigh(symbol=symbol, ts_ns=ts, price=price, window=w, prev_extreme=prior)
                 )
                 t.nh_count += 1
-                t.nh_by_win[i] += 1
+                t.nh_by_win[i].append(ts)
         for i, (w, me) in enumerate(zip(_WIN_ORDER, t.minw, strict=False)):
             me.evict(ts)            # evict BEFORE peek (the evict inside step() is then a no-op)
             prior = me.peek()
@@ -110,7 +111,7 @@ class Engine:
                     NewLow(symbol=symbol, ts_ns=ts, price=price, window=w, prev_extreme=prior)
                 )
                 t.nl_count += 1
-                t.nl_by_win[i] += 1
+                t.nl_by_win[i].append(ts)
         sh, sl = t.session.step(price)
         if sh:
             events.append(NewHigh(symbol=symbol, ts_ns=ts, price=price, window=WindowName.SESSION))
@@ -171,23 +172,38 @@ class Engine:
         nl_counts: dict[str, int] = {}
         ticker: list[TickerGroup] = []
         tk = 6  # symbols shown per window in the strip
+        last_ts = max((t.last_ts for t in self._tapes.values()), default=0)
+        
         for i, w in enumerate(_WIN_ORDER):
-            nh_counts[w.value] = sum(tp.nh_by_win[i] for _, tp in items)
-            nl_counts[w.value] = sum(tp.nl_by_win[i] for _, tp in items)
+            dur = self.cfg.windows_ns[w.value]
+            cutoff = last_ts - dur
+            
+            # Evict stale event timestamps for this window
+            for _, tp in items:
+                dq_h = tp.nh_by_win[i]
+                while dq_h and dq_h[0] < cutoff:
+                    dq_h.popleft()
+                dq_l = tp.nl_by_win[i]
+                while dq_l and dq_l[0] < cutoff:
+                    dq_l.popleft()
+            
+            nh_counts[self.cfg.window_labels[i]] = sum(len(tp.nh_by_win[i]) for _, tp in items)
+            nl_counts[self.cfg.window_labels[i]] = sum(len(tp.nl_by_win[i]) for _, tp in items)
+            
             top_syms = heapq.nlargest(
-                tk, items, key=lambda kv: kv[1].nh_by_win[i] + kv[1].nl_by_win[i]
+                tk, items, key=lambda kv: len(kv[1].nh_by_win[i]) + len(kv[1].nl_by_win[i])
             )
             entries = tuple(
-                (s, tp.nh_by_win[i] + tp.nl_by_win[i])
+                (s, len(tp.nh_by_win[i]) + len(tp.nl_by_win[i]))
                 for s, tp in top_syms
-                if tp.nh_by_win[i] + tp.nl_by_win[i] > 0
+                if len(tp.nh_by_win[i]) + len(tp.nl_by_win[i]) > 0
             )
-            ticker.append(TickerGroup(window=w.value, entries=entries))
+            ticker.append(TickerGroup(window=self.cfg.window_labels[i], entries=entries))
+            
         breadth = BreadthSnapshot(
             sell_pct=self.breadth.sell_pct(), buy_pct=self.breadth.buy_pct(),
             raw_hz=self.breadth.raw_hz(), prev30s_rate=rate, accel=accel,
             nh_counts=nh_counts, nl_counts=nl_counts)
-        last_ts = max((t.last_ts for t in self._tapes.values()), default=0)
         return EngineSnapshot(
             ts_ns=last_ts, breadth=breadth,
             top_movers=mk(top, lambda tp: tp.nh_count + tp.nl_count),
@@ -211,6 +227,7 @@ class Engine:
             t.session = SessionExtreme()
             t.nh_count = 0
             t.nl_count = 0
-            t.nh_by_win = [0, 0, 0, 0]
-            t.nl_by_win = [0, 0, 0, 0]
+            from collections import deque
+            t.nh_by_win = [deque() for _ in range(3)]
+            t.nl_by_win = [deque() for _ in range(3)]
         self._seen.clear()
