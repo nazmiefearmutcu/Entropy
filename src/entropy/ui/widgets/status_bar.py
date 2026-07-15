@@ -16,12 +16,12 @@ _BAR_HALF = 8   # cells per side of the sell/buy split bar
 
 
 def format_telemetry(
-    *, raw_hz: float, prev30s: float, snap_drops: int, spikes: int,
+    *, raw_hz: float, prev: float, snap_drops: int, spikes: int,
     accel: str, dropped: int
 ) -> str:
     drop = f"  dropped: {dropped}" if dropped else ""
     label = _ACCEL_LABEL.get(accel, accel)
-    return (f"raw: {raw_hz:.0f} Hz   prev30s: {prev30s:.2f}/s   "
+    return (f"raw: {raw_hz:.0f} Hz   prev: {prev:.2f}/s   "
             f"snap-drops: {snap_drops}   spikes: {spikes}   {label}{drop}")
 
 

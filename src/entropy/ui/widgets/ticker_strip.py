@@ -13,22 +13,21 @@ def format_groups(groups: tuple[Any, ...], app: Any | None = None) -> Text:
         success = app.theme_variables.get("success", "#26d626")
         accent = app.theme_variables.get("accent", "#e6c200")
         primary = app.theme_variables.get("primary", "#39b0ff")
-        secondary = app.theme_variables.get("secondary", "#ff7ab3")
         foreground = app.theme_variables.get("foreground", "#c8c8c8")
     else:
         success = "#26d626"
         accent = "#e6c200"
         primary = "#39b0ff"
-        secondary = "#ff7ab3"
         foreground = "#c8c8c8"
     
-    win_style = {"30s": success, "1m": accent, "5m": primary, "20m": secondary}
+    pos_styles = [success, accent, primary]
 
     out = Text(no_wrap=True, overflow="ellipsis")
     for gi, g in enumerate(groups):
         if gi:
             out.append("  ")
-        out.append(f"{g.window}: ", style=f"bold {win_style.get(g.window, foreground)}")
+        color = pos_styles[gi] if gi < len(pos_styles) else foreground
+        out.append(f"{g.window}: ", style=f"bold {color}")
         for sym, cnt in g.entries:
             out.append(f"{sym} ", style=foreground)
             out.append(f"{cnt} ", style="bold #ffffff")
@@ -36,7 +35,7 @@ def format_groups(groups: tuple[Any, ...], app: Any | None = None) -> Text:
 
 
 class TickerStrip(Widget):
-    """The '30s: GWW 15  APP 13 | 1m: ASML 18 ...' rolling-window activity strip."""
+    """The 'WIN: SYM n  SYM n | WIN: ...' rolling-window activity strip."""
 
     groups: reactive[tuple[Any, ...]] = reactive(())
 

@@ -4,7 +4,6 @@ from rich.text import Text
 from textual.reactive import reactive
 from textual.widget import Widget
 
-_WINDOWS = ("30s", "1m", "5m", "20m")
 _BLOCK = "█"
 
 
@@ -19,18 +18,22 @@ def bar(value: int, maxval: int, width: int) -> str:
 class HighLowGauges(Widget):
     """Dual per-window Lows (red) vs Highs (green) bars, mirrored around a center.
 
-    One line per rolling window:  ``20m  <red lows◄| ▏ |►green highs>``.
+    One line per rolling window:  ``<label>  <red lows◄| ▏ |►green highs>``.
     Bars are normalized to the largest count across both sides and all windows
     so the busiest window fills the available half-width.
     """
 
     nh_counts: reactive[dict[str, int]] = reactive(dict)
     nl_counts: reactive[dict[str, int]] = reactive(dict)
+    window_labels: reactive[tuple[str, ...]] = reactive(("15m", "1h", "4h"))
 
     def watch_nh_counts(self, _o: dict[str, int], _n: dict[str, int]) -> None:
         self.refresh()
 
     def watch_nl_counts(self, _o: dict[str, int], _n: dict[str, int]) -> None:
+        self.refresh()
+
+    def watch_window_labels(self, _o: tuple[str, ...], _n: tuple[str, ...]) -> None:
         self.refresh()
 
     def render(self) -> Text:
@@ -42,7 +45,7 @@ class HighLowGauges(Widget):
         error = self.app.theme_variables.get("error", "#ff3b3b")
         
         out = Text(no_wrap=True)
-        for wi, w in enumerate(_WINDOWS):
+        for wi, w in enumerate(self.window_labels):
             if wi:
                 out.append("\n")
             lows = bar(nl.get(w, 0), peak, half)

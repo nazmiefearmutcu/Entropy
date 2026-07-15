@@ -121,6 +121,7 @@ class EntropyApp(App[None]):
         self.query_one("#price2", PriceChart).chart_type = self.cfg.chart_type
         self.query_one("#volume", VolumeChart).display = self.cfg.show_volume
         self.query_one("#volume2", VolumeChart).display = self.cfg.show_volume
+        self.query_one("#hist", HighLowGauges).window_labels = self.engine.cfg.window_labels
 
         for tid in ("new_lows", "session_highs"):
             t = self.query_one("#" + tid, DataTable)
@@ -142,7 +143,7 @@ class EntropyApp(App[None]):
             snap = self.engine.snapshot()
             status = self.query_default("#status", StatusBar)
             status.telemetry = format_telemetry(
-                raw_hz=snap.breadth.raw_hz, prev30s=snap.breadth.prev30s_rate,
+                raw_hz=snap.breadth.raw_hz, prev=snap.breadth.prev30s_rate,
                 snap_drops=self._snap_drops, spikes=self._spikes, accel=snap.breadth.accel,
                 dropped=self._sink.dropped,
             )

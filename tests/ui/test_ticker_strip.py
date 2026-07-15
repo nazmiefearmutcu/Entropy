@@ -5,12 +5,12 @@ from entropy.ui.widgets.ticker_strip import format_groups
 
 def test_format_groups_renders_window_and_symbols():
     groups = (
-        TickerGroup(window="30s", entries=(("GWW", 15), ("APP", 13))),
-        TickerGroup(window="1m", entries=(("ASML", 18),)),
+        TickerGroup(window="15m", entries=(("GWW", 15), ("APP", 13))),
+        TickerGroup(window="1h", entries=(("ASML", 18),)),
     )
     text = format_groups(groups).plain
-    assert "30s:" in text and "GWW 15" in text and "APP 13" in text
-    assert "1m:" in text and "ASML 18" in text
+    assert "15m:" in text and "GWW 15" in text and "APP 13" in text
+    assert "1h:" in text and "ASML 18" in text
 
 
 def test_format_groups_empty():
