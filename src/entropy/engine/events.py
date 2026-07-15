@@ -6,10 +6,9 @@ import msgspec
 
 
 class WindowName(enum.StrEnum):
-    S30 = "30s"
-    M1 = "1m"
-    M5 = "5m"
-    M20 = "20m"
+    W0 = "w0"
+    W1 = "w1"
+    W2 = "w2"
     SESSION = "session"
 
 
