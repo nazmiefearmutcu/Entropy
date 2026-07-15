@@ -1,7 +1,14 @@
+from entropy.config import EngineConfig
 from entropy.engine.engine import Engine, _WIN_ORDER
 from entropy.engine.events import WindowName
+from entropy.engine.timeframe import get_timeframe
 
 _S = 1_000_000_000
+
+
+def _engine_15m() -> Engine:
+    # The main app runs on 15m; construct that explicitly (a bare Engine() is legacy second-scale).
+    return Engine(EngineConfig.from_timeframe(get_timeframe("15m")))
 
 
 def test_win_order_is_three_positional():
@@ -9,7 +16,7 @@ def test_win_order_is_three_positional():
 
 
 def test_snapshot_counts_keyed_by_display_label():
-    eng = Engine()
+    eng = _engine_15m()
     ts = 0
     for px in (100.0, 101.0, 102.0, 101.0, 99.0):
         ts += 1 * _S
@@ -20,7 +27,7 @@ def test_snapshot_counts_keyed_by_display_label():
 
 
 def test_rolling_window_event_counts_decay_over_time():
-    eng = Engine()  # default 15m config: windows 15m / 1h / 4h
+    eng = _engine_15m()  # windows 15m / 1h / 4h
     _MIN = 60 * 1_000_000_000
     # AAA seeds (first tick = no events), then rising ticks create new highs in all windows
     eng.on_trade("AAA", 100.0, 1.0, "buy", 1 * _MIN)

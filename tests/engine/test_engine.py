@@ -30,11 +30,11 @@ def test_snapshot_has_breadth_and_boards():
 def test_prev_extreme_is_none_after_window_gap():
     # After a gap longer than the window span, the old extreme has expired, so a
     # new extreme must report prev_extreme=None (not the stale pre-eviction value).
-    e = Engine()  # 15m / 1h / 4h rolling windows
-    e.on_trade("AAA", 500.0, 1.0, "buy", 0)                     # baseline at 500
-    evs = e.on_trade("AAA", 100.0, 1.0, "sell", 16 * 60 * S)    # 16min later -> 500 evicted from 15m (w0) win
+    e = Engine()  # legacy second-scale: 30s / 1m / 5m rolling windows
+    e.on_trade("AAA", 500.0, 1.0, "buy", 0)                # baseline at 500
+    evs = e.on_trade("AAA", 100.0, 1.0, "sell", 60 * S)    # 60s later -> 500 evicted from 30s (w0) win
     nl_w0 = next(x for x in evs if isinstance(x, NewLow) and x.window.value == "w0")
-    assert nl_w0.prev_extreme is None                           # not the stale 500.0
+    assert nl_w0.prev_extreme is None                      # not the stale 500.0
 
 
 def test_per_window_counts_and_ticker():
@@ -44,11 +44,11 @@ def test_per_window_counts_and_ticker():
     e.on_trade("AAA", 102.0, 1.0, "buy", 2 * S)      # more new highs
     snap = e.snapshot()
     # every rolling window registered new-high activity for AAA
-    assert snap.breadth.nh_counts["15m"] >= 2
-    assert set(snap.breadth.nh_counts) == {"15m", "1h", "4h"}
+    assert snap.breadth.nh_counts["30s"] >= 2
+    assert set(snap.breadth.nh_counts) == {"30s", "1m", "5m"}
     # ticker groups exist per window with AAA as a top symbol
-    g15 = next(g for g in snap.ticker if g.window == "15m")
-    assert g15.entries and g15.entries[0][0] == "AAA" and g15.entries[0][1] >= 2
+    g30 = next(g for g in snap.ticker if g.window == "30s")
+    assert g30.entries and g30.entries[0][0] == "AAA" and g30.entries[0][1] >= 2
 
 
 def test_quote_returns_last_price_and_pct():

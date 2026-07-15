@@ -11,5 +11,5 @@ def test_event_structs_carry_fields():
 def test_engine_config_defaults():
     c = EngineConfig()
     assert c.spike_pct == 0.40 and c.upmove_pct == 0.15
-    assert c.windows_ns["w0"] == 900_000_000_000 and "session" not in c.windows_ns
+    assert c.windows_ns["w0"] == 30_000_000_000 and "session" not in c.windows_ns
     assert c.new_extreme_strict is True and c.leaderboard_k == 20
