@@ -319,3 +319,48 @@ class EntropyApp(App[None]):
 
     def action_errors(self) -> None:
         self.push_screen(ErrorScreen(self._error_text, id="errors"))
+
+    def _apply_settings(
+        self, *, theme: str, chart_type: str, show_volume: bool, timeframe: str,
+        enable_equities: bool, enable_crypto: bool, equity_tps: int,
+        strategy_symbol: str, crypto_strategy_symbol: str,
+        spike_pct: float, snapdrop_pct: float,
+    ) -> None:
+        tf_changed = timeframe != self.cfg.timeframe
+        spec = get_timeframe(timeframe)
+        new_engine_cfg = msgspec.structs.replace(
+            EngineConfig.from_timeframe(spec), spike_pct=spike_pct, snapdrop_pct=snapdrop_pct,
+        )
+        self.cfg = msgspec.structs.replace(
+            self.cfg, theme=theme, chart_type=chart_type, show_volume=show_volume,
+            timeframe=timeframe, enable_equities=enable_equities, enable_crypto=enable_crypto,
+            equity_tps=equity_tps, strategy_symbol=strategy_symbol,
+            crypto_strategy_symbol=crypto_strategy_symbol, engine=new_engine_cfg,
+        )
+        self.theme = theme
+        self.query_default("#price", PriceChart).chart_type = chart_type
+        self.query_default("#price2", PriceChart).chart_type = chart_type
+        self.query_default("#volume", VolumeChart).display = show_volume
+        self.query_default("#volume2", VolumeChart).display = show_volume
+        if self._equity is not None:
+            self._equity.tps = equity_tps
+
+        if tf_changed:
+            self._tf = spec
+            self.engine = Engine(new_engine_cfg)
+            self._candle_interval_ns = spec.bar_ns
+            self._warmup_bars = spec.warmup_bars
+            self._warmup_dt_ns = spec.bar_ns
+            self._price_candles = CandleAggregator(spec.bar_ns)
+            self._crypto_candles = CandleAggregator(spec.bar_ns)
+            self.query_default("#hist", HighLowGauges).window_labels = spec.window_labels
+            self._warmup_strategies()
+        else:
+            self.engine.cfg = new_engine_cfg
+
+        if self.strategy.cfg.symbol != strategy_symbol:
+            self.strategy = Strategy(StrategyConfig(symbol=strategy_symbol))
+            self._warmup_strategies()
+        if self.crypto_strategy.cfg.symbol != crypto_strategy_symbol:
+            self.crypto_strategy = Strategy(StrategyConfig(symbol=crypto_strategy_symbol, fee_bps=1.0))
+            self._warmup_crypto()

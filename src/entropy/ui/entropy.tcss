@@ -39,6 +39,12 @@ Screen { background: $background; color: $foreground; layout: vertical; }
     margin-top: 1;
     overflow-y: scroll;
 }
+.settings-section {
+    height: 1;
+    color: $accent;
+    text-style: bold;
+    margin-top: 1;
+}
 .settings-row {
     height: 3;
     align: left middle;
