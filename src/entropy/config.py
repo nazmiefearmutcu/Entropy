@@ -7,12 +7,12 @@ from entropy.engine.timeframe import TimeframeSpec, get_timeframe
 _DEFAULT_SPEC = get_timeframe("15m")
 
 
+def _windows_dict(spec: TimeframeSpec) -> dict[str, int]:
+    return {"w0": spec.windows_ns[0], "w1": spec.windows_ns[1], "w2": spec.windows_ns[2]}
+
+
 def _default_windows() -> dict[str, int]:
-    return {
-        "w0": _DEFAULT_SPEC.windows_ns[0],
-        "w1": _DEFAULT_SPEC.windows_ns[1],
-        "w2": _DEFAULT_SPEC.windows_ns[2],
-    }
+    return _windows_dict(_DEFAULT_SPEC)
 
 
 class EngineConfig(msgspec.Struct, frozen=True):
@@ -30,9 +30,9 @@ class EngineConfig(msgspec.Struct, frozen=True):
     accel_eps: float = 0.10
 
     @classmethod
-    def from_timeframe(cls, spec: TimeframeSpec) -> "EngineConfig":
+    def from_timeframe(cls, spec: TimeframeSpec) -> EngineConfig:
         return cls(
-            windows_ns={"w0": spec.windows_ns[0], "w1": spec.windows_ns[1], "w2": spec.windows_ns[2]},
+            windows_ns=_windows_dict(spec),
             window_labels=spec.window_labels,
             momentum_horizon_s=spec.momentum_horizon_s,
             breadth_window_s=spec.breadth_window_s,
