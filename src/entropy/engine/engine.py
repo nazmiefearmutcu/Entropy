@@ -62,15 +62,48 @@ class EngineSnapshot(msgspec.Struct, frozen=True):
     ticker: tuple[TickerGroup, ...]
 
 
+def _count_since(dq: deque[int], cutoff: int) -> int:
+    """Read-only count of stamps at/after cutoff (dq is ascending in time)."""
+    n = 0
+    for stamp in reversed(dq):
+        if stamp < cutoff:
+            break
+        n += 1
+    return n
+
+
 class Engine:
     def __init__(self, config: EngineConfig | None = None) -> None:
-        self.cfg = config or EngineConfig()
-        self.breadth = BreadthTracker(self.cfg.breadth_window_s, self.cfg.accel_eps)
         self._tapes: dict[str, _Tape] = {}
         self._seen: set[str] = set()
+        self.cfg = config or EngineConfig()   # property setter caches the scalars
+        self.breadth = BreadthTracker(self.cfg.breadth_window_s, self.cfg.accel_eps)
         self._prev_event_rate = 0.0
-        self._horizon_s = self.cfg.momentum_horizon_s
-        self._cool_ns = self.cfg.momentum_cooldown_ns
+        self._accel_label = "steady"
+        self._trade_seq = 0        # monotonic; bumps on every on_trade
+        self._accel_sample_seq = -1
+
+    @property
+    def cfg(self) -> EngineConfig:
+        return self._cfg
+
+    @cfg.setter
+    def cfg(self, value: EngineConfig) -> None:
+        # Hot-apply: the UI's non-timeframe settings path reassigns engine.cfg
+        # and expects it to take effect live. Refresh the cached momentum
+        # scalars and re-span existing tapes' rolling windows (buffers are kept;
+        # they prune lazily against the new spans on the next trade).
+        self._cfg = value
+        self._horizon_s = value.momentum_horizon_s
+        self._cool_ns = value.momentum_cooldown_ns
+        mom_span = int(value.momentum_horizon_s * 1_000_000_000)
+        spans = [value.windows_ns[w.value] for w in _WIN_ORDER]
+        for t in self._tapes.values():
+            t.mom.set_span(mom_span)
+            for me, span in zip(t.maxw, spans, strict=True):
+                me.span_ns = span
+            for me, span in zip(t.minw, spans, strict=True):
+                me.span_ns = span
 
     def on_trade(  # noqa: PLR0912
         self, symbol: str, price: float, amount: float, side: str, ts_ns: int
@@ -81,6 +114,7 @@ class Engine:
             self._tapes[symbol] = t
         ts = ts_ns if ts_ns >= t.last_ts else t.last_ts   # non-decreasing clamp
         t.last_ts = ts
+        self._trade_seq += 1
         self.breadth.tick(ts)
         self.breadth.add_trade(side, amount, ts)
         first = symbol not in self._seen
@@ -103,7 +137,13 @@ class Engine:
                     NewHigh(symbol=symbol, ts_ns=ts, price=price, window=w, prev_extreme=prior)
                 )
                 t.nh_count += 1
-                t.nh_by_win[i].append(ts)
+                dq = t.nh_by_win[i]
+                dq.append(ts)
+                # Evict here (not in snapshot) so headless runs that never
+                # snapshot keep the deque bounded by the window contents.
+                cutoff = ts - self.cfg.windows_ns[w.value]
+                while dq and dq[0] < cutoff:
+                    dq.popleft()
         for i, (w, me) in enumerate(zip(_WIN_ORDER, t.minw, strict=False)):
             me.evict(ts)            # evict BEFORE peek (the evict inside step() is then a no-op)
             prior = me.peek()
@@ -112,7 +152,11 @@ class Engine:
                     NewLow(symbol=symbol, ts_ns=ts, price=price, window=w, prev_extreme=prior)
                 )
                 t.nl_count += 1
-                t.nl_by_win[i].append(ts)
+                dq = t.nl_by_win[i]
+                dq.append(ts)
+                cutoff = ts - self.cfg.windows_ns[w.value]
+                while dq and dq[0] < cutoff:
+                    dq.popleft()
         sh, sl = t.session.step(price)
         if sh:
             events.append(NewHigh(symbol=symbol, ts_ns=ts, price=price, window=WindowName.SESSION))
@@ -164,47 +208,46 @@ class Engine:
         top = heapq.nlargest(k, items, key=lambda kv: abs(kv[1].session.pct_chg(kv[1].last_price)))
         highs = heapq.nlargest(k, items, key=lambda kv: kv[1].nh_count)
         lows = heapq.nlargest(k, items, key=lambda kv: kv[1].nl_count)
-        rate = self.breadth.event_rate()
-        accel = self.breadth.accel(self._prev_event_rate)
-        self._prev_event_rate = rate
+        last_ts = max((t.last_ts for t in self._tapes.values()), default=0)
+        # The accel flag is a rate delta between successive SAMPLES of the tape,
+        # so advance the prev-rate state only when the tape itself advanced —
+        # back-to-back snapshots with no new trades are then identical.
+        if self._trade_seq != self._accel_sample_seq:
+            self._accel_label = self.breadth.accel(self._prev_event_rate)
+            self._prev_event_rate = self.breadth.event_rate()
+            self._accel_sample_seq = self._trade_seq
         # Per-window aggregate new-high / new-low symbol-activity counts (dual gauges)
         # and the top-symbol ticker groups (the "<win>: SYM n  SYM n" strip).
+        # Counting is READ-ONLY: deques are evicted on the on_trade hot path;
+        # stamps older than the window (relative to the global clock) are
+        # filtered out here without mutating any tape.
         nh_counts: dict[str, int] = {}
         nl_counts: dict[str, int] = {}
         ticker: list[TickerGroup] = []
         tk = 6  # symbols shown per window in the strip
-        last_ts = max((t.last_ts for t in self._tapes.values()), default=0)
-        
+
         for i, w in enumerate(_WIN_ORDER):
-            dur = self.cfg.windows_ns[w.value]
-            cutoff = last_ts - dur
-            
-            # Evict stale event timestamps for this window
-            for _, tp in items:
-                dq_h = tp.nh_by_win[i]
-                while dq_h and dq_h[0] < cutoff:
-                    dq_h.popleft()
-                dq_l = tp.nl_by_win[i]
-                while dq_l and dq_l[0] < cutoff:
-                    dq_l.popleft()
-            
-            nh_counts[self.cfg.window_labels[i]] = sum(len(tp.nh_by_win[i]) for _, tp in items)
-            nl_counts[self.cfg.window_labels[i]] = sum(len(tp.nl_by_win[i]) for _, tp in items)
-            
-            top_syms = heapq.nlargest(
-                tk, items, key=lambda kv: len(kv[1].nh_by_win[i]) + len(kv[1].nl_by_win[i])
-            )
-            entries = tuple(
-                (s, len(tp.nh_by_win[i]) + len(tp.nl_by_win[i]))
-                for s, tp in top_syms
-                if len(tp.nh_by_win[i]) + len(tp.nl_by_win[i]) > 0
-            )
-            ticker.append(TickerGroup(window=self.cfg.window_labels[i], entries=entries))
-            
+            cutoff = last_ts - self.cfg.windows_ns[w.value]
+            nh_tot = 0
+            nl_tot = 0
+            active: list[tuple[str, int]] = []
+            for s, tp in items:
+                h = _count_since(tp.nh_by_win[i], cutoff)
+                lo = _count_since(tp.nl_by_win[i], cutoff)
+                nh_tot += h
+                nl_tot += lo
+                if h + lo:
+                    active.append((s, h + lo))
+            label = self.cfg.window_labels[i]
+            nh_counts[label] = nh_tot
+            nl_counts[label] = nl_tot
+            entries = tuple(heapq.nlargest(tk, active, key=lambda kv: kv[1]))
+            ticker.append(TickerGroup(window=label, entries=entries))
+
         breadth = BreadthSnapshot(
             sell_pct=self.breadth.sell_pct(), buy_pct=self.breadth.buy_pct(),
-            raw_hz=self.breadth.raw_hz(), prev30s_rate=rate, accel=accel,
-            nh_counts=nh_counts, nl_counts=nl_counts)
+            raw_hz=self.breadth.raw_hz(), prev30s_rate=self._prev_event_rate,
+            accel=self._accel_label, nh_counts=nh_counts, nl_counts=nl_counts)
         return EngineSnapshot(
             ts_ns=last_ts, breadth=breadth,
             top_movers=mk(top, lambda tp: tp.nh_count + tp.nl_count),
@@ -224,10 +267,10 @@ class Engine:
         return t.last_price, t.session.pct_chg(t.last_price) * 100
 
     def reset_session(self, ts_ns: int | None = None) -> None:
-        for t in self._tapes.values():
-            t.session = SessionExtreme()
-            t.nh_count = 0
-            t.nl_count = 0
-            t.nh_by_win = [deque() for _ in range(3)]
-            t.nl_by_win = [deque() for _ in range(3)]
+        # Full tape rebuild: post-reset trades must see exactly what a fresh
+        # engine would — the rolling MonotonicExtreme windows and the momentum
+        # buffer must not leak across the session boundary (the old partial
+        # reset re-seeded "first sightings" against still-populated windows).
+        # Breadth is intentionally untouched (unchanged semantics).
+        self._tapes.clear()
         self._seen.clear()

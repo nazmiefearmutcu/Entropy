@@ -1,4 +1,5 @@
 from entropy.config import EngineConfig
+from entropy.engine.engine import Engine
 from entropy.engine.timeframe import get_timeframe
 
 _S = 1_000_000_000
@@ -14,6 +15,15 @@ def test_default_engine_config_is_legacy_second_scale():
     assert cfg.momentum_horizon_s == 5.0
     assert cfg.breadth_window_s == 30
     assert cfg.momentum_cooldown_ns == 1 * _S
+
+
+def test_bare_engine_runs_on_legacy_default_config():
+    # A bare Engine() (what the trading bot builds) must run on the bare
+    # EngineConfig() legacy values — including through the cfg property.
+    eng = Engine()
+    assert eng.cfg == EngineConfig()
+    assert eng.cfg.window_labels == ("30s", "1m", "5m")
+    assert eng.breadth.window_s == 30
 
 
 def test_from_timeframe_15m_default_app_timeframe():

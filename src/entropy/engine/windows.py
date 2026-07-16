@@ -74,6 +74,16 @@ class MomentumHorizon:
         self.dq: deque[tuple[int, float]] = deque()
         self.last_evicted: float | None = None
 
+    def set_span(self, span_ns: int) -> None:
+        """Hot-apply a new horizon, keeping the existing (ts, price) buffer.
+
+        The buffer is pruned lazily by the next push() against the new span.
+        Growing the span cannot resurrect already-evicted history, so the
+        anchor may briefly be younger than the new horizon — the same warm-up
+        contract as a fresh meter.
+        """
+        self.span_ns = span_ns
+
     def push(self, ts_ns: int, price: float) -> float:
         dq = self.dq
         dq.append((ts_ns, price))

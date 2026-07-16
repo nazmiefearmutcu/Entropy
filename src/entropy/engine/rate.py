@@ -28,10 +28,17 @@ class RateMeter:
             self.timestamps.popleft()
 
     def rate_per_s(self) -> float:
+        """Honest events/sec over the observed span.
+
+        Steady state (observed span has filled the window): count / window_s —
+        the deque holds exactly the last window_s of stamps. Warm-up (span still
+        shorter than the window): count / elapsed with a 1s floor, so a
+        sub-second burst reads as events-per-that-second instead of exploding
+        as elapsed -> 0.
+        """
         if not self.timestamps:
             return 0.0
-        
-        # Calculate time span in seconds
         elapsed = (self.timestamps[-1] - self.timestamps[0]) / 1_000_000_000
-        span = elapsed + 1.0  # Add 1.0 to align with discrete bucket duration logic
-        return len(self.timestamps) / span
+        if elapsed >= self.window_s:
+            return len(self.timestamps) / self.window_s
+        return len(self.timestamps) / max(elapsed, 1.0)
