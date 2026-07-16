@@ -20,7 +20,8 @@ Screen { background: $background; color: $foreground; layout: vertical; }
 /* Settings Screen styling */
 #settings-container {
     width: 68;
-    height: 48;
+    height: 90%;
+    max-height: 48;
     background: $panel;
     border: double $primary;
     padding: 1 2;

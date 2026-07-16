@@ -128,6 +128,12 @@ class SettingsScreen(ModalScreen[None]):
             crypto_sym_val = self.query_one("#set-crypto-sym", Input).value
             spike_val = float(self.query_one("#set-spike", Input).value)
             snap_val = float(self.query_one("#set-snapdrop", Input).value)
+            if tps_val <= 0:
+                raise ValueError("Equity TPS must be a positive integer")
+            if spike_val <= 0 or snap_val <= 0:
+                raise ValueError("Spike/Snapdrop thresholds must be positive")
+            if not strat_sym_val or not crypto_sym_val:
+                raise ValueError("Strategy symbols must not be empty")
         except ValueError as e:
             self._saving = False
             self.app.push_screen(ErrorScreen(f"Invalid input: {e}", id="errors"))

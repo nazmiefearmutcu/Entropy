@@ -55,16 +55,19 @@ class EntropyApp(App[None]):
         self._warmup_bars = self._tf.warmup_bars
         self._warmup_dt_ns = self._tf.bar_ns
         self._sink = QueueSink()
-        self.engine = Engine(
-            msgspec.structs.replace(
-                self.cfg.engine,
-                windows_ns=EngineConfig.from_timeframe(self._tf).windows_ns,
-                window_labels=self._tf.window_labels,
-                momentum_horizon_s=self._tf.momentum_horizon_s,
-                breadth_window_s=self._tf.breadth_window_s,
-                momentum_cooldown_ns=self._tf.momentum_cooldown_ns,
-            )
+        # Derive the running engine config from the active timeframe (overlaid onto any
+        # caller-supplied engine fields) and write it back into cfg so self.cfg.engine
+        # stays the single source of truth (no stale legacy-default divergence).
+        engine_cfg = msgspec.structs.replace(
+            self.cfg.engine,
+            windows_ns=EngineConfig.from_timeframe(self._tf).windows_ns,
+            window_labels=self._tf.window_labels,
+            momentum_horizon_s=self._tf.momentum_horizon_s,
+            breadth_window_s=self._tf.breadth_window_s,
+            momentum_cooldown_ns=self._tf.momentum_cooldown_ns,
         )
+        self.cfg = msgspec.structs.replace(self.cfg, engine=engine_cfg)
+        self.engine = Engine(engine_cfg)
         self.strategy = Strategy(StrategyConfig(symbol=self.cfg.strategy_symbol))
         # One Strategy per traded symbol: SPY (sim, clean fees) + BTC (real crypto, ~1bp).
         self.crypto_strategy = Strategy(
@@ -215,11 +218,13 @@ class EntropyApp(App[None]):
         if self.cfg.enable_crypto:
             self._warmup_crypto()
 
-    @work(group="warmup")
+    @work(exclusive=True, group="warmup")
     async def _warmup_crypto(self) -> None:
+        # exclusive: a newer warmup (e.g. after a rapid symbol/timeframe change) cancels
+        # any in-flight fetch, so a stale symbol's klines can't seed the current strategy.
         raw = self.cfg.crypto_strategy_symbol.split(":", 1)[-1]
         try:
-            bars = await warmup_klines(raw)
+            bars = await warmup_klines(raw, interval=self._tf.name)
         except Exception as exc:  # network/REST hiccup — warmup is best-effort.
             self._error_text = f"crypto warmup failed: {exc}"
             return
@@ -352,13 +357,15 @@ class EntropyApp(App[None]):
         if self._equity is not None:
             self._equity.tps = equity_tps
 
-        # Rebuild strategies for changed symbols FIRST (no warmup yet) so the timeframe-change
-        # warmup below runs exactly once against the new strategy objects.
+        # Rebuild strategies FIRST (no warmup yet) so the warmup below runs exactly once
+        # against fresh objects. A timeframe change also rebuilds them: re-warming a live
+        # strategy in place would append synthetic bars onto its existing EMA and flip
+        # _prev_sign while leaving an open position stranded, so a fresh start is correct.
         strat_symbol_changed = self.strategy.cfg.symbol != strategy_symbol
         crypto_symbol_changed = self.crypto_strategy.cfg.symbol != crypto_strategy_symbol
-        if strat_symbol_changed:
+        if strat_symbol_changed or tf_changed:
             self.strategy = Strategy(StrategyConfig(symbol=strategy_symbol))
-        if crypto_symbol_changed:
+        if crypto_symbol_changed or tf_changed:
             self.crypto_strategy = Strategy(
                 StrategyConfig(symbol=crypto_strategy_symbol, fee_bps=1.0)
             )
