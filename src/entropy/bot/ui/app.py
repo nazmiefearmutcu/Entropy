@@ -8,7 +8,7 @@ from textual.containers import Vertical
 
 from ..config import BotConfig
 from ..runner import BotRunner
-from .confirm import ConfirmRiskScreen, BotSettingsScreen
+from .confirm import BotSettingsScreen
 from .widgets import ModeBanner, PnLPanel, PositionsTable, RiskBanner, TradeLog
 
 

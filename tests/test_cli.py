@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+
 import pytest
 
 from entropy.__main__ import main

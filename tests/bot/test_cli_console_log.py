@@ -1,6 +1,5 @@
-import pytest
 from entropy.__main__ import main as main_entry
-import argparse
+
 
 def test_console_log_global_only(monkeypatch):
     received = {}

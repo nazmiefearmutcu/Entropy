@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> None:
         log_dir = os.path.dirname(cfg.console_log_path)
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
-        with open(cfg.console_log_path, "a") as f:
+        with open(cfg.console_log_path, "a"):
             pass
     # A fresh timestamped run dir per launch so paper and live ledgers never mix.
     run_dir = f"runs/{ns.mode}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"

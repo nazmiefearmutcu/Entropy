@@ -47,7 +47,9 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
         if name == "momentum_scalper":
             out.append(MomentumScalper(symbols=syms, min_pct=cfg.momentum_min_pct))
         elif name == "ema_cross":
-            out.append(EmaCrossStrategy(symbol=cfg.ema_symbol, fast=cfg.ema_fast, slow=cfg.ema_slow))
+            out.append(
+                EmaCrossStrategy(symbol=cfg.ema_symbol, fast=cfg.ema_fast, slow=cfg.ema_slow)
+            )
         else:
             raise KeyError(f"Unknown strategy {name!r}")
     return out

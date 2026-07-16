@@ -1,10 +1,11 @@
 import csv
-import os
 from pathlib import Path
-from entropy.bot.ledger import Ledger, record_trade_open, record_trade_close, init_trade_csv
+
+from entropy.bot.ledger import init_trade_csv, record_trade_close, record_trade_open
+
 
 def read_csv_rows(csv_path: Path) -> list[list[str]]:
-    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+    with open(csv_path, newline="", encoding="utf-8") as f:
         return list(csv.reader(f))
 
 def test_consecutive_trades_same_symbol(tmp_path: Path):
@@ -87,7 +88,8 @@ def test_backward_search_side_matching_bug(tmp_path: Path):
     rows = read_csv_rows(csv_path)
     
     # Let's inspect the rows.
-    # Expected correct behaviour: The LONG trade (first row) is closed at 155.0, and SHORT remains open.
+    # Expected correct behaviour: The LONG trade (first row) is closed at 155.0, and SHORT
+    # remains open.
     # Actual current behavior: The SHORT trade (second row) is closed at 155.0.
     print(f"\nRow 1: {rows[1]}")
     print(f"Row 2: {rows[2]}")

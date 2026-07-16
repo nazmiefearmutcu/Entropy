@@ -5,7 +5,10 @@ from entropy.bot.signals import Signal, SignalAction
 
 
 def _sig(action: SignalAction, symbol: str = "SPY", ts_ns: int = 1) -> Signal:
-    return Signal(symbol=symbol, action=action, strength=1.0, reason="test", ts_ns=ts_ns, strategy="ema_cross")
+    return Signal(
+        symbol=symbol, action=action, strength=1.0, reason="test", ts_ns=ts_ns,
+        strategy="ema_cross",
+    )
 
 def test_run_simulation():
     print("==================================================")
@@ -34,7 +37,6 @@ def test_run_simulation():
         sl, tp = rm.stop_tp_prices(PositionSide.LONG, 100.0)
         expected_sl = 100.0 * (1 - prof.stop_loss_pct / 100.0)
         expected_tp = 100.0 * (1 + prof.take_profit_pct / 100.0)
-        ratio = prof.take_profit_pct / prof.stop_loss_pct
         print(f"  LONG: SL={sl:.2f} (Exp: {expected_sl:.2f}), TP={tp:.2f} (Exp: {expected_tp:.2f})")
         assert sl == expected_sl and tp == expected_tp, f"{name} SL/TP mismatch"
         
@@ -60,7 +62,10 @@ def test_run_simulation():
             else:
                 if "max concurrent" in d_sym.reason:
                     rejected_concurrent += 1
-        print(f"  Max concurrent: {prof.max_concurrent}. Total: {opened}. Rejects: {rejected_concurrent}")
+        print(
+            f"  Max concurrent: {prof.max_concurrent}. Total: {opened}. "
+            f"Rejects: {rejected_concurrent}"
+        )
         assert opened == prof.max_concurrent, f"{name} max concurrent check failed"
         
         # 4. Verify Cooldown
@@ -83,16 +88,17 @@ def test_run_simulation():
             p, mark_px=100.0, ts_ns=ts_after
         )
         print(f"  Re-entry after cooldown ({prof.cooldown_s + 1}s): Approved={d_after.approved}")
-        # Note: if exposure cap is exceeded because of other open positions, it might reject, which is fine
+        # Note: if exposure cap is exceeded because of other open positions, it might reject,
+        # which is fine
         if "cooldown" in d_after.reason:
             raise ValueError(f"{name} cooldown did not clear")
             
         # 5. Verify Exposure limit
-        p_exp = Portfolio(100_000.0)
-        rm_exp = RiskManager(prof)
         max_possible_exposure = prof.max_concurrent * prof.per_trade_pct
         print(f"  Max exposure: {max_possible_exposure}% (Cap: {prof.max_total_exposure_pct}%)")
-        assert max_possible_exposure <= prof.max_total_exposure_pct, f"{name} concurrent exposure exceeds cap"
+        assert max_possible_exposure <= prof.max_total_exposure_pct, (
+            f"{name} concurrent exposure exceeds cap"
+        )
         
         # 6. Verify Daily Loss Kill-Switch
         p_loss = Portfolio(100_000.0)

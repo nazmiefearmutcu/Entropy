@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from entropy.bot.calibration import calibrate_and_test, run_backtest, DummyLedger
-from entropy.bot.orders import Fill, OrderSide, OrderIntent
+from entropy.bot.calibration import DummyLedger, calibrate_and_test, run_backtest
+from entropy.bot.orders import Fill, OrderIntent, OrderSide
+
 
 def test_calibrate_and_test() -> None:
     # Use small number of ticks to keep the test fast
@@ -44,13 +45,25 @@ def test_run_backtest_pnl_calculation(monkeypatch) -> None:
     # Predefined fills for LONG and SHORT trades
     # 1. LONG trade: entry buy at 100, exit sell at 110, qty 10, entry fee 1.5, exit fee 2.0
     # Expected gross PnL = (110 - 100) * 10 = 100. Net PnL = 100 - 1.5 - 2.0 = 96.5. (Win)
-    fill_long_open = Fill(order_id="o1", symbol="SPY", side=OrderSide.BUY, qty=10.0, price=100.0, fee=1.5, slippage=0.0, ts_ns=1000)
-    fill_long_close = Fill(order_id="o2", symbol="SPY", side=OrderSide.SELL, qty=10.0, price=110.0, fee=2.0, slippage=0.0, ts_ns=2000)
+    fill_long_open = Fill(
+        order_id="o1", symbol="SPY", side=OrderSide.BUY, qty=10.0, price=100.0, fee=1.5,
+        slippage=0.0, ts_ns=1000,
+    )
+    fill_long_close = Fill(
+        order_id="o2", symbol="SPY", side=OrderSide.SELL, qty=10.0, price=110.0, fee=2.0,
+        slippage=0.0, ts_ns=2000,
+    )
     
     # 2. SHORT trade: entry sell at 50, exit buy at 55, qty 5, entry fee 1.0, exit fee 1.0
     # Expected gross PnL = (50 - 55) * 5 = -25. Net PnL = -25 - 1.0 - 1.0 = -27.0. (Loss)
-    fill_short_open = Fill(order_id="o3", symbol="AAPL", side=OrderSide.SELL, qty=5.0, price=50.0, fee=1.0, slippage=0.0, ts_ns=3000)
-    fill_short_close = Fill(order_id="o4", symbol="AAPL", side=OrderSide.BUY, qty=5.0, price=55.0, fee=1.0, slippage=0.0, ts_ns=4000)
+    fill_short_open = Fill(
+        order_id="o3", symbol="AAPL", side=OrderSide.SELL, qty=5.0, price=50.0, fee=1.0,
+        slippage=0.0, ts_ns=3000,
+    )
+    fill_short_close = Fill(
+        order_id="o4", symbol="AAPL", side=OrderSide.BUY, qty=5.0, price=55.0, fee=1.0,
+        slippage=0.0, ts_ns=4000,
+    )
     
     predefined_fills = [
         (fill_long_open, OrderIntent.OPEN),
@@ -103,7 +116,8 @@ def test_calibration_overtrading_penalty(monkeypatch) -> None:
                 "closed_pnls": []
             }
         elif fast == 9:
-            # Config B: Low trading count (10 trades), lower unpenalized score but higher penalized score
+            # Config B: Low trading count (10 trades), lower unpenalized score but higher
+            # penalized score
             # score = 0.08 * 10.0 + 0.9 - 10 * 0.02 = 0.8 + 0.9 - 0.2 = 1.5
             return {
                 "final_equity": 108_000.0,

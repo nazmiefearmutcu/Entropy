@@ -19,7 +19,9 @@ class Ledger:
     fills and the equity curve. All writes are synchronous appends (call off the hot path
     for equity; fills are rare)."""
 
-    def __init__(self, run_dir: str, mode: str = "paper", trade_csv_path: str = "entropy_trades.csv") -> None:
+    def __init__(
+        self, run_dir: str, mode: str = "paper", trade_csv_path: str = "entropy_trades.csv"
+    ) -> None:
         os.makedirs(run_dir, exist_ok=True)
         self.run_dir = run_dir
         self.mode = mode  # "paper" | "live" — stamped on every record so runs are never confused
@@ -104,12 +106,13 @@ def record_trade_open(csv_path: str, symbol: str, side: str, price: float) -> No
 
 
 def record_trade_close(csv_path: str, symbol: str, side: str, price: float) -> None:
-    """Record a closed trade in the trade CSV file by filling the last matching open trade's close price."""
+    """Record a closed trade in the trade CSV by filling the last matching open trade's
+    close price."""
     if not csv_path or not os.path.exists(csv_path):
         return
     try:
         rows: list[list[str]] = []
-        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.reader(f)
             header = next(reader, None)
             if header is not None:

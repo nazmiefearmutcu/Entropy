@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -12,7 +13,12 @@ class ConfirmRiskScreen(ModalScreen[bool]):
     """Asks the user to confirm a risk-profile change. On confirm, dismisses with True."""
     BINDINGS = [("escape", "dismiss_cancel", "Cancel")]
 
-    def __init__(self, new_profile: str, on_confirm: Callable[[], None], on_cancel: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self,
+        new_profile: str,
+        on_confirm: Callable[[], None],
+        on_cancel: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__()
         self._new = new_profile
         self._on_confirm = on_confirm
@@ -88,7 +94,9 @@ class BotSettingsScreen(ModalScreen[None]):
                     def on_cancel() -> None:
                         self._saving = False
                     
-                    self.app.push_screen(ConfirmRiskScreen(selected_profile.capitalize(), on_confirm, on_cancel))
+                    self.app.push_screen(
+                        ConfirmRiskScreen(selected_profile.capitalize(), on_confirm, on_cancel)
+                    )
                 else:
                     self._saving = False
                     self.dismiss(None)

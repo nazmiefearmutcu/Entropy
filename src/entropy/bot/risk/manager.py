@@ -53,14 +53,18 @@ class RiskManager:
         orders: list[Order] = []
         for pos in list(portfolio.positions.values()):
             mark_px = portfolio.mark_of(pos.symbol)
-            orders.append(self._close_order(pos, mark_px, ts_ns, "circuit_breaker", OrderIntent.CLOSE))
+            orders.append(
+                self._close_order(pos, mark_px, ts_ns, "circuit_breaker", OrderIntent.CLOSE)
+            )
         return orders
 
     def _next_id(self) -> str:
         self._order_seq += 1
         return f"o{self._order_seq}"
 
-    def stop_tp_prices(self, side: PositionSide, entry_px: float, symbol: str | None = None) -> tuple[float, float]:
+    def stop_tp_prices(
+        self, side: PositionSide, entry_px: float, symbol: str | None = None
+    ) -> tuple[float, float]:
         p = self.profile
         scale_factor = 1.0
         if symbol is not None and symbol in self.ticks_history:
@@ -128,7 +132,9 @@ class RiskManager:
                     std = variance ** 0.5
                     volatility_pct = (std / mean) * 100
                     if volatility_pct < self.profile.min_volatility_pct:
-                        return RiskDecision(False, None, "sideways market: volatility below threshold")
+                        return RiskDecision(
+                            False, None, "sideways market: volatility below threshold"
+                        )
 
         # Slippage / Price Deviation Guard
         history = self.ticks_history.get(signal.symbol, [])
@@ -158,10 +164,7 @@ class RiskManager:
                       strategy=signal.strategy)
 
         if volatility_pct is not None and volatility_pct < 0.30:
-            if volatility_pct <= 0.0:
-                scale_factor = 10.0
-            else:
-                scale_factor = min(0.30 / volatility_pct, 10.0)
+            scale_factor = 10.0 if volatility_pct <= 0.0 else min(0.30 / volatility_pct, 10.0)
         else:
             scale_factor = 1.0
 

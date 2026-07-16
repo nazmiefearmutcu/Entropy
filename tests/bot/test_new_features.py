@@ -1,18 +1,23 @@
-import pytest
 import json
+
+import pytest
+
+from entropy.bot.config import BotConfig
 from entropy.bot.orders import OrderIntent, OrderSide
 from entropy.bot.portfolio import Portfolio, PositionSide
 from entropy.bot.risk.manager import RiskManager
 from entropy.bot.risk.profiles import MEDIUM, make_custom
-from entropy.bot.signals import Signal, SignalAction
-from entropy.bot.ui.confirm import ConfirmRiskScreen
 from entropy.bot.runner import BotRunner
-from entropy.bot.config import BotConfig
+from entropy.bot.signals import Signal, SignalAction
 from entropy.bot.ui.app import BotDashboard
+from entropy.bot.ui.confirm import ConfirmRiskScreen
 from entropy.bot.ui.widgets import RiskBanner, TradeLog
 
+
 def _sig(action: SignalAction, symbol: str = "SPY") -> Signal:
-    return Signal(symbol=symbol, action=action, strength=1.0, reason="test", ts_ns=1, strategy="strat")
+    return Signal(
+        symbol=symbol, action=action, strength=1.0, reason="test", ts_ns=1, strategy="strat"
+    )
 
 def test_volatility_history_and_scaling():
     # 1. Verify rolling history bounds & no duplicates on same timestamp
@@ -71,7 +76,8 @@ def test_fat_finger_protection():
     assert d2.reason == "fat-finger limit exceeded"
 
     # 3. Allow safe order
-    prof_safe = make_custom(per_trade_pct=5.0, max_total_exposure_pct=100.0) # size = 5% of 100k = $5,000
+    # size = 5% of 100k = $5,000
+    prof_safe = make_custom(per_trade_pct=5.0, max_total_exposure_pct=100.0)
     rm3 = RiskManager(prof_safe)
     d3 = rm3.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1)
     assert d3.approved
@@ -163,7 +169,8 @@ async def test_confirm_risk_screen_text(tmp_path):
         app.push_screen(screen)
         await pilot.pause()
         static_widget = screen.query_one("Static")
-        assert str(static_widget.render()) == "Are you sure with that 'frosty' risk management mode?"
+        expected = "Are you sure with that 'frosty' risk management mode?"
+        assert str(static_widget.render()) == expected
 
 
 @pytest.mark.asyncio

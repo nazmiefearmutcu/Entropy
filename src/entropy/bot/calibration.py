@@ -15,9 +15,9 @@ from entropy.feeds.equities.universe import UNIVERSE, SymParams
 
 class DummyLedger:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self.fills = []
-        self.events = []
-        self.rejects = []
+        self.fills: list[tuple[Any, Any]] = []
+        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.rejects: list[tuple[str, str]] = []
 
     def record_event(self, kind: str, payload: dict[str, Any]) -> None:
         self.events.append((kind, payload))
@@ -112,7 +112,8 @@ def run_backtest(
     
     runner = BotRunner(cfg)
     # Patch ledger to use DummyLedger (no disk writes)
-    runner.ledger = DummyLedger() # type: ignore
+    dummy_ledger = DummyLedger()
+    runner.ledger = dummy_ledger  # type: ignore[assignment]
     
     # Configure custom risk profile
     custom_profile = make_custom(
@@ -127,13 +128,13 @@ def run_backtest(
 
     # Close all remaining open positions at final prices
     final_ts = ticks[-1]["ts_ns"] if ticks else 0
-    for symbol, pos in list(runner.portfolio.positions.items()):
+    for symbol in list(runner.portfolio.positions):
         mark_px = runner.portfolio.mark_of(symbol)
         runner.portfolio.close(symbol, mark_px, final_ts, fee=0.0)
 
     # Calculate metrics
     snap = runner.portfolio.snapshot(final_ts)
-    total_trades = len(runner.ledger.fills) // 2 # open and close fill pairs
+    total_trades = len(dummy_ledger.fills) // 2  # open and close fill pairs
     wins = 0
     losses = 0
     total_profit = 0.0
@@ -143,7 +144,7 @@ def run_backtest(
     closed_pnls = []
     # Match entries and exits
     positions_history = {}
-    for fill, intent in runner.ledger.fills:
+    for fill, intent in dummy_ledger.fills:
         symbol = fill.symbol
         if intent.value == "open":
             positions_history[symbol] = fill
@@ -169,7 +170,10 @@ def run_backtest(
 
 
     win_rate = wins / total_trades if total_trades > 0 else 0.0
-    profit_factor = total_profit / total_loss if total_loss > 0 else (total_profit if total_profit > 0 else 1.0)
+    if total_loss > 0:
+        profit_factor = total_profit / total_loss
+    else:
+        profit_factor = total_profit if total_profit > 0 else 1.0
     
     # Calculate Sharpe ratio on closed trade PnLs
     if len(closed_pnls) > 1:
@@ -222,9 +226,10 @@ def calibrate_and_test(
     tp_grid = [1.0, 2.0]
 
     best_score = -math.inf
-    best_params = {}
+    best_params: dict[str, Any] = {}
     
-    print(f"Running grid search over {len(fast_grid)*len(slow_grid)*len(min_pct_grid)*len(sl_grid)*len(tp_grid)} combinations...")
+    n_combos = len(fast_grid) * len(slow_grid) * len(min_pct_grid) * len(sl_grid) * len(tp_grid)
+    print(f"Running grid search over {n_combos} combinations...")
     t0 = time.perf_counter()
     
     for fast in fast_grid:
@@ -236,7 +241,11 @@ def calibrate_and_test(
                     for tp in tp_grid:
                         res = run_backtest(back_ticks, symbols, fast, slow, min_pct, sl, tp)
                         # We optimize for Sharpe + Total Return
-                        score = res["total_return"] * 10.0 + res["sharpe"] - (res["total_trades"] * 0.02)
+                        score = (
+                            res["total_return"] * 10.0
+                            + res["sharpe"]
+                            - (res["total_trades"] * 0.02)
+                        )
                         if score > best_score and res["total_trades"] >= 2:
                             best_score = score
                             best_params = {

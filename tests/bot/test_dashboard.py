@@ -4,8 +4,8 @@ from textual.widgets import Select, Static
 from entropy.bot.config import BotConfig
 from entropy.bot.runner import BotRunner
 from entropy.bot.ui.app import BotDashboard
-from entropy.bot.ui.widgets import ModeBanner, RiskBanner
 from entropy.bot.ui.confirm import BotSettingsScreen, ConfirmRiskScreen
+from entropy.bot.ui.widgets import ModeBanner, RiskBanner
 
 
 def test_mode_banner_labels_paper_and_live():

@@ -1,14 +1,15 @@
-import pytest
 import math
-from entropy.bot.orders import OrderIntent, OrderSide
+
 from entropy.bot.portfolio import Portfolio, PositionSide
 from entropy.bot.risk.manager import RiskManager
 from entropy.bot.risk.profiles import MEDIUM, make_custom
 from entropy.bot.signals import Signal, SignalAction
-from entropy.bot.calibration import run_backtest, calibrate_and_test
+
 
 def _sig(action: SignalAction, symbol: str = "SPY") -> Signal:
-    return Signal(symbol=symbol, action=action, strength=1.0, reason="test", ts_ns=1, strategy="strat")
+    return Signal(
+        symbol=symbol, action=action, strength=1.0, reason="test", ts_ns=1, strategy="strat"
+    )
 
 def test_inf_ticks_behavior():
     # 1. Test standard RiskManager with an inf tick in history
@@ -76,7 +77,8 @@ def test_extreme_low_and_zero_volatility():
     assert not decision.approved
     assert decision.reason == "sideways market: volatility below threshold"
 
-    # If min_volatility_pct is 0, it should be approved, and cooldown scaling should be maximum (10.0x)
+    # If min_volatility_pct is 0, it should be approved, and cooldown scaling should be
+    # maximum (10.0x)
     rm_zero_min = RiskManager(make_custom(min_volatility_pct=0.0, cooldown_s=10))
     rm_zero_min.update_tick("SPY", 100.0, 1000)
     rm_zero_min.update_tick("SPY", 100.0, 2000)
@@ -87,7 +89,8 @@ def test_extreme_low_and_zero_volatility():
     assert rm_zero_min._cooldown_until["SPY"] == 3000 + 100_000_000_000
 
     # Extremely low non-zero volatility (e.g. std/mean = 0.0001%)
-    # Cooldown scale factor = min(0.30 / volatility_pct, 10.0). Since volatility_pct is extremely low, it should cap at 10.0.
+    # Cooldown scale factor = min(0.30 / volatility_pct, 10.0). Since volatility_pct is
+    # extremely low, it should cap at 10.0.
     rm_low_vol = RiskManager(make_custom(min_volatility_pct=0.0, cooldown_s=10))
     rm_low_vol.update_tick("SPY", 100.0, 1000)
     rm_low_vol.update_tick("SPY", 100.0001, 2000)
@@ -98,10 +101,13 @@ def test_extreme_low_and_zero_volatility():
 
 
 def test_negative_volatility_prevention():
-    # Mathematically volatility shouldn't be negative, but let's see if we can trick the code if prices are negative
+    # Mathematically volatility shouldn't be negative, but let's see if we can trick the code
+    # if prices are negative
     # Prices negative (e.g. ticks are negative, mean negative)
-    # Since mean > 0 check gates the volatility calculation, negative mean will bypass the volatility floor check.
-    # What if mean is positive but a tick is negative? E.g., history has [200.0, -100.0]. Mean is 50.0.
+    # Since mean > 0 check gates the volatility calculation, negative mean will bypass the
+    # volatility floor check.
+    # What if mean is positive but a tick is negative? E.g., history has [200.0, -100.0].
+    # Mean is 50.0.
     # std = (((298 - 99)**2 + (-100 - 99)**2)/2)**0.5 = 199.0.
     # volatility_pct = 199.0 / 99.0 * 100 = 201.0%.
     # This works without issue.
@@ -115,21 +121,26 @@ def test_negative_volatility_prevention():
 
 
 def test_calibration_overtrading_penalty():
-    # Grid search score function: score = res["total_return"] * 10.0 + res["sharpe"] - (res["total_trades"] * 0.02)
+    # Grid search score function:
+    # score = res["total_return"] * 10.0 + res["sharpe"] - (res["total_trades"] * 0.02)
     # Check that high number of trades reduces the calibration score even if return is same.
     res_few = {
         "total_return": 0.10,
         "sharpe": 1.5,
         "total_trades": 10
     }
-    score_few = res_few["total_return"] * 10.0 + res_few["sharpe"] - (res_few["total_trades"] * 0.02)
+    score_few = (
+        res_few["total_return"] * 10.0 + res_few["sharpe"] - (res_few["total_trades"] * 0.02)
+    )
     
     res_many = {
         "total_return": 0.10,
         "sharpe": 1.5,
         "total_trades": 100
     }
-    score_many = res_many["total_return"] * 10.0 + res_many["sharpe"] - (res_many["total_trades"] * 0.02)
+    score_many = (
+        res_many["total_return"] * 10.0 + res_many["sharpe"] - (res_many["total_trades"] * 0.02)
+    )
     
     assert score_few == 1.0 + 1.5 - 0.20 # 2.30
     assert score_many == 1.0 + 1.5 - 2.00 # 0.50

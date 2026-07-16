@@ -44,7 +44,7 @@ class RiskBanner(Static):
         self.halted = True
         self.color = "red"
         if self.is_attached:
-            self.update(Text(self.render_text(), style=f"bold red"))
+            self.update(Text(self.render_text(), style="bold red"))
 
     def render_text(self) -> str:
         if self.halted:

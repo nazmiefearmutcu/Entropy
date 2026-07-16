@@ -91,7 +91,11 @@ class BotRunner:
             stop_px, tp_px = self.risk.stop_tp_prices(pos_side, fill.price, order.symbol)
             self.portfolio.open(order.symbol, pos_side, fill.qty, fill.price,
                                 stop_px, tp_px, fill.ts_ns, fill.fee)
-            self.ledger.record_trade_open(order.symbol, "LONG" if pos_side is PositionSide.LONG else "SHORT", fill.price)
+            self.ledger.record_trade_open(
+                order.symbol,
+                "LONG" if pos_side is PositionSide.LONG else "SHORT",
+                fill.price,
+            )
         else:
             pos = self.portfolio.positions.get(order.symbol)
             side_str = "LONG"
