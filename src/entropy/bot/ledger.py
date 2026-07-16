@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
+import time
 from typing import Any
 
 from .orders import Fill, OrderIntent
@@ -12,6 +14,29 @@ _FILL_HEADER = ["ts_ns", "order_id", "symbol", "side", "intent", "qty", "price",
 _EQUITY_HEADER = [
     "ts_ns", "equity", "cash", "realized_pnl", "unrealized_pnl", "daily_pnl", "open_count"
 ]
+# Append-only trade journal: OPEN rows leave close_price empty; CLOSE rows carry both the
+# entry price of the position being closed and the exit price. `ts` is unix epoch seconds.
+_TRADE_HEADER = ["ts", "symbol", "side", "event", "open_price", "close_price"]
+
+_log = logging.getLogger(__name__)
+
+# One-time flag: the first failed trade-CSV write is logged at DEBUG (no handlers are
+# configured, so anything louder would land on stderr over the TUI); later failures are
+# silent to avoid spamming from a persistently broken path/disk.
+_write_failure_logged = False
+
+# In-memory registry of open positions per trade-CSV path:
+# (SYMBOL, SIDE) -> stack of entry prices, matched LIFO (most recent open first, the same
+# order the old rewrite logic used). record_trade_close pairs entry and exit prices from
+# here, so a close is a pure append — the CSV is never re-read or rewritten.
+_open_positions: dict[str, dict[tuple[str, str], list[float]]] = {}
+
+
+def _note_write_failure(exc: OSError) -> None:
+    global _write_failure_logged
+    if not _write_failure_logged:
+        _write_failure_logged = True
+        _log.debug("trade CSV write failed (further failures suppressed): %s", exc)
 
 
 class Ledger:
@@ -82,59 +107,70 @@ class Ledger:
 
 
 def init_trade_csv(path: str) -> None:
-    """Initialize the trade CSV file with headers if it does not exist."""
+    """Create the append-only trade CSV with its header if needed.
+
+    A file bearing a foreign header — notably the legacy rewrite format
+    ("Symbol,Side,Open Price,Close Price") — is renamed to ``<name>.bak-<unix_ts>`` and a
+    fresh file is started: the legacy format filled close prices by rewriting rows in
+    place, so appending new-format rows to it would corrupt both formats. No migration is
+    attempted; the .bak file keeps the old data intact.
+    """
     if not path:
         return
-    log_dir = os.path.dirname(path)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-    if not os.path.exists(path):
+    try:
+        log_dir = os.path.dirname(path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        if os.path.exists(path):
+            try:
+                with open(path, newline="", encoding="utf-8") as fh:
+                    first = next(csv.reader(fh), None)
+            except (UnicodeDecodeError, csv.Error):
+                first = []  # not CSV text at all -> foreign file, set it aside below
+            if first == _TRADE_HEADER:
+                return
+            if first is not None:
+                os.replace(path, f"{path}.bak-{int(time.time())}")
         with open(path, "w", newline="", encoding="utf-8") as fh:
-            csv.writer(fh).writerow(["Symbol", "Side", "Open Price", "Close Price"])
+            csv.writer(fh).writerow(_TRADE_HEADER)
+    except OSError as exc:
+        _note_write_failure(exc)
 
 
 def record_trade_open(csv_path: str, symbol: str, side: str, price: float) -> None:
-    """Record an opened trade in the trade CSV file."""
+    """Append an OPEN row and remember the entry price for the matching close."""
     if not csv_path:
         return
-    init_trade_csv(csv_path)
+    # Track the position even if the disk write fails: the position is real either way,
+    # and the eventual CLOSE row can then still carry the correct entry price.
+    _open_positions.setdefault(csv_path, {}).setdefault(
+        (symbol.upper(), side.upper()), []
+    ).append(price)
     try:
+        init_trade_csv(csv_path)
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow([symbol, side, str(price), ""])
-    except Exception:
-        pass
+            csv.writer(f).writerow([f"{time.time():.3f}", symbol, side, "OPEN", str(price), ""])
+    except OSError as exc:
+        _note_write_failure(exc)
 
 
 def record_trade_close(csv_path: str, symbol: str, side: str, price: float) -> None:
-    """Record a closed trade in the trade CSV by filling the last matching open trade's
-    close price."""
-    if not csv_path or not os.path.exists(csv_path):
+    """Append a CLOSE row carrying both the entry and the exit price.
+
+    The entry price comes from the in-memory open-position registry (LIFO per
+    symbol+side, case-insensitive — the same matching the old rewrite logic used); the
+    file is never re-read. A close with no known open (e.g. state lost across a restart)
+    still appends a CLOSE row with an empty open_price instead of dropping the event.
+    """
+    if not csv_path:
         return
+    stack = _open_positions.get(csv_path, {}).get((symbol.upper(), side.upper()))
+    open_price = str(stack.pop()) if stack else ""
     try:
-        rows: list[list[str]] = []
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            header = next(reader, None)
-            if header is not None:
-                rows.append(header)
-            for row in reader:
-                rows.append(row)
-        
-        filled = False
-        for idx in range(len(rows) - 1, 0, -1):
-            row = rows[idx]
-            if (
-                len(row) >= 4
-                and row[0].upper() == symbol.upper()
-                and row[1].upper() == side.upper()
-                and not row[3]
-            ):
-                row[3] = str(price)
-                filled = True
-                break
-                
-        if filled:
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerows(rows)
-    except Exception:
-        pass
+        init_trade_csv(csv_path)
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(
+                [f"{time.time():.3f}", symbol, side, "CLOSE", open_price, str(price)]
+            )
+    except OSError as exc:
+        _note_write_failure(exc)

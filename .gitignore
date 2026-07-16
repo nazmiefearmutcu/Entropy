@@ -12,6 +12,7 @@ runs/
 # runtime artifacts
 entropy_console.log
 entropy_trades.csv
+entropy_trades.csv.bak-*
 .agents/
 .uv-cache/
 .uv_cache/

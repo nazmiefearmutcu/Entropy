@@ -39,3 +39,37 @@ async def test_console_logs_to_file(tmp_path):
     # Verify raw text is written directly
     assert any("OPEN LONG" in line for line in lines)
     assert any("Test Info Message [yellow]with tags[/]" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_console_survives_write_failure_and_stops_retrying(tmp_path, monkeypatch):
+    """A failing mirror file must not break the console, and must not be retried per line."""
+    import builtins
+
+    from textual.app import App, ComposeResult
+
+    bad_path = str(tmp_path / "logs" / "console.log")
+    attempts = 0
+    real_open = builtins.open
+
+    def failing_open(file, *args, **kwargs):
+        nonlocal attempts
+        if str(file) == bad_path:
+            attempts += 1
+            raise OSError("disk full")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", failing_open)
+
+    class _A(App):
+        def compose(self) -> ComposeResult:
+            yield AlgoConsole(log_path=bad_path, id="console")
+
+    app = _A()
+    async with app.run_test():
+        c = app.query_one("#console", AlgoConsole)
+        c.push_info("first line")
+        c.push_info("second line")
+        assert c.line_count >= 2  # on-screen console keeps working
+    assert attempts == 1, "after the first failure the file mirror must be disabled"
+    assert c._log_write_failed is True
