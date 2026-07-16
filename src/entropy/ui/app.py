@@ -24,7 +24,7 @@ from entropy.feeds.crypto import start_feed
 from entropy.feeds.equities.feed import EquitySimFeed
 from entropy.feeds.equities.source import market_status, resolve_equity_source
 from entropy.feeds.equities.universe import INDICES, LIVE_UNIVERSE
-from entropy.feeds.warmup import warmup_klines
+from entropy.feeds.warmup import warmup_equity_bars, warmup_klines
 from entropy.strategy.engine import Bar, EventKind, Strategy, StrategyConfig, StrategyEvent
 
 from .widgets.boards import refresh_board
@@ -102,6 +102,9 @@ class EntropyApp(App[None]):
         self._error_text = "No errors."
         self._market_status_cache = ""
         self._market_status_ts: float | None = None
+        # Concrete "sim"/"live" chosen by _run_equity_feed (None until the feed
+        # worker resolves it); routes the SPY warmup to real vs synthetic bars.
+        self._equity_source_resolved: str | None = None
 
     def query_default(self, selector: str, expect_type: Any) -> Any:
         try:
@@ -245,11 +248,57 @@ class EntropyApp(App[None]):
         ]
 
     def _warmup_strategies(self) -> None:
-        # SPY warms instantly from synthesized sim bars; push its INFO + watching line.
-        self._push_events(self.strategy.warmup(self._synth_spy_bars()))
-        self._push_info(f"watching [{self.cfg.strategy_symbol}]")
+        # SPY warms from real Yahoo bars when the live feed is active, from
+        # synthesized sim bars otherwise; crypto always warms from real klines.
+        self._warmup_spy()
         if self.cfg.enable_crypto:
             self._warmup_crypto()
+
+    def _warmup_spy(self) -> None:
+        """Warm the equity strategy: real Yahoo bars when the resolved source is
+        live, instantly-synthesized flat bars otherwise (sim, or not yet resolved
+        — on first boot _run_equity_feed re-warms once it settles on live)."""
+        if self._equity_source_resolved == "live":
+            self._warmup_equity()
+            return
+        self._push_events(self.strategy.warmup(self._synth_spy_bars()))
+        self._push_info(f"watching [{self.cfg.strategy_symbol}]")
+
+    @work(exclusive=True, group="equity_warmup")
+    async def _warmup_equity(self) -> None:
+        # exclusive (own group, so it can't cancel the crypto warmup): a newer
+        # warmup after a rapid timeframe/symbol change cancels the in-flight
+        # fetch, keeping stale bars away from the current strategy.
+        try:
+            bars = await warmup_equity_bars(self.cfg.strategy_symbol, self._tf.name)
+        except Exception as exc:  # network/timeout/empty — warmup is best-effort.
+            self._error_text = f"equity warmup failed: {exc}"
+            self._push_info(f"equity warmup failed ({exc}); using synthetic bars",
+                            "yellow")
+            if not self.strategy.is_warm:  # boot path was already synth-warmed
+                self._push_events(self.strategy.warmup(self._synth_spy_bars()))
+                self._push_info(f"watching [{self.cfg.strategy_symbol}]")
+            return
+        # On first boot the mount-time warmup already synth-warmed this strategy
+        # (live resolution happens later, inside the feed worker): rebuild it so
+        # the real bars seed a clean EMA instead of appending to a synthetic one.
+        if self.strategy.is_warm:
+            self.strategy = Strategy(StrategyConfig(symbol=self.cfg.strategy_symbol))
+        events = self.strategy.warmup(bars)
+        # Seed the SPY candle chart from the same bars (the sim path draws from
+        # live sim ticks instead). Fresh aggregator: drops any synthetic-era
+        # candles; per bar, close→high→low→close fills o/h/l/c in its bucket.
+        agg = CandleAggregator(self._candle_interval_ns)
+        for b in bars:
+            agg.add(b.ts_ns, b.close, 0.0)
+            if b.high is not None:
+                agg.add(b.ts_ns, b.high, 0.0)
+            if b.low is not None:
+                agg.add(b.ts_ns, b.low, 0.0)
+            agg.add(b.ts_ns, b.close, 0.0)
+        self._price_candles = agg
+        self._push_events([e for e in events if e.kind is EventKind.INFO])
+        self._push_info(f"watching [{self.cfg.strategy_symbol}]")
 
     @work(exclusive=True, group="warmup")
     async def _warmup_crypto(self) -> None:
@@ -331,6 +380,7 @@ class EntropyApp(App[None]):
         except Exception as exc:
             self._feed_status(f"equities: source resolution failed ({exc}); using sim", "red")
             source = "sim"
+        self._equity_source_resolved = source
         if source == "live":
             try:
                 task, plan = await start_equity_feed(self._sink, LIVE_UNIVERSE)
@@ -339,6 +389,7 @@ class EntropyApp(App[None]):
                     f"equities: live feed failed ({exc}); falling back to sim", "red"
                 )
                 self._error_text = f"equity feed: {exc}"
+                self._equity_source_resolved = "sim"
             else:
                 self._feed_status(f"equities: source=live ({plan.provider_name})")
                 if plan.trimmed_symbols:
@@ -347,6 +398,9 @@ class EntropyApp(App[None]):
                         f"{len(plan.trimmed_symbols)}: {', '.join(plan.trimmed_symbols)}",
                         "yellow",
                     )
+                # Real tape from here on: re-warm SPY from real Yahoo bars (the
+                # mount-time warmup ran before this worker resolved the source).
+                self._warmup_equity()
                 try:
                     await task
                 except Exception as exc:
@@ -452,8 +506,7 @@ class EntropyApp(App[None]):
         else:
             self.engine.cfg = new_engine_cfg
             if strat_symbol_changed:
-                self._push_events(self.strategy.warmup(self._synth_spy_bars()))
-                self._push_info(f"watching [{strategy_symbol}]")
+                self._warmup_spy()   # real bars when live, synth otherwise
             if crypto_symbol_changed:
                 self._warmup_crypto()
 
