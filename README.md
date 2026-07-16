@@ -1,265 +1,97 @@
-Entropy is a real-time terminal (TUI) market scanner and algo console that streams live crypto via the Crypcodile engine, simulates US equities on the same record path, detects multi-window new highs/lows and momentum, ranks movers, runs a demo EMA scalping strategy, and renders live candlestick charts — all in a single asyncio process driven by Textual.
+# Entropy
+
+**A real-time terminal market scanner, algo console, and trading bot — in your terminal.**
+
+Entropy is a [Textual](https://textual.textualize.io/) TUI that streams live crypto and simulated
+equities, aggregates them into candlestick charts, and runs a breadth/"entropy" engine that surfaces
+new highs & lows, spikes, and snap-drops across multiple rolling windows — all on a selectable
+**15-minute-centric timeframe**.
+
+![Entropy running — live candlestick charts, breadth gauges, and the new-highs/lows scanner on the 15m timeframe](docs/assets/entropy.png)
 
 ---
 
-## Screenshot
+## Highlights
 
-```
-╔ Entropy ════════════════════════════════════════════════════════════════════╗
-║ Algo Console         │  SPY MSFT NVDA AAPL TSLA BTCUSDT ETHUSDT …          ║
-║ BUY  SPY  @483.21    │  Buy%  ██████░░░░  64%   Sell% ██░░░░░░  36%        ║
-║ SELL SPY  @483.09    │  Rate  ████████░░  4.1k  Accel ↑                    ║
-║ BUY  SPY  @483.35    ├─────────────────────────────────────────────────────╢
-║ …                    │  New Highs            │  Session Highs               ║
-║                      │  NVDA   +0.81% (12)   │  MSTR  +2.14%               ║
-║                      │  MSFT   +0.54% ( 8)   │  COIN  +1.87%               ║
-║                      │  …                    │  …                           ║
-║                      ├───────────────────────╢                              ║
-║                      │         BTCUSDT  1-s candle chart                    ║
-║                      │  67 420 ┤ ╷ ╷  ╷╷╷╷                                 ║
-║                      │  67 300 ┤╶╴╶╴╶╴╶╴╶╴  (volume below)                 ║
-╚══════════════════════╧═════════════════════════════════════════════════════╝
-```
+- **15-minute operating timeframe, fully selectable.** Candles, scanner windows (`15m / 1h / 4h /
+  session`), momentum horizon, breadth, and warmup all derive from one timeframe abstraction.
+  Switch between `1m / 5m / 15m / 1h / 4h` live from the Settings screen — the engine and charts
+  reconfigure on the fly.
+- **Live + simulated feeds.** Real crypto ticks (Coinbase / Binance) alongside a deterministic
+  equities simulator, unified through one engine.
+- **Breadth / entropy engine.** Per-window new-high / new-low detection (O(1) monotonic windows),
+  session extremes, spikes, snap-drops, buy/sell breadth, and an activity ticker.
+- **Candlestick & line charts** with a toggleable volume pane, for both the crypto and equity legs.
+- **A clean, sectioned Settings screen** — appearance, timeframe, data feeds, and scanner/engine
+  thresholds, with live hot-apply and input validation. 7 built-in themes.
+- **An automated trading bot** (`entropy bot`) — paper core with risk profiles, a live-execution
+  scaffold, and a TUI dashboard — running on its own sub-second momentum cadence.
+- **Strategy calibration & benchmarks** — grid-search back/forward accuracy tests and throughput
+  /latency benchmarks from the CLI.
 
-The console (left) logs EMA-strategy signals in real time. The center panel shows a live ticker strip, buy/sell breadth gauges, a momentum histogram, and ranked leaderboards. The right panel renders a 1-second candlestick chart with a volume bar chart below it.
+## Quick start
 
----
+Entropy uses [uv](https://docs.astral.sh/uv/). From a clone:
 
-## Requirements
-
-| Dependency | Version |
-|---|---|
-| Python | 3.12 |
-| [Crypcodile](https://github.com/nazmiefearmutcu/Crypcodile) | editable local path |
-| uv | any recent |
-
-Crypcodile must be checked out locally. The default path in `pyproject.toml` is
-`/Users/nazmi/Crypcodile`; adjust `[tool.uv.sources]` if yours differs.
-
----
-
-## Install
-
-```sh
-# 1. Clone and enter
-git clone https://github.com/<you>/Entropy && cd Entropy
-
-# 2. Make sure Crypcodile is available at the path in pyproject.toml,
-#    or edit [tool.uv.sources] to match your local checkout.
-
-# 3. Create the virtualenv and sync all dependencies (including Crypcodile editable)
-uv sync
-
-# 4. Activate (optional — `uv run` works without this)
-source .venv/bin/activate
+```bash
+uv sync            # resolve deps (pulls the crypcodile feed package from GitHub)
+uv run entropy ui  # launch the scanner dashboard
 ```
 
----
+Requires Python ≥ 3.12. The [crypcodile](https://github.com/nazmiefearmutcu/Crypcodile) feed package
+is resolved automatically from GitHub via `[tool.uv.sources]`.
 
-## Run
+## Usage
 
-```sh
-# With activated venv
-python -m entropy
-
-# Or via uv (no activation needed)
-uv run python -m entropy
+```bash
+uv run entropy ui          # main TUI scanner dashboard (default)
+uv run entropy bot         # automated trade bot CLI / TUI
+uv run entropy calibrate   # calibrate strategies + run back/forward accuracy tests
+uv run entropy benchmark   # system throughput & latency benchmarks
 ```
 
-The app starts immediately: the equity simulator fires at ~4 000 ticks/s and the
-crypto feed connects to Binance WebSocket. Both push `Trade` records into the same
-engine, so the leaderboards and gauges reflect a blended universe from the first
-second.
+Inside the dashboard: **`s`** Settings · **`?`/`h`** Help · **`e`** Errors · **`q`** Quit.
 
-Press **q** to quit cleanly (graceful shutdown of all feed tasks).
+## Timeframes
 
----
+The whole terminal is parameterized by a single timeframe registry. The default is **15m**; each
+timeframe defines its bar interval, three rolling scanner windows, and the momentum/breadth cadence:
 
-## Data Sources
+| Timeframe | Bar    | Scanner windows   |
+|-----------|--------|-------------------|
+| 1m        | 1 min  | 1m / 5m / 15m     |
+| 5m        | 5 min  | 5m / 15m / 1h     |
+| **15m**   | 15 min | **15m / 1h / 4h** |
+| 1h        | 1 hr   | 1h / 4h / 1d      |
+| 4h        | 4 hr   | 4h / 12h / 1d     |
 
-### Real crypto — Binance WebSocket (live)
-
-Crypcodile's `collect()` subscribes to the `trade` channel for 14 liquid spot pairs:
-
-```
-BTCUSDT  ETHUSDT  SOLUSDT  XRPUSDT  DOGEUSDT  ADAUSDT  AVAXUSDT
-LINKUSDT LTCUSDT  BCHUSDT  DOTUSDT  UNIUSDT   AAVEUSDT XLMUSDT
-```
-
-On startup the engine also fetches the last 24 one-minute Binance klines for
-`BTCUSDT` (configurable via `crypto_strategy_symbol`) to warm up the EMA strategy
-before the first live tick arrives.
-
-No API key is needed. Binance public WebSocket endpoints are unauthenticated.
-
-### Simulated US equities
-
-A deterministic GBM simulator (seeded, mean-reverting) generates ~4 000 ticks/s
-across 3 indices + ~120 stocks drawn from nine sectors:
-
-| Sector | Tickers (sample) |
-|---|---|
-| Index | SPY, QQQ, IWM |
-| Megacap | AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA |
-| Semis | AMD, INTC, MU, QCOM, ASML, AMAT |
-| Software | CRM, SNOW, PLTR, CRWD, NET, DDOG |
-| Finance | JPM, GS, V, MA, BAC |
-| Health | UNH, MRK, ABBV, TMO, AMGN |
-| Industrial | GE, CAT, DE, BA, HON |
-| Energy | XOM, CVX, COP, SLB |
-| Volatile | GME, MSTR, RIVN, MARA, COIN |
-
-The simulator produces the same tick sequence for any given seed, making
-benchmark runs reproducible.
-
----
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|---|---|
-| `s` | Open Settings modal (shows live `AppConfig`) |
-| `h` / `?` | Open Help modal |
-| `e` | Open Errors modal (last engine/feed error) |
-| `q` | Quit |
-
----
-
-## Configuration
-
-All knobs live in two `msgspec.Struct` classes in `src/entropy/app.py` and
-`src/entropy/config.py`.
-
-### `AppConfig` (top-level)
-
-| Field | Default | Description |
-|---|---|---|
-| `seed` | `42` | RNG seed for the equity simulator |
-| `equity_tps` | `4000` | Simulated equity ticks per second |
-| `enable_crypto` | `True` | Connect to Binance WebSocket |
-| `enable_equities` | `True` | Run the equity simulator |
-| `strategy_symbol` | `"SPY"` | Equity symbol tracked by the EMA strategy |
-| `crypto_strategy_symbol` | `"binance-spot:BTCUSDT"` | Crypto symbol tracked by the EMA strategy |
-| `engine` | `EngineConfig()` | Detection engine parameters (see below) |
-
-### `EngineConfig` (detection engine)
-
-| Field | Default | Description |
-|---|---|---|
-| `windows_ns` | `{30s, 1m, 5m, 20m}` | Rolling windows for new-high/low detection (integer ns) |
-| `momentum_horizon_s` | `5.0` | Look-back window for momentum % calculation |
-| `spike_pct` | `0.40` | Price-spike threshold (fraction of price) |
-| `snapdrop_pct` | `0.40` | Snap-drop threshold (fraction of price) |
-| `upmove_pct` | `0.15` | Up-move threshold |
-| `downmove_pct` | `0.15` | Down-move threshold |
-| `momentum_cooldown_ns` | `1_000_000_000` | Minimum gap between momentum events per symbol (ns) |
-| `new_extreme_strict` | `True` | Strict (`>`) vs non-strict (`>=`) new-high/low comparison |
-| `breadth_window_s` | `30` | Rolling window for buy/sell breadth calculation (seconds) |
-| `leaderboard_k` | `20` | Max rows in each leaderboard |
-| `accel_eps` | `0.10` | Acceleration threshold for breadth rate change label |
-
-To override defaults, construct `AppConfig` explicitly before passing to `EntropyApp`:
-
-```python
-from entropy.app import AppConfig
-from entropy.config import EngineConfig
-from entropy.ui.app import EntropyApp
-
-cfg = AppConfig(
-    seed=99,
-    equity_tps=2000,
-    enable_crypto=False,
-    engine=EngineConfig(leaderboard_k=10, momentum_horizon_s=10.0),
-)
-EntropyApp(cfg).run()
-```
-
----
+(Plus the cumulative **session** high/low, always tracked.)
 
 ## Architecture
 
 ```
-Binance WS ──► CrypcodileFeed ─┐
-                                ├─► QueueSink (asyncio.Queue, bounded)
-EquitySimFeed ─────────────────┘         │
-                                          │  @work(thread=True) drain worker
-                                          ▼
-                               Engine.on_trade()          Strategy.on_trade()
-                               (pure, sync, no I/O)       (EMA scalper, sync)
-                                          │                       │
-                               Engine.snapshot()           StrategyEvent list
-                                          │                       │
-                               set_interval(1/10) ◄──────────────┘
-                                          │
-                               Textual widgets repaint @ ~10 fps
+src/entropy/
+  engine/    breadth/entropy engine, rolling windows, candle aggregation, timeframe registry
+  feeds/     live crypto + simulated equities feeds, kline warmup
+  strategy/  EMA / breakout signal engine used by the live TUI
+  ui/        Textual app + widgets (charts, gauges, ticker, boards, settings modals), themes
+  bot/       standalone trading bot — strategies, risk profiles, portfolio, runner, dashboard
+  config.py  engine config (+ per-timeframe derivation)
+  app.py     AppConfig
 ```
 
-- **Single process, single asyncio loop.** No extra threads except the bounded queue drain worker.
-- **Engine is pure:** takes `(symbol, price, amount, side, ts_ns)` primitives, returns
-  frozen `Event` structs. No I/O, no clock reads, no logging.
-- **Snapshot immutability:** `Engine.snapshot()` returns a frozen `EngineSnapshot`
-  (`msgspec.Struct, frozen=True`), safe to pass across thread boundaries.
-- **Backpressure:** the `QueueSink` is bounded (`maxsize=50_000`); feeds block if the
-  engine falls behind.
-
----
+The main app runs on the selected timeframe (via `EngineConfig.from_timeframe(...)`), while the bot
+keeps its own legacy sub-minute cadence — the two coexist through the same engine without
+interfering.
 
 ## Development
 
-```sh
-# Run tests
-pytest -q
-
-# Lint (auto-fix)
-ruff check --fix src/ tests/
-
-# Type-check
-mypy src/entropy/
-
-# Run a single test file
-pytest tests/test_engine.py -v
-```
-
-The test suite covers the detection engine, rolling windows, breadth tracker,
-leaderboard ranking, strategy EMA logic, equity simulator, and Textual widgets
-(via `App.run_test` pilot). All tests are hermetic and run offline (no network).
-
----
-
-## Trading bot
-
-Entropy ships a terminal automatic trading bot that paper-trades the live feed on every tick.
-
 ```bash
-# headless paper run (live crypto + sim equities)
-uv run python -m entropy.bot
-
-# with the TUI dashboard (colored risk banner, positions, P&L, trade log)
-uv run python -m entropy.bot --dashboard
-
-# pick a risk profile
-uv run python -m entropy.bot --risk aggressive
+uv run pytest             # full test suite
+uv run ruff check src tests
+uv run mypy src
 ```
-
-Risk profiles (`--risk`): **conservative** (green), **balanced** (yellow), **aggressive** (red).
-Each profile states exactly how much risk it takes (per-trade %, max positions, stop/target,
-total exposure, daily-loss kill-switch); the dashboard shows the active profile as an always-on
-colored banner, and changing it requires confirmation.
-
-> ⚠️  **Live trading is disabled by default.** Paper mode never touches real money. Enabling
-> live mode would place REAL orders with REAL money; you are solely responsible for all risk.
-> The bot will never enable or auto-trigger live trading on its own.
-
-Each launch writes a timestamped ledger under `runs/<mode>-<UTC>/`: `events.jsonl` (fills,
-rejects, risk changes, day rollovers — every record stamped with `mode`), `fills.csv`,
-`equity.csv` (the equity curve), and `meta.json`. Paper and live runs never share a directory.
-
-> **Note:** paper fills are *idealized* — each order fills instantly at the reference price ±
-> a fixed slippage, plus a flat fee. Real markets have latency, partial fills, and variable
-> spreads, so paper results are an optimistic upper bound, not a forecast of live performance.
-
----
 
 ## License
 
-Apache-2.0
+Apache-2.0.

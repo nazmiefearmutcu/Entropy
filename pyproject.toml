@@ -20,7 +20,7 @@ entropy-bot = "entropy.bot.__main__:main"
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-timeout>=2", "ruff>=0.6", "mypy>=1.11"]
 
 [tool.uv.sources]
-crypcodile = { path = "/Users/nazmi/Crypcodile", editable = true }
+crypcodile = { git = "https://github.com/nazmiefearmutcu/Crypcodile.git" }
 
 [build-system]
 requires = ["hatchling"]
