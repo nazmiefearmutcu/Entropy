@@ -1,11 +1,11 @@
 import pytest
-from textual.widgets import Select, Switch, Input
+from textual.widgets import Input, Select, Switch
 
 from entropy.app import AppConfig
 from entropy.config import EngineConfig
 from entropy.ui.app import EntropyApp
-from entropy.ui.widgets.modals import SettingsScreen
 from entropy.ui.widgets.charts import PriceChart, VolumeChart
+from entropy.ui.widgets.modals import SettingsScreen
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 from rich.text import Text
 from textual.widgets import DataTable
 
@@ -20,7 +21,9 @@ def row_text(r: LeaderRow, app: Any | None = None) -> tuple[Text, Text, Text, Te
             Text(f"{r.price:.2f}", justify="right"),
             Text(f"{r.pct_chg:+.2f}%", style=col, justify="right"))
 
-def refresh_board(table: DataTable[object], rows: tuple[LeaderRow, ...], app: Any | None = None) -> None:
+def refresh_board(
+    table: DataTable[object], rows: tuple[LeaderRow, ...], app: Any | None = None
+) -> None:
     table.clear()
     for r in rows:
         table.add_row(*row_text(r, app))

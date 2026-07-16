@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from textual.widgets import RichLog
 from rich.markup import escape
+from textual.widgets import RichLog
 
 from entropy.strategy.engine import StrategyEvent
 from entropy.strategy.format import render_event
@@ -27,10 +27,15 @@ class AlgoConsole(RichLog):
         if getattr(self, "log_path", None) is not None:
             return self.log_path
         try:
-            if hasattr(self, "app") and self.app is not None:
-                if hasattr(self.app, "cfg") and self.app.cfg is not None:
-                    if hasattr(self.app.cfg, "console_log_path"):
-                        return self.app.cfg.console_log_path
+            if (
+                hasattr(self, "app")
+                and self.app is not None
+                and hasattr(self.app, "cfg")
+                and self.app.cfg is not None
+                and hasattr(self.app.cfg, "console_log_path")
+            ):
+                path: str | None = self.app.cfg.console_log_path
+                return path
         except (AttributeError, Exception):
             pass
         return None

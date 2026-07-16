@@ -1,9 +1,9 @@
 import pytest
-from textual.widgets import Input, Button
+from textual.widgets import Button, Input
 
 from entropy.app import AppConfig
 from entropy.ui.app import EntropyApp
-from entropy.ui.widgets.modals import SettingsScreen, ErrorScreen
+from entropy.ui.widgets.modals import ErrorScreen, SettingsScreen
 
 
 async def _open_settings(pilot, app):

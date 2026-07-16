@@ -32,7 +32,8 @@ def test_prev_extreme_is_none_after_window_gap():
     # new extreme must report prev_extreme=None (not the stale pre-eviction value).
     e = Engine()  # legacy second-scale: 30s / 1m / 5m rolling windows
     e.on_trade("AAA", 500.0, 1.0, "buy", 0)                # baseline at 500
-    evs = e.on_trade("AAA", 100.0, 1.0, "sell", 60 * S)    # 60s later -> 500 evicted from 30s (w0) win
+    # 60s later -> 500 evicted from 30s (w0) win
+    evs = e.on_trade("AAA", 100.0, 1.0, "sell", 60 * S)
     nl_w0 = next(x for x in evs if isinstance(x, NewLow) and x.window.value == "w0")
     assert nl_w0.prev_extreme is None                      # not the stale 500.0
 

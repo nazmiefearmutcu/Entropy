@@ -1,8 +1,8 @@
 import pytest
 
 from entropy.app import AppConfig
-from entropy.ui.app import EntropyApp
 from entropy.engine.timeframe import get_timeframe
+from entropy.ui.app import EntropyApp
 
 
 def test_appconfig_default_timeframe():

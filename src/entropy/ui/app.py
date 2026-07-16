@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from typing import Any
 
 import msgspec
@@ -8,8 +9,8 @@ from crypcodile.schema.records import Trade
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Static
 from textual.css.query import NoMatches
+from textual.widgets import DataTable, Static
 
 from entropy.app import AppConfig
 from entropy.config import EngineConfig
@@ -23,7 +24,6 @@ from entropy.feeds.equities.universe import INDICES
 from entropy.feeds.warmup import warmup_klines
 from entropy.strategy.engine import Bar, EventKind, Strategy, StrategyConfig, StrategyEvent
 
-from .theme import ENTROPY_THEME
 from .widgets.boards import refresh_board
 from .widgets.charts import Candle, PriceChart, VolumeChart
 from .widgets.console import AlgoConsole
@@ -186,10 +186,8 @@ class EntropyApp(App[None]):
             pass
 
     def _push_info(self, text: str, color: str = "white") -> None:
-        try:
+        with suppress(NoMatches):
             self.query_default("#console", AlgoConsole).push_info(text, color)
-        except NoMatches:
-            pass
 
     def _push_events(self, events: list[StrategyEvent]) -> None:
         try:
@@ -262,7 +260,7 @@ class EntropyApp(App[None]):
         if not sevs:
             return
 
-        from entropy.bot.ledger import record_trade_open, record_trade_close
+        from entropy.bot.ledger import record_trade_close, record_trade_open
         for se in sevs:
             if se.kind is EventKind.OPEN_LONG:
                 record_trade_open(self.cfg.trade_csv_path, se.symbol, "LONG", se.price)
@@ -361,7 +359,9 @@ class EntropyApp(App[None]):
         if strat_symbol_changed:
             self.strategy = Strategy(StrategyConfig(symbol=strategy_symbol))
         if crypto_symbol_changed:
-            self.crypto_strategy = Strategy(StrategyConfig(symbol=crypto_strategy_symbol, fee_bps=1.0))
+            self.crypto_strategy = Strategy(
+                StrategyConfig(symbol=crypto_strategy_symbol, fee_bps=1.0)
+            )
 
         if tf_changed:
             self._tf = spec

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+from collections import deque
 
 import msgspec
 
@@ -27,10 +28,10 @@ class _Tape:
         self.last_price = 0.0
         self.nh_count = 0
         self.nl_count = 0
-        from collections import deque
-        # rolling deques of timestamps for new-high / new-low events per window (indexed by _WIN_ORDER)
-        self.nh_by_win = [deque() for _ in range(3)]
-        self.nl_by_win = [deque() for _ in range(3)]
+        # rolling deques of timestamps for new-high / new-low events per window
+        # (indexed by _WIN_ORDER)
+        self.nh_by_win: list[deque[int]] = [deque() for _ in range(3)]
+        self.nl_by_win: list[deque[int]] = [deque() for _ in range(3)]
         self.last_mom_pct = 0.0
         self._cooldown: dict[str, int] = {}
 
@@ -47,7 +48,7 @@ class BreadthSnapshot(msgspec.Struct, frozen=True):
 
 class TickerGroup(msgspec.Struct, frozen=True):
     """Top symbols by new-high/low activity within one rolling window — drives
-    the header ticker strip (e.g. '30s: GWW 15  APP 13  SPOT 12')."""
+    the header ticker strip (e.g. '15m: GWW 15  APP 13  SPOT 12')."""
     window: str
     entries: tuple[tuple[str, int], ...]   # (symbol, combined nh+nl count in window)
 
@@ -167,7 +168,7 @@ class Engine:
         accel = self.breadth.accel(self._prev_event_rate)
         self._prev_event_rate = rate
         # Per-window aggregate new-high / new-low symbol-activity counts (dual gauges)
-        # and the top-symbol ticker groups (the "30s: SYM n  SYM n" strip).
+        # and the top-symbol ticker groups (the "<win>: SYM n  SYM n" strip).
         nh_counts: dict[str, int] = {}
         nl_counts: dict[str, int] = {}
         ticker: list[TickerGroup] = []
@@ -227,7 +228,6 @@ class Engine:
             t.session = SessionExtreme()
             t.nh_count = 0
             t.nl_count = 0
-            from collections import deque
             t.nh_by_win = [deque() for _ in range(3)]
             t.nl_by_win = [deque() for _ in range(3)]
         self._seen.clear()

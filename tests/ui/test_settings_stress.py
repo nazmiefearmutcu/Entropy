@@ -1,5 +1,5 @@
 import pytest
-from textual.widgets import Select, Input, Button
+from textual.widgets import Button, Input, Select
 
 from entropy.app import AppConfig
 from entropy.ui.app import EntropyApp

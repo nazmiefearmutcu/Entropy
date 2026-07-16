@@ -37,5 +37,5 @@ async def test_console_logs_to_file(tmp_path):
     lines = content.strip().splitlines()
     assert len(lines) >= 2
     # Verify raw text is written directly
-    assert any("OPEN LONG" in l for l in lines)
-    assert any("Test Info Message [yellow]with tags[/]" in l for l in lines)
+    assert any("OPEN LONG" in line for line in lines)
+    assert any("Test Info Message [yellow]with tags[/]" in line for line in lines)

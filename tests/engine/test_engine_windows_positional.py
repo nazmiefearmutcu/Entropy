@@ -1,5 +1,5 @@
 from entropy.config import EngineConfig
-from entropy.engine.engine import Engine, _WIN_ORDER
+from entropy.engine.engine import _WIN_ORDER, Engine
 from entropy.engine.events import WindowName
 from entropy.engine.timeframe import get_timeframe
 

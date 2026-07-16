@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from typing import Any
+
 from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.containers import Vertical, Horizontal
-from textual.widgets import Static, Label, Select, Switch, Input, Button
+from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 from entropy.engine.timeframe import TIMEFRAMES
 
 _HELP = """Entropy — keys:
   s  Settings    ?/h  Help    e  Errors    q  Quit
-Scanner: new highs/lows over 3 rolling windows + session (timeframe-selectable); spikes & snap-drops.
+Scanner: new highs/lows over 3 rolling windows + session (timeframe-selectable); \
+spikes & snap-drops.
 """
 
 
@@ -51,10 +53,17 @@ class SettingsScreen(ModalScreen[None]):
                 yield Static("Appearance", classes="settings-section")
                 with Horizontal(classes="settings-row"):
                     yield Label("Visual Theme:")
-                    yield Select(options=theme_options, value=cfg.theme, id="set-theme", allow_blank=False)
+                    yield Select(
+                        options=theme_options, value=cfg.theme, id="set-theme", allow_blank=False
+                    )
                 with Horizontal(classes="settings-row"):
                     yield Label("Chart Style:")
-                    yield Select(options=chart_options, value=cfg.chart_type, id="set-chart", allow_blank=False)
+                    yield Select(
+                        options=chart_options,
+                        value=cfg.chart_type,
+                        id="set-chart",
+                        allow_blank=False,
+                    )
                 with Horizontal(classes="settings-row"):
                     yield Label("Show Volume Charts:")
                     yield Switch(value=cfg.show_volume, id="set-volume")
@@ -62,7 +71,12 @@ class SettingsScreen(ModalScreen[None]):
                 yield Static("Timeframe", classes="settings-section")
                 with Horizontal(classes="settings-row"):
                     yield Label("Timeframe:")
-                    yield Select(options=tf_options, value=cfg.timeframe, id="set-timeframe", allow_blank=False)
+                    yield Select(
+                        options=tf_options,
+                        value=cfg.timeframe,
+                        id="set-timeframe",
+                        allow_blank=False,
+                    )
 
                 yield Static("Data Feeds", classes="settings-section")
                 with Horizontal(classes="settings-row"):
