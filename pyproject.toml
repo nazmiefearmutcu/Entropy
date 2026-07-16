@@ -10,6 +10,7 @@ dependencies = [
     "textual-plotext>=0.7",
     "msgspec>=0.18",
     "crypcodile",
+    "stockodile",
 ]
 
 [project.scripts]
@@ -21,6 +22,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-timeout>=2", "ruff>=0.6", "m
 
 [tool.uv.sources]
 crypcodile = { git = "https://github.com/nazmiefearmutcu/Crypcodile.git" }
+stockodile = { git = "https://github.com/nazmiefearmutcu/stockodile.git" }
 
 [build-system]
 requires = ["hatchling"]

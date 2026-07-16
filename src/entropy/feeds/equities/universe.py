@@ -42,6 +42,10 @@ SECTORS: dict[str, tuple[str, ...]] = {
 _all_stocks: tuple[str, ...] = tuple(dict.fromkeys(sum(SECTORS.values(), ())))
 UNIVERSE: tuple[str, ...] = INDICES + _all_stocks
 
+# Curated subset for the LIVE stockodile feed (~28 tickers): keyless providers
+# poll per-symbol, and keyed providers cap subscriptions, so keep this small.
+LIVE_UNIVERSE: tuple[str, ...] = INDICES + MEGACAP + SEMIS[:8] + FINANCE[:7]
+
 
 @dataclass(slots=True)
 class SymParams:
