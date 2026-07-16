@@ -282,8 +282,13 @@ class EntropyApp(App[None]):
         # On first boot the mount-time warmup already synth-warmed this strategy
         # (live resolution happens later, inside the feed worker): rebuild it so
         # the real bars seed a clean EMA instead of appending to a synthetic one.
+        # Live ticks during the fetch may have opened a position (its OPEN row is
+        # already in the trade CSV) — transplant it so a later cross can still
+        # close it; only the EMAs/_prev_sign reseed from the real bars.
         if self.strategy.is_warm:
+            position = self.strategy.position
             self.strategy = Strategy(StrategyConfig(symbol=self.cfg.strategy_symbol))
+            self.strategy.position = position
         events = self.strategy.warmup(bars)
         # Seed the SPY candle chart from the same bars (the sim path draws from
         # live sim ticks instead). Fresh aggregator: drops any synthetic-era

@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from entropy.app import AppConfig
-from entropy.strategy.engine import Bar
+from entropy.strategy.engine import Bar, Side
 from entropy.ui.app import EntropyApp
 from entropy.ui.widgets.console import AlgoConsole
 
@@ -110,4 +110,45 @@ async def test_live_warmup_seeds_strategy_and_candles_from_real_bars(monkeypatch
         assert candles[-1].h == 513.0
         assert candles[-1].l == 511.0
         assert "watching [SPY]" in _console_text(app)
+        await pilot.press("q")
+
+
+@pytest.mark.asyncio
+async def test_live_warmup_rebuild_carries_open_position(monkeypatch):
+    """A live tick can open a position (journaled to the trade CSV) while the
+    Yahoo fetch is in flight; the strategy rebuild must transplant it so the
+    OPEN row can still be closed later — only the EMAs reseed from real bars."""
+    _stub_live_feed(monkeypatch)
+    bar_ns = 15 * 60 * 1_000_000_000
+    fabricated = [Bar(ts_ns=i * bar_ns, close=512.0) for i in range(1, 25)]
+    apps: list[EntropyApp] = []
+
+    async def delayed(symbol, interval="15m", limit=64):
+        # Simulate a tick landing mid-fetch: the mount-time synth warmup left
+        # _prev_sign == 0 (flat bars), so one up-tick crosses and opens a LONG.
+        strat = apps[0].strategy
+        strat.on_price(apps[0].cfg.strategy_symbol, 1000.0, 123)
+        assert strat.position.side is Side.LONG  # precondition for the test
+        return fabricated
+
+    monkeypatch.setattr("entropy.ui.app.warmup_equity_bars", delayed)
+    app = EntropyApp(AppConfig(enable_crypto=False, equity_source="live"))
+    apps.append(app)
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app.strategy._slow.value == 512.0:
+                break
+        # Strategy was rebuilt and reseeded from the real bars…
+        assert app.strategy.is_warm
+        assert app.strategy._slow.value == 512.0
+        # …but the open position survived the rebuild instead of being orphaned.
+        assert app.strategy.position.side is Side.LONG
+        assert app.strategy.position.entry_px == 1000.0
+        # A downward cross on the fresh EMAs still closes the carried position.
+        events = []
+        for px in (400.0, 380.0, 360.0, 340.0, 320.0, 300.0):
+            events += app.strategy.on_price("SPY", px, 456)
+        kinds = [e.kind.value for e in events]
+        assert "close_long" in kinds
         await pilot.press("q")
