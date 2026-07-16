@@ -15,3 +15,10 @@ entropy_trades.csv
 .agents/
 .uv-cache/
 .uv_cache/
+
+# session runtime ipc
+.custom_pools_ipc.json
+.custom_pools_ipc.json.lock
+
+# internal design/plan docs stay out of the tree (see c577b68)
+docs/superpowers/

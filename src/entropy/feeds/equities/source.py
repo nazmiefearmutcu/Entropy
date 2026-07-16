@@ -45,12 +45,14 @@ def resolve_equity_source(
 
 
 def market_status(*, calendar: Any | None = None, now: datetime | None = None) -> str:
-    """"open"/"closed" per the US market calendar; "" if stockodile is unavailable.
+    """"open"/"closed" per the US market calendar; "" if the answer is unavailable.
 
-    Used by the header's NYSE chip, which must degrade to blank rather than
-    crash when the live-feed extra is not installed.
+    Used by the header's NYSE chip from the app's periodic refresh timer, where
+    Textual treats any uncaught exception as fatal — so a missing stockodile OR
+    a calendar bug (external git dep) must degrade to a blank chip, not crash
+    the TUI.
     """
     try:
         return "open" if _market_is_open(calendar=calendar, now=now) else "closed"
-    except ImportError:
+    except Exception:
         return ""

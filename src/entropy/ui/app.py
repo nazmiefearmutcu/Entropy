@@ -211,8 +211,8 @@ class EntropyApp(App[None]):
             pass
 
     def _market_status(self) -> str:
-        """NYSE chip state ("open"/"closed"/""), memoized: the header refreshes
-        every second but the calendar math only reruns every 30s."""
+        """NYSE chip state ("open"/"closed"/""), memoized: the 10 Hz snapshot
+        timer refreshes the header, but the calendar math only reruns every 30s."""
         now = time.monotonic()
         last = self._market_status_ts
         if last is not None and now - last < _MARKET_STATUS_TTL_S:

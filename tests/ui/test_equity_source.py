@@ -81,6 +81,17 @@ def test_market_status_open_closed():
     assert market_status(calendar=FakeCalendar(False), now=NOON) == "closed"
 
 
+def test_market_status_swallows_calendar_errors():
+    """The chip is computed inside a Textual timer callback, where any uncaught
+    exception kills the whole app — a broken calendar must yield a blank chip."""
+
+    class BrokenCalendar:
+        def is_market_open(self, dt: datetime) -> bool:
+            raise RuntimeError("holiday table corrupt")
+
+    assert market_status(calendar=BrokenCalendar(), now=NOON) == ""
+
+
 # --- HeaderBar NYSE chip -----------------------------------------------------
 
 @pytest.mark.asyncio
