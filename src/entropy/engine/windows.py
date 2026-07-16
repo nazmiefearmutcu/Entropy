@@ -7,7 +7,10 @@ from collections import deque
 class MonotonicExtreme:
     """Rolling max (kind=+1) or min (kind=-1) over span_ns, O(1) amortized.
     step() queries the PRIOR extreme (before inserting) and reports a STRICT
-    new extreme (> for max, < for min); equalling the extreme is not new."""
+    new extreme (> for max, < for min); equalling the extreme is not new.
+    span_ns may be reassigned to hot-apply a new window: the buffer is kept and
+    prunes lazily on the next evict()/step() (growing the span cannot resurrect
+    already-evicted history)."""
     __slots__ = ("span_ns", "kind", "dq")
 
     def __init__(self, span_ns: int, kind: int) -> None:

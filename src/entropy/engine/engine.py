@@ -62,16 +62,6 @@ class EngineSnapshot(msgspec.Struct, frozen=True):
     ticker: tuple[TickerGroup, ...]
 
 
-def _count_since(dq: deque[int], cutoff: int) -> int:
-    """Read-only count of stamps at/after cutoff (dq is ascending in time)."""
-    n = 0
-    for stamp in reversed(dq):
-        if stamp < cutoff:
-            break
-        n += 1
-    return n
-
-
 class Engine:
     def __init__(self, config: EngineConfig | None = None) -> None:
         self._tapes: dict[str, _Tape] = {}
@@ -218,9 +208,11 @@ class Engine:
             self._accel_sample_seq = self._trade_seq
         # Per-window aggregate new-high / new-low symbol-activity counts (dual gauges)
         # and the top-symbol ticker groups (the "<win>: SYM n  SYM n" strip).
-        # Counting is READ-ONLY: deques are evicted on the on_trade hot path;
-        # stamps older than the window (relative to the global clock) are
-        # filtered out here without mutating any tape.
+        # Stamps older than the window (relative to the global clock) are evicted
+        # here before len(). Eviction is IDEMPOTENT — it only drops stamps that
+        # count zero — so back-to-back snapshots stay identical, and headless
+        # boundedness is already guaranteed by the on_trade eviction. Evict+len
+        # keeps the per-snapshot cost O(evicted), not O(in-window stamps).
         nh_counts: dict[str, int] = {}
         nl_counts: dict[str, int] = {}
         ticker: list[TickerGroup] = []
@@ -232,8 +224,14 @@ class Engine:
             nl_tot = 0
             active: list[tuple[str, int]] = []
             for s, tp in items:
-                h = _count_since(tp.nh_by_win[i], cutoff)
-                lo = _count_since(tp.nl_by_win[i], cutoff)
+                dq_h = tp.nh_by_win[i]
+                while dq_h and dq_h[0] < cutoff:
+                    dq_h.popleft()
+                dq_l = tp.nl_by_win[i]
+                while dq_l and dq_l[0] < cutoff:
+                    dq_l.popleft()
+                h = len(dq_h)
+                lo = len(dq_l)
                 nh_tot += h
                 nl_tot += lo
                 if h + lo:
