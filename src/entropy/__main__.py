@@ -13,7 +13,11 @@ from entropy.ui.app import EntropyApp
 
 console = Console()
 
-def run_ui(console_log: str | None = None, trade_csv: str | None = None) -> None:
+def run_ui(
+    console_log: str | None = None,
+    trade_csv: str | None = None,
+    equity_source: str | None = None,
+) -> None:
     """Launch the main Entropy live scanner UI."""
     console.print("[bold yellow]Starting Entropy Live Scanner UI...[/]")
     kwargs = {}
@@ -21,6 +25,8 @@ def run_ui(console_log: str | None = None, trade_csv: str | None = None) -> None
         kwargs["console_log_path"] = console_log
     if trade_csv is not None:
         kwargs["trade_csv_path"] = trade_csv
+    if equity_source is not None:
+        kwargs["equity_source"] = equity_source
     EntropyApp(AppConfig(**kwargs)).run()
 
 def run_bot(argv: list[str]) -> None:
@@ -125,13 +131,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument("--console-log", default=None, help="Path to write console log output")
     parser.add_argument("--trade-csv", default=None, help="Path to write trade CSV report")
-    
+    parser.add_argument("--equity-source", choices=["sim", "live", "auto"], default=None,
+                        help="equity feed source (auto = live while the US market is open)")
+
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
-    
+
     # UI command
     ui_parser = subparsers.add_parser("ui", help="Launch the main TUI scanner dashboard (default)")
     ui_parser.add_argument("--console-log", default=argparse.SUPPRESS, help="Path to write console log output")
     ui_parser.add_argument("--trade-csv", default=argparse.SUPPRESS, help="Path to write trade CSV report")
+    ui_parser.add_argument("--equity-source", choices=["sim", "live", "auto"],
+                           default=argparse.SUPPRESS,
+                           help="equity feed source (auto = live while the US market is open)")
     
     # Bot command
     bot_parser = subparsers.add_parser("bot", help="Run the automated trade bot CLI/TUI")
@@ -190,7 +201,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         # Default command: launch the main UI
         console_log = getattr(args, "console_log", None)
         trade_csv = getattr(args, "trade_csv", None)
-        run_ui(console_log=console_log, trade_csv=trade_csv)
+        equity_source = getattr(args, "equity_source", None)
+        run_ui(console_log=console_log, trade_csv=trade_csv, equity_source=equity_source)
 
 if __name__ == "__main__":
     main()

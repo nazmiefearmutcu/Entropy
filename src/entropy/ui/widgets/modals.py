@@ -46,6 +46,10 @@ class SettingsScreen(ModalScreen[None]):
         ]
         chart_options = [("Candlestick", "candlestick"), ("Line Plot", "line")]
         tf_options = [(name, name) for name in TIMEFRAMES]
+        equity_source_options = [
+            ("Simulated", "sim"), ("Live (stockodile)", "live"),
+            ("Auto (live while NYSE open)", "auto"),
+        ]
 
         with Vertical(id="settings-container"):
             yield Static("Settings", id="settings-title")
@@ -82,6 +86,14 @@ class SettingsScreen(ModalScreen[None]):
                 with Horizontal(classes="settings-row"):
                     yield Label("Enable Equities Feed:")
                     yield Switch(value=cfg.enable_equities, id="set-equities")
+                with Horizontal(classes="settings-row"):
+                    yield Label("Equity Source:")
+                    yield Select(
+                        options=equity_source_options,
+                        value=cfg.equity_source,
+                        id="set-equity-source",
+                        allow_blank=False,
+                    )
                 with Horizontal(classes="settings-row"):
                     yield Label("Enable Live Crypto Feed:")
                     yield Switch(value=cfg.enable_crypto, id="set-crypto")
@@ -122,6 +134,7 @@ class SettingsScreen(ModalScreen[None]):
             vol_val = self.query_one("#set-volume", Switch).value
             tf_val = str(self.query_one("#set-timeframe", Select).value)
             equities_val = self.query_one("#set-equities", Switch).value
+            equity_source_val = str(self.query_one("#set-equity-source", Select).value)
             crypto_val = self.query_one("#set-crypto", Switch).value
             tps_val = int(self.query_one("#set-tps", Input).value)
             strat_sym_val = self.query_one("#set-strat-sym", Input).value.upper()
@@ -142,7 +155,7 @@ class SettingsScreen(ModalScreen[None]):
         self.app._apply_settings(  # type: ignore
             theme=theme_val, chart_type=chart_val, show_volume=vol_val,
             timeframe=tf_val, enable_equities=equities_val, enable_crypto=crypto_val,
-            equity_tps=tps_val, strategy_symbol=strat_sym_val,
+            equity_source=equity_source_val, equity_tps=tps_val, strategy_symbol=strat_sym_val,
             crypto_strategy_symbol=crypto_sym_val, spike_pct=spike_val, snapdrop_pct=snap_val,
         )
         self.dismiss()

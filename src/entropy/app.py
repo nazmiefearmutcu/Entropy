@@ -10,6 +10,7 @@ class AppConfig(msgspec.Struct, frozen=True):
     equity_tps: int = 4000
     enable_crypto: bool = True
     enable_equities: bool = True
+    equity_source: str = "auto"  # "sim" | "live" | "auto" (live iff US market open)
     strategy_symbol: str = "SPY"
     crypto_strategy_symbol: str = "binance-spot:BTCUSDT"
     theme: str = "entropy"

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import time
+from collections.abc import Sequence
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 from crypcodile.schema.records import Trade
@@ -20,7 +22,8 @@ from entropy.engine.timeframe import get_timeframe
 from entropy.feeds.bus import QueueSink
 from entropy.feeds.crypto import start_feed
 from entropy.feeds.equities.feed import EquitySimFeed
-from entropy.feeds.equities.universe import INDICES
+from entropy.feeds.equities.source import market_status, resolve_equity_source
+from entropy.feeds.equities.universe import INDICES, LIVE_UNIVERSE
 from entropy.feeds.warmup import warmup_klines
 from entropy.strategy.engine import Bar, EventKind, Strategy, StrategyConfig, StrategyEvent
 
@@ -33,6 +36,22 @@ from .widgets.histogram import EventHistogram
 from .widgets.modals import ErrorScreen, HelpScreen, SettingsScreen
 from .widgets.status_bar import StatusBar, format_telemetry
 from .widgets.ticker_strip import TickerStrip
+
+if TYPE_CHECKING:
+    from crypcodile.sink.base import Sink
+
+    from entropy.feeds.equities.live import EquityProviderPlan
+
+_MARKET_STATUS_TTL_S = 30.0  # header chip: recompute the calendar at most this often
+
+
+async def start_equity_feed(
+    sink: Sink, symbols: Sequence[str]
+) -> tuple[asyncio.Task[None], EquityProviderPlan]:
+    """Lazy indirection over the live module: the sim path must never import
+    stockodile, and tests monkeypatch this symbol to stub the live feed."""
+    from entropy.feeds.equities import live
+    return await live.start_equity_feed(sink, symbols)
 
 
 class EntropyApp(App[None]):
@@ -81,6 +100,8 @@ class EntropyApp(App[None]):
         self._spikes = 0
         self._snap_drops = 0
         self._error_text = "No errors."
+        self._market_status_cache = ""
+        self._market_status_ts: float | None = None
 
     def query_default(self, selector: str, expect_type: Any) -> Any:
         try:
@@ -185,8 +206,20 @@ class EntropyApp(App[None]):
                     price, pct = q
                     parts.append(f"{sym} {price:.2f} ({pct:+.2f}%)")
             header.quotes = "   ".join(parts)
+            header.market_status = self._market_status()
         except NoMatches:
             pass
+
+    def _market_status(self) -> str:
+        """NYSE chip state ("open"/"closed"/""), memoized: the header refreshes
+        every second but the calendar math only reruns every 30s."""
+        now = time.monotonic()
+        last = self._market_status_ts
+        if last is not None and now - last < _MARKET_STATUS_TTL_S:
+            return self._market_status_cache
+        self._market_status_ts = now
+        self._market_status_cache = market_status()  # "" if stockodile is unavailable
+        return self._market_status_cache
 
     def _push_info(self, text: str, color: str = "white") -> None:
         with suppress(NoMatches):
@@ -289,8 +322,43 @@ class EntropyApp(App[None]):
         elif r.symbol == self.cfg.crypto_strategy_symbol:
             self._crypto_candles.add(r.local_ts, r.price, r.amount)
 
-    @work(group="feeds")
+    @work(exclusive=True, group="equity_feed")
     async def _run_equity_feed(self) -> None:
+        # exclusive: a settings-driven relaunch cancels the previous worker first,
+        # so the sim and live feeds can never run side by side.
+        try:
+            source = resolve_equity_source(self.cfg.equity_source)
+        except Exception as exc:
+            self._feed_status(f"equities: source resolution failed ({exc}); using sim", "red")
+            source = "sim"
+        if source == "live":
+            try:
+                task, plan = await start_equity_feed(self._sink, LIVE_UNIVERSE)
+            except Exception as exc:
+                self._feed_status(
+                    f"equities: live feed failed ({exc}); falling back to sim", "red"
+                )
+                self._error_text = f"equity feed: {exc}"
+            else:
+                self._feed_status(f"equities: source=live ({plan.provider_name})")
+                if plan.trimmed_symbols:
+                    self._feed_status(
+                        f"equities: {plan.provider_name} symbol cap dropped "
+                        f"{len(plan.trimmed_symbols)}: {', '.join(plan.trimmed_symbols)}",
+                        "yellow",
+                    )
+                try:
+                    await task
+                except Exception as exc:
+                    # Mid-run death: report, don't splice sim prices onto real ones.
+                    self._feed_status(f"equities: live feed stopped ({exc})", "red")
+                    self._error_text = f"equity feed: {exc}"
+                finally:
+                    # Worker cancelled (settings change / quit) or exited: the
+                    # collect task must die with it, not keep feeding the sink.
+                    task.cancel()
+                return
+        self._feed_status("equities: source=sim")
         await self._equity.run()
 
     @work(group="feeds")
@@ -325,11 +393,12 @@ class EntropyApp(App[None]):
 
     def _apply_settings(
         self, *, theme: str, chart_type: str, show_volume: bool, timeframe: str,
-        enable_equities: bool, enable_crypto: bool, equity_tps: int,
+        enable_equities: bool, enable_crypto: bool, equity_source: str, equity_tps: int,
         strategy_symbol: str, crypto_strategy_symbol: str,
         spike_pct: float, snapdrop_pct: float,
     ) -> None:
         tf_changed = timeframe != self.cfg.timeframe
+        equity_source_changed = equity_source != self.cfg.equity_source
         spec = get_timeframe(timeframe)
         # Overlay timeframe-derived windows/scalars + form spike/snapdrop onto the existing
         # engine config so non-form fields (upmove/downmove/leaderboard_k/accel_eps) are preserved.
@@ -346,7 +415,7 @@ class EntropyApp(App[None]):
         self.cfg = msgspec.structs.replace(
             self.cfg, theme=theme, chart_type=chart_type, show_volume=show_volume,
             timeframe=timeframe, enable_equities=enable_equities, enable_crypto=enable_crypto,
-            equity_tps=equity_tps, strategy_symbol=strategy_symbol,
+            equity_source=equity_source, equity_tps=equity_tps, strategy_symbol=strategy_symbol,
             crypto_strategy_symbol=crypto_strategy_symbol, engine=new_engine_cfg,
         )
         self.theme = theme
@@ -387,3 +456,7 @@ class EntropyApp(App[None]):
                 self._push_info(f"watching [{strategy_symbol}]")
             if crypto_symbol_changed:
                 self._warmup_crypto()
+
+        if equity_source_changed and self.cfg.enable_equities:
+            # Relaunch resolves the new source; exclusive worker cancels the old feed.
+            self._run_equity_feed()

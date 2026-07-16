@@ -4,7 +4,7 @@ import argparse
 
 def test_console_log_global_only(monkeypatch):
     received = {}
-    def mock_run_ui(console_log, trade_csv):
+    def mock_run_ui(console_log, trade_csv, equity_source=None):
         received["console_log"] = console_log
     monkeypatch.setattr("entropy.__main__.run_ui", mock_run_ui)
     
@@ -13,7 +13,7 @@ def test_console_log_global_only(monkeypatch):
 
 def test_console_log_subcommand_only(monkeypatch):
     received = {}
-    def mock_run_ui(console_log, trade_csv):
+    def mock_run_ui(console_log, trade_csv, equity_source=None):
         received["console_log"] = console_log
     monkeypatch.setattr("entropy.__main__.run_ui", mock_run_ui)
     
@@ -22,7 +22,7 @@ def test_console_log_subcommand_only(monkeypatch):
 
 def test_console_log_override(monkeypatch):
     received = {}
-    def mock_run_ui(console_log, trade_csv):
+    def mock_run_ui(console_log, trade_csv, equity_source=None):
         received["console_log"] = console_log
     monkeypatch.setattr("entropy.__main__.run_ui", mock_run_ui)
     

@@ -153,7 +153,8 @@ async def test_combined_timeframe_and_symbol_change_warms_once(monkeypatch):
         monkeypatch.setattr(app, "_warmup_strategies", counting)
         app._apply_settings(
             theme="entropy", chart_type="candlestick", show_volume=True,
-            timeframe="1h", enable_equities=True, enable_crypto=False, equity_tps=4000,
+            timeframe="1h", enable_equities=True, enable_crypto=False,
+            equity_source=app.cfg.equity_source, equity_tps=4000,
             strategy_symbol="QQQ", crypto_strategy_symbol=app.cfg.crypto_strategy_symbol,
             spike_pct=0.40, snapdrop_pct=0.40,
         )
