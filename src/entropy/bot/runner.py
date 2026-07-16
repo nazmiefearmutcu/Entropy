@@ -48,7 +48,7 @@ class BotRunner:
         self.risk = RiskManager(config.profile())
         self.executor = _make_executor(config)
         self.strategies = build_strategies(config)
-        self.ledger = Ledger(run_dir, mode=config.mode)
+        self.ledger = Ledger(run_dir, mode=config.mode, trade_csv_path=config.trade_csv_path)
         self._sink = QueueSink()
         self._equity = EquitySimFeed(self._sink, seed=config.seed, ticks_per_sec=config.equity_tps)
         self.ticks = 0
@@ -57,6 +57,7 @@ class BotRunner:
 
     # ---- synchronous hot path -------------------------------------------------
     def on_trade(self, symbol: str, price: float, amount: float, side: str, ts_ns: int) -> None:
+        self.risk.update_tick(symbol, price, ts_ns)
         events = self.engine.on_trade(symbol, price, amount, side, ts_ns)
         self.portfolio.mark(symbol, price)
         self._last_ts_ns = ts_ns
@@ -87,12 +88,28 @@ class BotRunner:
             return
         if order.intent is OrderIntent.OPEN:
             pos_side = PositionSide.LONG if order.side is OrderSide.BUY else PositionSide.SHORT
-            stop_px, tp_px = self.risk.stop_tp_prices(pos_side, fill.price)
+            stop_px, tp_px = self.risk.stop_tp_prices(pos_side, fill.price, order.symbol)
             self.portfolio.open(order.symbol, pos_side, fill.qty, fill.price,
                                 stop_px, tp_px, fill.ts_ns, fill.fee)
+            self.ledger.record_trade_open(order.symbol, "LONG" if pos_side is PositionSide.LONG else "SHORT", fill.price)
         else:
+            pos = self.portfolio.positions.get(order.symbol)
+            side_str = "LONG"
+            if pos is not None:
+                side_str = "LONG" if pos.side is PositionSide.LONG else "SHORT"
+            else:
+                side_str = "LONG" if order.side is OrderSide.SELL else "SHORT"
             self.portfolio.close(order.symbol, fill.price, fill.ts_ns, fill.fee)
+            self.ledger.record_trade_close(order.symbol, side_str, fill.price)
         self.ledger.record_fill(fill, order.intent)
+
+    def trip_circuit_breaker(self) -> None:
+        self.risk.trip()
+        ts_ns = self._last_ts_ns if self._last_ts_ns > 0 else int(time.time() * _NS_PER_S)
+        self.ledger.record_event("emergency_halt", {"timestamp": ts_ns})
+        orders = self.risk.close_all_positions(self.portfolio, ts_ns)
+        for order in orders:
+            self._execute(order)
 
     # ---- control --------------------------------------------------------------
     def set_risk_profile(self, name: str) -> RiskProfile:

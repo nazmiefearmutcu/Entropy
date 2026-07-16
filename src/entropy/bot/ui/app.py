@@ -8,17 +8,14 @@ from textual.containers import Vertical
 
 from ..config import BotConfig
 from ..runner import BotRunner
-from .confirm import ConfirmRiskScreen
+from .confirm import ConfirmRiskScreen, BotSettingsScreen
 from .widgets import ModeBanner, PnLPanel, PositionsTable, RiskBanner, TradeLog
-
-_KEY_TO_PROFILE = {"1": "conservative", "2": "balanced", "3": "aggressive"}
 
 
 class BotDashboard(App[None]):
     BINDINGS = [
-        ("1", "risk('1')", "Conservative"),
-        ("2", "risk('2')", "Balanced"),
-        ("3", "risk('3')", "Aggressive"),
+        ("s", "settings", "Settings"),
+        ("k", "trip_breaker", "Halt"),
         ("q", "quit", "Quit"),
     ]
 
@@ -43,21 +40,30 @@ class BotDashboard(App[None]):
         self._run_feeds()
 
     def _sample(self) -> None:
+        if not self.is_running:
+            return
+        try:
+            pnl = self.query_one(PnLPanel)
+            pos = self.query_one(PositionsTable)
+        except Exception:
+            return
         snap = self.runner.snapshot()
-        self.query_one(PnLPanel).show(snap.portfolio)
-        self.query_one(PositionsTable).show(snap.portfolio)
+        pnl.show(snap.portfolio)
+        pos.show(snap.portfolio)
 
     @work(exclusive=True, group="bot")
     async def _run_feeds(self) -> None:
         await self.runner.run()
 
-    def action_risk(self, key: str) -> None:
-        name = _KEY_TO_PROFILE.get(key)
-        if name is None:
-            return
-        self.push_screen(ConfirmRiskScreen(name, lambda: self.apply_risk_change(name)))
+    def action_settings(self) -> None:
+        self.push_screen(BotSettingsScreen())
 
     def apply_risk_change(self, name: str) -> None:
         profile = self.runner.set_risk_profile(name)
         self.query_one(RiskBanner).set_profile(profile)
         self.query_one(TradeLog).log_line(f"risk profile changed -> {profile.name}")
+
+    def action_trip_breaker(self) -> None:
+        self.runner.trip_circuit_breaker()
+        self.query_one(TradeLog).log_line("EMERGENCY HALT: circuit breaker tripped")
+        self.query_one(RiskBanner).set_halted()

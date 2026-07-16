@@ -13,7 +13,7 @@ def _replay_fixed_sequence(run_dir: Path) -> BotRunner:
     """Drive a FIXED trade sequence through a fresh runner synchronously (no live/async
     feed). All timestamps sit past the 5s momentum horizon so momentum events fire."""
     cfg = BotConfig(strategies=("momentum_scalper", "ema_cross"), ema_symbol="AAA",
-                    enable_crypto=False, enable_equities=False, risk_profile="aggressive")
+                    enable_crypto=False, enable_equities=False, risk_profile="extreme")
     bot = BotRunner(cfg, run_dir=str(run_dir))
     bot.on_trade("AAA", 100.0, 1.0, "buy", 0)   # seed window + momentum anchor
     bot.on_trade("BBB", 50.0, 1.0, "buy", 0)
@@ -49,7 +49,7 @@ async def test_end_to_end_paper_run_writes_valid_ledger(tmp_path: Path):
     async def run_once(d: Path) -> int:
         cfg = BotConfig(strategies=("momentum_scalper", "ema_cross"), ema_symbol="SPY",
                         enable_crypto=False, enable_equities=True, equity_tps=3000,
-                        seed=7, risk_profile="aggressive")
+                        seed=7, risk_profile="extreme")
         bot = BotRunner(cfg, run_dir=str(d), equity_record_period_s=0.05)
         task = asyncio.create_task(bot.run())
         await asyncio.sleep(0.3)

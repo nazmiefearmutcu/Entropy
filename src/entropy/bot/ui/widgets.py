@@ -5,7 +5,7 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, RichLog, Static
 
 from ..portfolio import PortfolioSnapshot
-from ..risk.profiles import BALANCED, RiskProfile
+from ..risk.profiles import MEDIUM, RiskProfile
 
 
 class ModeBanner(Static):
@@ -30,8 +30,9 @@ class ModeBanner(Static):
 class RiskBanner(Static):
     """Always-on, colored risk-level banner."""
 
-    profile_name: reactive[str] = reactive(BALANCED.name)
-    color: reactive[str] = reactive(BALANCED.color)
+    profile_name: reactive[str] = reactive(MEDIUM.name)
+    color: reactive[str] = reactive(MEDIUM.color)
+    halted: reactive[bool] = reactive(False)
 
     def set_profile(self, profile: RiskProfile) -> None:
         self.profile_name = profile.name
@@ -39,11 +40,20 @@ class RiskBanner(Static):
         if self.is_attached:
             self.update(Text(self.render_text(), style=f"bold {self.color}"))
 
+    def set_halted(self) -> None:
+        self.halted = True
+        self.color = "red"
+        if self.is_attached:
+            self.update(Text(self.render_text(), style=f"bold red"))
+
     def render_text(self) -> str:
+        if self.halted:
+            return "RISK PROFILE: HALTED"
         return f"RISK PROFILE: {self.profile_name.upper()}"
 
     def on_mount(self) -> None:
-        self.update(Text(self.render_text(), style=f"bold {self.color}"))
+        color = "red" if self.halted else self.color
+        self.update(Text(self.render_text(), style=f"bold {color}"))
 
 
 class PnLPanel(Static):

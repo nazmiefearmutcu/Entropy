@@ -19,15 +19,17 @@ class Ledger:
     fills and the equity curve. All writes are synchronous appends (call off the hot path
     for equity; fills are rare)."""
 
-    def __init__(self, run_dir: str, mode: str = "paper") -> None:
+    def __init__(self, run_dir: str, mode: str = "paper", trade_csv_path: str = "entropy_trades.csv") -> None:
         os.makedirs(run_dir, exist_ok=True)
         self.run_dir = run_dir
         self.mode = mode  # "paper" | "live" — stamped on every record so runs are never confused
+        self.trade_csv_path = trade_csv_path
         self._events = os.path.join(run_dir, "events.jsonl")
         self._fills = os.path.join(run_dir, "fills.csv")
         self._equity = os.path.join(run_dir, "equity.csv")
         self._init_csv(self._fills, _FILL_HEADER)
         self._init_csv(self._equity, _EQUITY_HEADER)
+        init_trade_csv(self.trade_csv_path)
         self._write_meta()
 
     def _write_meta(self) -> None:
@@ -69,3 +71,67 @@ class Ledger:
 
     def record_risk_change(self, old: str, new: str) -> None:
         self.record_event("risk_profile_changed", {"from": old, "to": new})
+
+    def record_trade_open(self, symbol: str, side: str, price: float) -> None:
+        record_trade_open(self.trade_csv_path, symbol, side, price)
+
+    def record_trade_close(self, symbol: str, side: str, price: float) -> None:
+        record_trade_close(self.trade_csv_path, symbol, side, price)
+
+
+def init_trade_csv(path: str) -> None:
+    """Initialize the trade CSV file with headers if it does not exist."""
+    if not path:
+        return
+    log_dir = os.path.dirname(path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    if not os.path.exists(path):
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerow(["Symbol", "Side", "Open Price", "Close Price"])
+
+
+def record_trade_open(csv_path: str, symbol: str, side: str, price: float) -> None:
+    """Record an opened trade in the trade CSV file."""
+    if not csv_path:
+        return
+    init_trade_csv(csv_path)
+    try:
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow([symbol, side, str(price), ""])
+    except Exception:
+        pass
+
+
+def record_trade_close(csv_path: str, symbol: str, side: str, price: float) -> None:
+    """Record a closed trade in the trade CSV file by filling the last matching open trade's close price."""
+    if not csv_path or not os.path.exists(csv_path):
+        return
+    try:
+        rows: list[list[str]] = []
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if header is not None:
+                rows.append(header)
+            for row in reader:
+                rows.append(row)
+        
+        filled = False
+        for idx in range(len(rows) - 1, 0, -1):
+            row = rows[idx]
+            if (
+                len(row) >= 4
+                and row[0].upper() == symbol.upper()
+                and row[1].upper() == side.upper()
+                and not row[3]
+            ):
+                row[3] = str(price)
+                filled = True
+                break
+                
+        if filled:
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerows(rows)
+    except Exception:
+        pass

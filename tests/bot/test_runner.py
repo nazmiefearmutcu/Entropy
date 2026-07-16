@@ -16,7 +16,7 @@ def test_build_strategies_from_names():
 
 def test_on_trade_opens_position_on_momentum(tmp_path: Path):
     cfg = BotConfig(strategies=("momentum_scalper",), enable_crypto=False,
-                    enable_equities=False, risk_profile="aggressive")
+                    enable_equities=False, risk_profile="extreme")
     bot = BotRunner(cfg, run_dir=str(tmp_path))
     # First tick at ts=0 seeds the engine window AND the momentum anchor (returns no events).
     # The momentum horizon is 5s (5e9 ns): has_anchor() only becomes true once a tick is at
@@ -33,7 +33,7 @@ def test_on_trade_opens_position_on_momentum(tmp_path: Path):
 async def test_run_with_sim_feed_records_equity(tmp_path: Path):
     cfg = BotConfig(strategies=("momentum_scalper",), enable_crypto=False,
                     enable_equities=True, equity_tps=3000, seed=11,
-                    risk_profile="aggressive")
+                    risk_profile="extreme")
     bot = BotRunner(cfg, run_dir=str(tmp_path))
     task = asyncio.create_task(bot.run())
     await asyncio.sleep(0.3)
@@ -46,11 +46,11 @@ async def test_run_with_sim_feed_records_equity(tmp_path: Path):
 
 
 def test_set_risk_profile_records_change(tmp_path: Path):
-    cfg = BotConfig(risk_profile="conservative")
+    cfg = BotConfig(risk_profile="frosty")
     bot = BotRunner(cfg, run_dir=str(tmp_path))
-    assert bot.risk.profile.name == "Conservative"
-    bot.set_risk_profile("aggressive")
-    assert bot.risk.profile.name == "Aggressive"
+    assert bot.risk.profile.name == "Frosty"
+    bot.set_risk_profile("extreme")
+    assert bot.risk.profile.name == "Extreme"
     import json
     kinds = [json.loads(x)["kind"]
              for x in (tmp_path / "events.jsonl").read_text().strip().splitlines()]

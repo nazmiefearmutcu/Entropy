@@ -1,25 +1,33 @@
 import pytest
 
-from entropy.bot.risk.profiles import AGGRESSIVE, BALANCED, CONSERVATIVE, get_profile, make_custom
+from entropy.bot.risk.profiles import EXTREME, FROSTY, MEDIUM, get_profile, make_custom
 
 
 def test_presets_have_expected_numbers():
-    assert CONSERVATIVE.per_trade_pct == 1.0
-    assert CONSERVATIVE.max_concurrent == 2
-    assert CONSERVATIVE.max_daily_loss_pct == 2.0
-    assert BALANCED.per_trade_pct == 2.5
-    assert AGGRESSIVE.max_total_exposure_pct == 40.0
+    assert FROSTY.per_trade_pct == 1.0
+    assert FROSTY.max_concurrent == 2
+    assert FROSTY.max_daily_loss_pct == 2.0
+    assert FROSTY.min_volatility_pct == 0.25
+    assert "0.25% minimum volatility threshold" in FROSTY.description
+    
+    assert MEDIUM.per_trade_pct == 2.5
+    assert MEDIUM.min_volatility_pct == 0.15
+    assert "0.15% minimum volatility threshold" in MEDIUM.description
+    
+    assert EXTREME.max_total_exposure_pct == 40.0
+    assert EXTREME.min_volatility_pct == 0.05
+    assert "0.05% minimum volatility threshold" in EXTREME.description
 
 
 def test_every_profile_has_color_and_description():
-    for p in (CONSERVATIVE, BALANCED, AGGRESSIVE):
-        assert p.color in {"green", "yellow", "red"}
+    for p in (FROSTY, MEDIUM, EXTREME):
+        assert p.color in {"cyan", "yellow", "red"}
         assert len(p.description) > 20  # human-readable risk explanation
 
 
 def test_get_profile_is_case_insensitive():
-    assert get_profile("balanced") is BALANCED
-    assert get_profile("Aggressive") is AGGRESSIVE
+    assert get_profile("medium") is MEDIUM
+    assert get_profile("Extreme") is EXTREME
 
 
 def test_get_profile_unknown_raises():
