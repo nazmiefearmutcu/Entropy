@@ -20,18 +20,20 @@ def _sig(action: SignalAction, symbol: str = "SPY") -> Signal:
     )
 
 def test_volatility_history_and_scaling():
-    # 1. Verify rolling history bounds & no duplicates on same timestamp
-    rm = RiskManager(MEDIUM)
+    # 1. Verify time-windowed history bounds & no duplicates on same timestamp
+    rm = RiskManager(MEDIUM)  # vol_window_s = 30.0
     rm.update_tick("SPY", 100.0, 1000)
     rm.update_tick("SPY", 100.0, 1000) # Duplicate timestamp
     assert len(rm.ticks_history["SPY"]) == 1
-    
-    # Fill rolling history up to 25 ticks, should keep only last 20
-    for i in range(25):
-        rm.update_tick("SPY", 100.0 + i, 1000 + i)
-    assert len(rm.ticks_history["SPY"]) == 20
-    assert rm.ticks_history["SPY"][0] == (1005, 105.0)
-    assert rm.ticks_history["SPY"][-1] == (1024, 124.0)
+
+    # Ticks 1s apart spanning 40s: entries older than the 30s window age out.
+    _ns = 1_000_000_000
+    for i in range(1, 41):
+        rm.update_tick("SPY", 100.0 + i, 1000 + i * _ns)
+    # Last tick at 1000+40s -> cutoff 1000+10s -> ticks 10..40 remain (31 entries)
+    assert len(rm.ticks_history["SPY"]) == 31
+    assert rm.ticks_history["SPY"][0] == (1000 + 10 * _ns, 110.0)
+    assert rm.ticks_history["SPY"][-1] == (1000 + 40 * _ns, 140.0)
 
     # 2. Verify fallback to 1.0 when less than 2 ticks
     rm2 = RiskManager(MEDIUM)

@@ -13,10 +13,11 @@ def _sig(action: SignalAction, symbol: str = "SPY") -> Signal:
 
 def test_inf_ticks_behavior():
     # 1. Test standard RiskManager with an inf tick in history
+    # (5 in-window ticks so evaluate's volatility/deviation paths actually engage)
     rm = RiskManager(MEDIUM)
-    rm.update_tick("SPY", 100.0, 1000)
-    rm.update_tick("SPY", float('inf'), 2000)
-    
+    for i, px in enumerate((100.0, 100.0, 100.0, 100.0, float('inf'))):
+        rm.update_tick("SPY", px, 1000 + i)
+
     # Let's check stop/tp calculation.
     # Mean will be inf. std will be nan because (inf - inf) is nan.
     # Therefore, scale_factor = 1.0 + std / mean = nan.
@@ -29,14 +30,15 @@ def test_inf_ticks_behavior():
     p = Portfolio(100_000.0)
     # The volatility calculation will have mean = inf, std = nan, volatility_pct = nan.
     # This evaluates nan < min_volatility_pct as False, so it bypasses volatility floor check.
+    # The deviation guard sees abs(mark - inf) / inf = nan > 0.03 -> False -> bypassed too.
     # But it also means no error is raised in evaluate.
     decision = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=3000)
     assert decision.approved
-    
+
     # 3. Check negative inf behavior
     rm_neginf = RiskManager(MEDIUM)
-    rm_neginf.update_tick("SPY", 100.0, 1000)
-    rm_neginf.update_tick("SPY", float('-inf'), 2000)
+    for i, px in enumerate((100.0, 100.0, 100.0, 100.0, float('-inf'))):
+        rm_neginf.update_tick("SPY", px, 1000 + i)
     # Mean will be -inf. mean > 0 is False. scale_factor defaults to 1.0.
     sl, tp = rm_neginf.stop_tp_prices(PositionSide.LONG, 100.0, "SPY")
     expected_sl = 100.0 * (1 - MEDIUM.stop_loss_pct / 100)
@@ -47,9 +49,9 @@ def test_inf_ticks_behavior():
 
 def test_nan_ticks_behavior():
     rm = RiskManager(MEDIUM)
-    rm.update_tick("SPY", 100.0, 1000)
-    rm.update_tick("SPY", float('nan'), 2000)
-    
+    for i, px in enumerate((100.0, 100.0, 100.0, 100.0, float('nan'))):
+        rm.update_tick("SPY", px, 1000 + i)
+
     # Mean is nan, so mean > 0 is False. scale_factor defaults to 1.0.
     sl, tp = rm.stop_tp_prices(PositionSide.LONG, 100.0, "SPY")
     expected_sl = 100.0 * (1 - MEDIUM.stop_loss_pct / 100)
@@ -68,9 +70,9 @@ def test_nan_ticks_behavior():
 def test_extreme_low_and_zero_volatility():
     # Test zero volatility (prices do not change)
     rm = RiskManager(make_custom(min_volatility_pct=0.15, cooldown_s=10))
-    rm.update_tick("SPY", 100.0, 1000)
-    rm.update_tick("SPY", 100.0, 2000)
-    
+    for i in range(5):
+        rm.update_tick("SPY", 100.0, 1000 + i)
+
     p = Portfolio(100_000.0)
     # Volatility is 0.0%, which is below min_volatility_pct (0.15%)
     decision = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=3000)
@@ -80,9 +82,9 @@ def test_extreme_low_and_zero_volatility():
     # If min_volatility_pct is 0, it should be approved, and cooldown scaling should be
     # maximum (10.0x)
     rm_zero_min = RiskManager(make_custom(min_volatility_pct=0.0, cooldown_s=10))
-    rm_zero_min.update_tick("SPY", 100.0, 1000)
-    rm_zero_min.update_tick("SPY", 100.0, 2000)
-    
+    for i in range(5):
+        rm_zero_min.update_tick("SPY", 100.0, 1000 + i)
+
     decision2 = rm_zero_min.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=3000)
     assert decision2.approved
     # Cooldown should be 10 * 10 * 1e9 = 100 seconds
@@ -92,9 +94,9 @@ def test_extreme_low_and_zero_volatility():
     # Cooldown scale factor = min(0.30 / volatility_pct, 10.0). Since volatility_pct is
     # extremely low, it should cap at 10.0.
     rm_low_vol = RiskManager(make_custom(min_volatility_pct=0.0, cooldown_s=10))
-    rm_low_vol.update_tick("SPY", 100.0, 1000)
-    rm_low_vol.update_tick("SPY", 100.0001, 2000)
-    
+    for i, px in enumerate((100.0, 100.0, 100.0, 100.0, 100.0001)):
+        rm_low_vol.update_tick("SPY", px, 1000 + i)
+
     decision3 = rm_low_vol.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=3000)
     assert decision3.approved
     assert rm_low_vol._cooldown_until["SPY"] == 3000 + 100_000_000_000
@@ -112,8 +114,8 @@ def test_negative_volatility_prevention():
     # volatility_pct = 199.0 / 99.0 * 100 = 201.0%.
     # This works without issue.
     rm = RiskManager(MEDIUM)
-    rm.update_tick("SPY", 298.0, 1000)
-    rm.update_tick("SPY", -100.0, 2000)
+    for i, px in enumerate((298.0, -100.0, 298.0, -100.0, 99.0)):
+        rm.update_tick("SPY", px, 1000 + i)
     p = Portfolio(100_000.0)
     decision = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=3000)
     assert decision.approved

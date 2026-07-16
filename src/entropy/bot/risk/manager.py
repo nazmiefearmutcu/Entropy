@@ -9,6 +9,15 @@ from .profiles import RiskProfile
 
 _NS_PER_S = 1_000_000_000
 
+# Hard cap on retained ticks per symbol: a memory bound against tick storms
+# denser than the profile's time window anticipates (oldest entries drop first).
+_MAX_TICKS = 512
+
+# Minimum in-window ticks for volatility / deviation statistics; below this the
+# sample is "insufficient data" — entries proceed unfiltered (legacy <2-tick
+# spirit) and exits are never blocked.
+_MIN_WINDOW_TICKS = 5
+
 
 class RiskDecision(msgspec.Struct, frozen=True):
     approved: bool
@@ -37,13 +46,28 @@ class RiskManager:
         self.halted = False
 
     def update_tick(self, symbol: str, price: float, ts_ns: int) -> None:
-        if symbol not in self.ticks_history:
-            self.ticks_history[symbol] = []
-        history = self.ticks_history[symbol]
-        if not history or history[-1][0] != ts_ns:
-            history.append((ts_ns, price))
-            if len(history) > 20:
-                history.pop(0)
+        history = self.ticks_history.setdefault(symbol, [])
+        if history and history[-1][0] == ts_ns:
+            return  # ignore duplicate timestamps
+        history.append((ts_ns, price))
+        # Time-based pruning: the stats must see the profile's time horizon
+        # (vol_window_s), not a fixed tick count that spans milliseconds at
+        # sim tick rates.
+        cutoff = ts_ns - int(self.profile.vol_window_s * _NS_PER_S)
+        drop = 0
+        for t, _ in history:
+            if t >= cutoff:
+                break
+            drop += 1
+        if drop:
+            del history[:drop]
+        if len(history) > _MAX_TICKS:
+            del history[: len(history) - _MAX_TICKS]
+
+    def _window_prices(self, symbol: str, ts_ns: int) -> list[float]:
+        """Prices of ticks inside the profile's volatility window ending at ts_ns."""
+        cutoff = ts_ns - int(self.profile.vol_window_s * _NS_PER_S)
+        return [px for t, px in self.ticks_history.get(symbol, []) if t >= cutoff]
 
     def trip(self) -> None:
         self.circuit_tripped = True
@@ -120,26 +144,25 @@ class RiskManager:
             return RiskDecision(False, None, "invalid mark price")
 
         volatility_pct: float | None = None
+        prices = self._window_prices(signal.symbol, ts_ns)
 
-        # Volatility Floor Filter
-        if signal.action in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT):
-            history = self.ticks_history.get(signal.symbol, [])
-            if len(history) >= 2:
-                prices = [h[1] for h in history[-20:]]
-                mean = sum(prices) / len(prices)
-                if mean > 0:
-                    variance = sum((x - mean) ** 2 for x in prices) / len(prices)
-                    std = variance ** 0.5
-                    volatility_pct = (std / mean) * 100
-                    if volatility_pct < self.profile.min_volatility_pct:
-                        return RiskDecision(
-                            False, None, "sideways market: volatility below threshold"
-                        )
+        # Volatility Floor Filter (over the profile's time window)
+        if (
+            signal.action in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT)
+            and len(prices) >= _MIN_WINDOW_TICKS
+        ):
+            mean = sum(prices) / len(prices)
+            if mean > 0:
+                variance = sum((x - mean) ** 2 for x in prices) / len(prices)
+                std = variance ** 0.5
+                volatility_pct = (std / mean) * 100
+                if volatility_pct < self.profile.min_volatility_pct:
+                    return RiskDecision(
+                        False, None, "sideways market: volatility below threshold"
+                    )
 
-        # Slippage / Price Deviation Guard
-        history = self.ticks_history.get(signal.symbol, [])
-        if history:
-            prices = [p[1] for p in history]
+        # Slippage / Price Deviation Guard (same window, same sample-size floor)
+        if len(prices) >= _MIN_WINDOW_TICKS:
             avg = sum(prices) / len(prices)
             if avg > 0 and abs(mark_px - avg) / avg > 0.03:
                 return RiskDecision(False, None, "price deviation limit exceeded")

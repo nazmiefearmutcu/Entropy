@@ -148,6 +148,7 @@ class EntropyApp(App[None]):
         self.query_one("#price2", PriceChart).chart_type = self.cfg.chart_type
         self.query_one("#volume", VolumeChart).display = self.cfg.show_volume
         self.query_one("#volume2", VolumeChart).display = self.cfg.show_volume
+        self._set_chart_bar_ns(self._tf.bar_ns)
         self.query_one("#hist", HighLowGauges).window_labels = self.engine.cfg.window_labels
 
         for tid in ("new_lows", "session_highs"):
@@ -185,6 +186,16 @@ class EntropyApp(App[None]):
             self._draw_chart("#price", "#volume", self._crypto_candles)   # BTC (live)
             self._draw_chart("#price2", "#volume2", self._price_candles)  # SPY (sim)
             self._update_header()
+        except NoMatches:
+            pass
+
+    def _set_chart_bar_ns(self, bar_ns: int) -> None:
+        """Keep every chart's x-axis format in sync with the active timeframe."""
+        try:
+            self.query_default("#price", PriceChart).bar_ns = bar_ns
+            self.query_default("#price2", PriceChart).bar_ns = bar_ns
+            self.query_default("#volume", VolumeChart).bar_ns = bar_ns
+            self.query_default("#volume2", VolumeChart).bar_ns = bar_ns
         except NoMatches:
             pass
 
@@ -506,6 +517,7 @@ class EntropyApp(App[None]):
             self._warmup_dt_ns = spec.bar_ns
             self._price_candles = CandleAggregator(spec.bar_ns)
             self._crypto_candles = CandleAggregator(spec.bar_ns)
+            self._set_chart_bar_ns(spec.bar_ns)
             self.query_default("#hist", HighLowGauges).window_labels = spec.window_labels
             self._warmup_strategies()  # warms equity + (if enabled) crypto once, with new symbols
         else:

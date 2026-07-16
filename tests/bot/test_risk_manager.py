@@ -147,14 +147,13 @@ def test_volatility_floor_filter_rejects_below_threshold():
 
 def test_volatility_floor_filter_approves_above_threshold():
     # 2. Approve entry if volatility is above threshold
-    rm = RiskManager(MEDIUM) # min_volatility_pct = 0.08
-    # Ticks with volatility: e.g., 99.0 and 101.0
-    # Mean: 100.0, std: (((-1)**2 + 1**2)/2)**0.5 = 1.0
-    # volatility_pct = (1.0 / 100.0) * 100 = 1.0% >= 0.08%
-    rm.update_tick("SPY", 99.0, 1000)
-    rm.update_tick("SPY", 101.0, 1001)
+    rm = RiskManager(MEDIUM)  # min_volatility_pct = 0.15
+    # 6 in-window ticks alternating 99.0 / 101.0:
+    # Mean: 100.0, std: 1.0 -> volatility_pct = 1.0% >= 0.15%
+    for i, px in enumerate((99.0, 101.0, 99.0, 101.0, 99.0, 101.0)):
+        rm.update_tick("SPY", px, 1000 + i)
     p = Portfolio(100_000.0)
-    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1002)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1006)
     assert d.approved
 
 
@@ -173,34 +172,37 @@ def test_volatility_floor_filter_does_not_block_exits():
 
 
 def test_volatility_floor_filter_allows_insufficient_history():
-    # 4. Less than 2 ticks should not block entries
+    # 4. Fewer than 5 in-window ticks = insufficient data: entries are not blocked.
     rm = RiskManager(MEDIUM)
-    rm.update_tick("SPY", 100.0, 1000)
+    for i in range(4):  # 4 flat ticks would read as "sideways" if the floor applied
+        rm.update_tick("SPY", 100.0, 1000 + i)
     p = Portfolio(100_000.0)
-    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1001)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1004)
     assert d.approved
 
 
 def test_cooldown_scaling_low_volatility():
     rm = RiskManager(make_custom(cooldown_s=10.0, min_volatility_pct=0.05))
-    rm.update_tick("SPY", 99.9, 1000)
-    rm.update_tick("SPY", 100.1, 1001)
+    # 6 ticks alternating 99.9 / 100.1: mean 100.0, std 0.1 -> volatility 0.1%
+    for i, px in enumerate((99.9, 100.1, 99.9, 100.1, 99.9, 100.1)):
+        rm.update_tick("SPY", px, 1000 + i)
     p = Portfolio(100_000.0)
-    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1002)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1006)
     assert d.approved
     assert d.order is not None
-    # cooldown_ns should be ts_ns (1002) + 30s in ns (30_000_000_000) = 30_000_001_002
-    assert rm._cooldown_until["SPY"] == 1002 + 30 * 1_000_000_000
+    # volatility 0.1% < 0.30% -> scale = 0.30/0.10 = 3.0 -> cooldown 30s
+    assert rm._cooldown_until["SPY"] == 1006 + 30 * 1_000_000_000
 
 
 def test_cooldown_scaling_high_volatility():
     rm = RiskManager(MEDIUM)  # cooldown_s = 10.0
-    rm.update_tick("SPY", 99.70, 1000)
-    rm.update_tick("SPY", 100.30, 1001)
+    # 6 ticks alternating 99.70 / 100.30: std 0.3 -> volatility 0.3%, no scaling
+    for i, px in enumerate((99.70, 100.30, 99.70, 100.30, 99.70, 100.30)):
+        rm.update_tick("SPY", px, 1000 + i)
     p = Portfolio(100_000.0)
-    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1002)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1006)
     assert d.approved
-    assert rm._cooldown_until["SPY"] == 1002 + 10 * 1_000_000_000
+    assert rm._cooldown_until["SPY"] == 1006 + 10 * 1_000_000_000
 
 
 def test_cooldown_scaling_zero_volatility_guard():
@@ -214,4 +216,72 @@ def test_cooldown_scaling_zero_volatility_guard():
     assert d.approved
     # Cooldown should scale by 10.0x, so 10.0 * 10.0 = 100.0s cooldown
     assert rm._cooldown_until["SPY"] == 2000 + 100 * 1_000_000_000
+
+
+# --- time-window semantics ---------------------------------------------------
+
+_NS = 1_000_000_000
+
+
+def test_ticks_history_prunes_ticks_older_than_window():
+    rm = RiskManager(MEDIUM)  # vol_window_s = 30.0
+    # 61 ticks 1s apart span 60s: appending the last one must age out everything
+    # older than 30s before it.
+    for i in range(61):
+        rm.update_tick("SPY", 100.0 + i, i * _NS)
+    history = rm.ticks_history["SPY"]
+    assert history[0] == (30 * _NS, 130.0)
+    assert history[-1] == (60 * _NS, 160.0)
+    assert len(history) == 31
+
+
+def test_ticks_history_window_follows_profile():
+    rm = RiskManager(FROSTY)  # vol_window_s = 60.0
+    for i in range(61):
+        rm.update_tick("SPY", 100.0, i * _NS)
+    assert len(rm.ticks_history["SPY"]) == 61  # all 60s of ticks retained
+
+
+def test_ticks_history_hard_cap_512():
+    rm = RiskManager(MEDIUM)
+    # 600 ticks 1ms apart all fit in the 30s window; the 512-entry cap bounds memory.
+    for i in range(600):
+        rm.update_tick("SPY", 100.0, i * 1_000_000)
+    history = rm.ticks_history["SPY"]
+    assert len(history) == 512
+    assert history[0][0] == (600 - 512) * 1_000_000  # oldest entries dropped first
+    assert history[-1][0] == 599 * 1_000_000
+
+
+def test_evaluate_ignores_ticks_that_aged_out_of_window():
+    # A flat (sideways) burst of ticks 60s in the past must not trip the
+    # volatility floor for an entry evaluated NOW: the window is empty ->
+    # insufficient data -> entry proceeds.
+    rm = RiskManager(MEDIUM)  # vol_window_s = 30.0, min_volatility_pct = 0.15
+    for i in range(20):
+        rm.update_tick("SPY", 100.0, 1000 + i)  # flat market, ~t=0
+    p = Portfolio(100_000.0)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=60 * _NS)
+    assert d.approved
+
+
+def test_insufficient_window_ticks_skip_cooldown_scaling():
+    # <5 in-window ticks: volatility is not computed, so no cooldown scaling either.
+    rm = RiskManager(make_custom(cooldown_s=10.0, min_volatility_pct=0.05))
+    rm.update_tick("SPY", 99.9, 1000)
+    rm.update_tick("SPY", 100.1, 1001)
+    p = Portfolio(100_000.0)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1002)
+    assert d.approved
+    assert rm._cooldown_until["SPY"] == 1002 + 10 * _NS  # base cooldown, unscaled
+
+
+def test_insufficient_window_ticks_skip_deviation_guard():
+    # <5 in-window ticks: the deviation guard has no honest sample -> not applied.
+    rm = RiskManager(make_custom(min_volatility_pct=0.0))
+    for i in range(4):
+        rm.update_tick("SPY", 100.0, 1000 + i)
+    p = Portfolio(100_000.0)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=110.0, ts_ns=1004)
+    assert d.approved
 
