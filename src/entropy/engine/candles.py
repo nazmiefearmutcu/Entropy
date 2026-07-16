@@ -24,12 +24,15 @@ class CandleAggregator:
 
     def add(self, ts_ns: int, price: float, amount: float) -> None:
         bucket = ts_ns // self.interval_ns
-        if bucket != self._cur_bucket:
+        if bucket > self._cur_bucket or not self._bars:
             self._bars.append(
                 OHLCBar(bucket * self.interval_ns, price, price, price, price, amount)
             )
             self._cur_bucket = bucket
         else:
+            # Same bucket OR a timestamp regression: bars only roll forward.
+            # A late tick folds into the current bar's h/l/c/vol instead of
+            # opening a duplicate/backwards bar.
             b = self._bars[-1]
             if price > b.h:
                 b.h = price

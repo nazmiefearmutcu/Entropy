@@ -70,7 +70,10 @@ class RecordAdapterSink(Sink):
             elif isinstance(record, StkBar):
                 # Forward-looking: providers are currently built with
                 # channels=["trade"] and emit no Bars; kept so bar-emitting
-                # providers plug in unchanged.
+                # providers plug in unchanged. CAVEAT: if a bar channel is ever
+                # wired, the WHOLE bar's volume lands on one tick-rule-sided
+                # Trade, skewing breadth toward that side — it needs a per-bar
+                # buy/sell split before going live.
                 price, amount, rec_id = record.close, record.volume or 0.0, ""
             else:
                 return  # quotes/fundamentals/etc.: not part of the tick pipeline
@@ -150,6 +153,8 @@ async def start_equity_feed(
     AiohttpWsTransport wiring is needed here.
     """
     adapter = RecordAdapterSink(sink)
+    # Intentionally unpopulated: equities have no discover step (unlike crypto's
+    # discover_universe); Google falls back to bare-ticker resolution.
     registry = InstrumentRegistry()
     plan = build_equity_providers(symbols, adapter, registry)
     task = asyncio.create_task(collect(plan.providers, adapter,

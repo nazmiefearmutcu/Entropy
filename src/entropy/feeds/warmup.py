@@ -7,7 +7,11 @@ from typing import Any
 
 from entropy.strategy.engine import Bar
 
-_YAHOO_TIMEOUT_S = 10.0
+# Must exceed YahooClient's internal 429 backoff ladder (5s -> 10s -> 20s):
+# a 10s outer timeout guaranteed a spurious fallback after a single 429.
+_YAHOO_TIMEOUT_S = 30.0
+
+_4H_NS = 4 * 3_600 * 1_000_000_000
 
 
 def bars_from_ohlcv(ohlcv_rows: Iterable[Any]) -> list[Bar]:
@@ -56,10 +60,37 @@ def bars_from_stockodile(rows: Iterable[Any]) -> list[Bar]:
 async def _fetch_yahoo_bars(symbol: str, interval: str) -> list[Any]:
     """Fetch raw stockodile Bars via YahooClient. Module-level indirection so
     tests can monkeypatch it; stockodile is imported LAZILY (the sim path must
-    never touch it)."""
+    never touch it). The client owns a requests.Session — close it even when
+    the fetch raises or the outer timeout cancels us."""
     from stockodile.providers.yahoo.client import YahooClient
-    rows: list[Any] = await YahooClient().fetch_intraday_bars(symbol, interval)
+    client = YahooClient()
+    try:
+        rows: list[Any] = await client.fetch_intraday_bars(symbol, interval)
+    finally:
+        await client.close()
     return rows
+
+
+def _aggregate_4h(bars: list[Bar]) -> list[Bar]:
+    """Fold ascending 1h Bars into 4h Bars, bucketed on 4h ts boundaries
+    (h=max, l=min, c=last close; Bar carries no open/volume to aggregate)."""
+
+    def _hi(a: float | None, b: float | None) -> float | None:
+        return b if a is None else a if b is None else max(a, b)
+
+    def _lo(a: float | None, b: float | None) -> float | None:
+        return b if a is None else a if b is None else min(a, b)
+
+    out: list[Bar] = []
+    for b in bars:
+        t0 = b.ts_ns // _4H_NS * _4H_NS
+        if out and out[-1].ts_ns == t0:
+            prev = out[-1]
+            out[-1] = Bar(ts_ns=t0, close=b.close,
+                          high=_hi(prev.high, b.high), low=_lo(prev.low, b.low))
+        else:
+            out.append(Bar(ts_ns=t0, close=b.close, high=b.high, low=b.low))
+    return out
 
 
 async def warmup_equity_bars(symbol: str, interval: str = "15m",
@@ -67,13 +98,19 @@ async def warmup_equity_bars(symbol: str, interval: str = "15m",
     """Fetch recent Yahoo intraday bars as warmup Bars. Network call.
 
     Returns the newest ``limit`` bars sorted ascending by timestamp, keeping
-    only rows matching ``interval``. Raises on failure (timeout, network,
-    empty result) — the caller decides the fallback.
+    only rows matching the fetched interval. Raises on failure (timeout,
+    network, empty result) — the caller decides the fallback.
+
+    yfinance has no "4h" interval (1m/2m/5m/15m/30m/60m/90m/1h/1d): the 4h
+    timeframe fetches 1h bars instead and aggregates them into 4h buckets.
     """
-    rows = await asyncio.wait_for(_fetch_yahoo_bars(symbol, interval),
+    fetch_interval = "1h" if interval == "4h" else interval
+    rows = await asyncio.wait_for(_fetch_yahoo_bars(symbol, fetch_interval),
                                   timeout=_YAHOO_TIMEOUT_S)
-    wanted = [r for r in rows if getattr(r, "interval", interval) == interval]
+    wanted = [r for r in rows if getattr(r, "interval", fetch_interval) == fetch_interval]
     bars = sorted(bars_from_stockodile(wanted), key=lambda b: b.ts_ns)
+    if interval == "4h":
+        bars = _aggregate_4h(bars)
     if not bars:
         raise RuntimeError(f"yahoo returned no {interval} bars for {symbol}")
     return bars[-limit:]

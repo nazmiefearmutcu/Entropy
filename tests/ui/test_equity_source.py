@@ -145,6 +145,34 @@ async def test_boot_with_live_source_starts_live_feed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_boot_with_google_finance_announces_synthetic_quote_caveat(monkeypatch):
+    # google_finance polls ~10s quotes and synthesizes ticks; the console must
+    # say so at feed start, so breadth/momentum readings aren't over-trusted.
+    class GooglePlan:
+        provider_name = "google_finance"
+        trimmed_symbols: list[str] = []
+
+    async def stub(sink, symbols):
+        async def idle() -> None:
+            await asyncio.sleep(3600)
+
+        return asyncio.get_running_loop().create_task(idle()), GooglePlan()
+
+    async def no_warmup(symbol, interval="15m", limit=64):
+        raise RuntimeError("stubbed out")  # keep the live re-warm off the network
+
+    monkeypatch.setattr("entropy.ui.app.start_equity_feed", stub)
+    monkeypatch.setattr("entropy.ui.app.warmup_equity_bars", no_warmup)
+    app = EntropyApp(AppConfig(enable_crypto=False, equity_source="live"))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        text = _console_text(app)
+        assert "equities: source=live (google_finance)" in text
+        assert ("equities: google_finance serves ~10s synthetic quotes; "
+                "breadth/momentum are approximate") in text
+
+
+@pytest.mark.asyncio
 async def test_live_startup_failure_falls_back_to_sim(monkeypatch):
     async def broken(sink, symbols):
         raise RuntimeError("no provider")

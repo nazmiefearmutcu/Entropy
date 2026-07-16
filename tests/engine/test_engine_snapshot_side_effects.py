@@ -42,6 +42,22 @@ def test_event_deques_bounded_without_snapshot():
     assert len(t.nh_by_win[2]) <= 302    # 300s window
 
 
+def test_prev30s_rate_is_previous_sample_not_current():
+    # The snapshot's prev30s_rate must expose the PREVIOUS sample's event rate.
+    # The sampling block used to overwrite _prev_event_rate with the current
+    # rate before the snapshot read it, so the field always echoed the live rate.
+    e = Engine()
+    e.on_trade("AAA", 100.0, 1.0, "buy", 0)
+    e.on_trade("AAA", 101.0, 1.0, "buy", 1 * S)
+    s1 = e.snapshot()
+    assert s1.breadth.prev30s_rate == 0.0     # no prior sample yet
+    r1 = e.breadth.event_rate()               # the rate sample 1 was taken at
+    e.on_trade("AAA", 102.0, 1.0, "buy", 2 * S)
+    s2 = e.snapshot()
+    assert e.breadth.event_rate() != r1       # rates genuinely differ across samples
+    assert s2.breadth.prev30s_rate == r1      # bug: reports the CURRENT rate instead
+
+
 def test_snapshot_back_to_back_is_idempotent():
     e = Engine()
     e.on_trade("AAA", 100.0, 1.0, "buy", 0)

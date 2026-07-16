@@ -408,6 +408,12 @@ class EntropyApp(App[None]):
                 self._equity_source_resolved = "sim"
             else:
                 self._feed_status(f"equities: source=live ({plan.provider_name})")
+                if plan.provider_name == "google_finance":
+                    # Keyless fallback: Google polls ~10s quotes and synthesizes
+                    # ticks from them — flag it so the gauges aren't over-read.
+                    self._feed_status(
+                        "equities: google_finance serves ~10s synthetic quotes; "
+                        "breadth/momentum are approximate", "yellow")
                 if plan.trimmed_symbols:
                     self._feed_status(
                         f"equities: {plan.provider_name} symbol cap dropped "

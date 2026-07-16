@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import math
 from collections import deque
 
 import msgspec
@@ -69,9 +70,12 @@ class Engine:
         self.cfg = config or EngineConfig()   # property setter caches the scalars
         self.breadth = BreadthTracker(self.cfg.breadth_window_s, self.cfg.accel_eps)
         self._prev_event_rate = 0.0
+        self._prev30s_rate = 0.0   # the sample BEFORE the latest one (what the UI labels "prev")
         self._accel_label = "steady"
         self._trade_seq = 0        # monotonic; bumps on every on_trade
         self._accel_sample_seq = -1
+        self._breadth_ts = 0       # global non-decreasing clock for the shared breadth meters
+        self.rejected_ticks = 0    # records dropped for non-finite price/amount
 
     @property
     def cfg(self) -> EngineConfig:
@@ -98,6 +102,12 @@ class Engine:
     def on_trade(  # noqa: PLR0912
         self, symbol: str, price: float, amount: float, side: str, ts_ns: int
     ) -> list[Event]:
+        if not (math.isfinite(price) and math.isfinite(amount)):
+            # NaN fails every comparison, so it would lodge un-displaceably in
+            # the MonotonicExtreme deques (masking the true extreme and leaking
+            # into prev_extreme); inf is equally poisonous. Drop at the boundary.
+            self.rejected_ticks += 1
+            return []
         t = self._tapes.get(symbol)
         if t is None:
             t = _Tape(self.cfg)
@@ -105,8 +115,14 @@ class Engine:
         ts = ts_ns if ts_ns >= t.last_ts else t.last_ts   # non-decreasing clamp
         t.last_ts = ts
         self._trade_seq += 1
-        self.breadth.tick(ts)
-        self.breadth.add_trade(side, amount, ts)
+        # The breadth meters are SHARED across symbols and assume a globally
+        # sorted clock (VolumeMeter buckets / RateMeter eviction); the
+        # per-symbol clamp above still lets interleaved symbols regress it.
+        if ts > self._breadth_ts:
+            self._breadth_ts = ts
+        bts = self._breadth_ts
+        self.breadth.tick(bts)
+        self.breadth.add_trade(side, amount, bts)
         first = symbol not in self._seen
         events: list[Event] = []
         if first:
@@ -119,10 +135,15 @@ class Engine:
             t.mom.push(ts, price)
             t.last_price = price
             return events
+        # Gap re-seed rule: when a symbol was silent longer than a window span,
+        # BOTH the max and min deques are empty and step() would report a "new"
+        # extreme in each direction. An emptied window instead compares against
+        # the tape's last trade price, so only the direction-consistent event
+        # fires (and a flat re-trade fires none, mirroring the STRICT >/< rule).
         for i, (w, me) in enumerate(zip(_WIN_ORDER, t.maxw, strict=False)):
             me.evict(ts)            # evict BEFORE peek so prev_extreme reflects the live window
             prior = me.peek()
-            if me.step(ts, price):
+            if me.step(ts, price) and (prior is not None or price > t.last_price):
                 events.append(
                     NewHigh(symbol=symbol, ts_ns=ts, price=price, window=w, prev_extreme=prior)
                 )
@@ -137,7 +158,7 @@ class Engine:
         for i, (w, me) in enumerate(zip(_WIN_ORDER, t.minw, strict=False)):
             me.evict(ts)            # evict BEFORE peek (the evict inside step() is then a no-op)
             prior = me.peek()
-            if me.step(ts, price):
+            if me.step(ts, price) and (prior is not None or price < t.last_price):
                 events.append(
                     NewLow(symbol=symbol, ts_ns=ts, price=price, window=w, prev_extreme=prior)
                 )
@@ -165,7 +186,7 @@ class Engine:
                 t._cooldown[kind.__name__] = ts
             t.last_mom_pct = pct
         t.last_price = price
-        self.breadth.events(ts, len(events))
+        self.breadth.events(bts, len(events))
         return events
 
     def _classify(
@@ -203,6 +224,7 @@ class Engine:
         # so advance the prev-rate state only when the tape itself advanced —
         # back-to-back snapshots with no new trades are then identical.
         if self._trade_seq != self._accel_sample_seq:
+            self._prev30s_rate = self._prev_event_rate   # expose the TRUE previous sample
             self._accel_label = self.breadth.accel(self._prev_event_rate)
             self._prev_event_rate = self.breadth.event_rate()
             self._accel_sample_seq = self._trade_seq
@@ -244,7 +266,7 @@ class Engine:
 
         breadth = BreadthSnapshot(
             sell_pct=self.breadth.sell_pct(), buy_pct=self.breadth.buy_pct(),
-            raw_hz=self.breadth.raw_hz(), prev30s_rate=self._prev_event_rate,
+            raw_hz=self.breadth.raw_hz(), prev30s_rate=self._prev30s_rate,
             accel=self._accel_label, nh_counts=nh_counts, nl_counts=nl_counts)
         return EngineSnapshot(
             ts_ns=last_ts, breadth=breadth,
