@@ -2,7 +2,14 @@ import datetime as dt
 
 import pytest
 
-from entropy.ui.widgets.charts import Candle, PriceChart, VolumeChart, _axis_formats
+from entropy.ui.widgets.charts import (
+    Candle,
+    PriceChart,
+    VolumeChart,
+    _axis_formats,
+    align_overlay,
+    split_volume,
+)
 
 _MIN_NS = 60 * 1_000_000_000
 _HOUR_NS = 60 * _MIN_NS
@@ -41,6 +48,44 @@ def test_axis_formats_pairs_stay_parseable_by_plotext():
         d.string_to_time(sample.strftime(fmt), form)  # raises ValueError on mismatch
 
 
+def test_align_overlay_shorter_series_right_aligned():
+    # EMA warmup makes overlays shorter than the candle list: the front is
+    # padded so the LAST value sits on the LAST candle.
+    assert align_overlay(5, [1.0, 2.0]) == [None, None, None, 1.0, 2.0]
+
+
+def test_align_overlay_equal_length_passthrough():
+    assert align_overlay(3, [1.0, 2.0, 3.0]) == [1.0, 2.0, 3.0]
+
+
+def test_align_overlay_empty_values_all_none():
+    assert align_overlay(4, []) == [None, None, None, None]
+
+
+def test_align_overlay_longer_series_keeps_tail():
+    assert align_overlay(2, [1.0, 2.0, 3.0]) == [2.0, 3.0]
+
+
+def test_align_overlay_no_candles():
+    assert align_overlay(0, [1.0, 2.0]) == []
+
+
+def test_split_volume_zero_fills_opposite_series():
+    up, down = split_volume([5.0, 2.0, 3.0], [True, False, True])
+    assert up == [5.0, 0.0, 3.0]
+    assert down == [0.0, 2.0, 0.0]
+
+
+def test_split_volume_empty():
+    assert split_volume([], []) == ([], [])
+
+
+def test_split_volume_length_mismatch_raises():
+    # strict zip: callers (VolumeChart.set_series) must pre-validate lengths.
+    with pytest.raises(ValueError):
+        split_volume([1.0, 2.0], [True])
+
+
 @pytest.mark.asyncio
 async def test_price_chart_accepts_candles():
     from textual.app import App, ComposeResult
@@ -76,6 +121,61 @@ async def test_volume_chart_accepts_bars():
     async with app.run_test():
         chart = app.query_one("#volume", VolumeChart)
         chart.bars = [(i * 1_000_000_000, float(i)) for i in range(10)]
+        assert len(chart.bars) == 10
+
+
+@pytest.mark.asyncio
+async def test_price_chart_set_series_draws_overlays():
+    from textual.app import App, ComposeResult
+
+    class _A(App):
+        def compose(self) -> ComposeResult:
+            yield PriceChart(id="price")
+
+    app = _A()
+    _BASE = 1_700_000_000_000_000_000
+    _STEP = 60_000_000_000
+    async with app.run_test():
+        chart = app.query_one("#price", PriceChart)
+        candles = [Candle(t=_BASE + i * _STEP, o=10, h=11, l=9, c=10.5) for i in range(20)]
+        overlays = {
+            "EMA9": [10.0 + i * 0.01 for i in range(20)],   # equal length
+            "EMA21": [10.2, 10.3, 10.4],                    # shorter: right-aligned
+            "EMA50": [10.1],                                # single point
+        }
+        for chart_type in ("candlestick", "line"):
+            chart.chart_type = chart_type
+            # set_series triggers watch_candles -> replot(); a plotext failure
+            # (None values, x/y length mismatch) would raise out of the watcher.
+            chart.set_series(candles, overlays)
+        assert chart.overlays == overlays
+        assert len(chart.candles) == 20
+        # overlays cleared again by a plain draw
+        chart.set_series(candles, None)
+        assert chart.overlays is None
+
+
+@pytest.mark.asyncio
+async def test_volume_chart_set_series_up_down_split():
+    from textual.app import App, ComposeResult
+
+    class _A(App):
+        def compose(self) -> ComposeResult:
+            yield VolumeChart(id="volume")
+
+    app = _A()
+    _BASE = 1_700_000_000_000_000_000
+    async with app.run_test():
+        chart = app.query_one("#volume", VolumeChart)
+        bars = [(_BASE + i * 1_000_000_000, float(i + 1)) for i in range(10)]
+        ups = [i % 2 == 0 for i in range(10)]
+        chart.set_series(bars, ups)   # two-series replot must not raise
+        assert chart.ups == ups
+        # Length-mismatched ups are dropped (single-series fallback), not trusted.
+        chart.set_series(bars, [True])
+        assert chart.ups is None
+        # Legacy bare assignment (candle data without opens) keeps working.
+        chart.bars = bars
         assert len(chart.bars) == 10
 
 

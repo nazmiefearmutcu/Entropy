@@ -33,7 +33,7 @@ from entropy.feeds.warmup import warmup_equity_bars, warmup_klines
 from entropy.strategy.engine import Bar, EventKind, Strategy, StrategyConfig, StrategyEvent
 
 from .widgets.boards import refresh_board
-from .widgets.charts import Candle, PriceChart, VolumeChart
+from .widgets.charts import Candle, ChartRedrawMemo, PriceChart, VolumeChart
 from .widgets.console import AlgoConsole
 from .widgets.header import HeaderBar
 from .widgets.highlow_gauges import HighLowGauges
@@ -50,6 +50,23 @@ if TYPE_CHECKING:
     from entropy.feeds.equities.live import EquityProviderPlan
 
 _MARKET_STATUS_TTL_S = 30.0  # header chip: recompute the calendar at most this often
+
+# Cached stockodile.analytics module ref for the EMA chart overlays.
+# None = not yet tried, False = unavailable (never retried), module otherwise.
+_analytics: Any = None
+
+
+def _ema_module() -> Any | None:
+    """Lazy stockodile.analytics import: first chart draw pays it once; a
+    missing/broken dep degrades to overlay-free charts, never a crash."""
+    global _analytics
+    if _analytics is None:
+        try:
+            from stockodile import analytics
+            _analytics = analytics
+        except Exception:
+            _analytics = False
+    return _analytics or None
 
 
 async def start_equity_feed(
@@ -129,6 +146,9 @@ class EntropyApp(App[None]):
         # Per-watched-symbol ring buffer of last prices (one sample per
         # snapshot) backing the watchlist board's sparkline column.
         self._watch_prices: dict[str, deque[float]] = {}
+        # Per-chart-pair redraw memo: the 10 Hz snapshot skips the full
+        # plotext rebuild while a chart's data/settings fingerprint holds.
+        self._chart_memo = ChartRedrawMemo()
         # set_reactive: seed the default without firing the watcher (chart #1
         # starts on the crypto strategy symbol, exactly as before).
         self.set_reactive(EntropyApp.focus_symbol, self.cfg.crypto_strategy_symbol)
@@ -215,8 +235,14 @@ class EntropyApp(App[None]):
             refresh_board(self.query_default("#new_lows", DataTable), snap.new_lows, self)
             refresh_board(self.query_default("#session_highs", DataTable), snap.new_highs, self)
             self._refresh_watchlist()
-            self._draw_chart("#price", "#volume", self._focus_candles)    # focus symbol
-            self._draw_chart("#price2", "#volume2", self._price_candles)  # strategy (SPY)
+            self._draw_chart(   # chart pair #1: focus symbol
+                "#price", "#volume", self._focus_candles,
+                symbol=self.focus_symbol, strat_cfg=self._focus_strategy_cfg(),
+            )
+            self._draw_chart(   # chart pair #2: strategy symbol (SPY)
+                "#price2", "#volume2", self._price_candles,
+                symbol=self.cfg.strategy_symbol, strat_cfg=self.strategy.cfg,
+            )
             self._update_header()
         except NoMatches:
             pass
@@ -264,15 +290,58 @@ class EntropyApp(App[None]):
         except NoMatches:
             pass
 
-    def _draw_chart(self, price_id: str, vol_id: str, agg: CandleAggregator) -> None:
+    def _focus_strategy_cfg(self) -> StrategyConfig:
+        """EMA overlay periods for chart #1: the crypto strategy's when the
+        focus symbol IS the crypto strategy symbol, the equity strategy's
+        otherwise (an arbitrary focused symbol has no strategy of its own,
+        so it borrows the equity strategy's fast/slow periods)."""
+        if self.focus_symbol == self.cfg.crypto_strategy_symbol:
+            return self.crypto_strategy.cfg
+        return self.strategy.cfg
+
+    def _draw_chart(
+        self, price_id: str, vol_id: str, agg: CandleAggregator,
+        *, symbol: str, strat_cfg: StrategyConfig,
+    ) -> None:
         bars = agg.bars()
+        last = bars[-1] if bars else None
+        # Fingerprint of everything the pair renders from. Unchanged → skip
+        # the full plotext clear+rebuild (this runs at 10 Hz for two pairs);
+        # any new bar, tick on the last bar, chart-type/volume toggle, theme,
+        # symbol, timeframe, or EMA-period change invalidates it.
+        key: tuple[object, ...] = (
+            len(bars),
+            last.c if last is not None else None,
+            last.vol if last is not None else None,
+            self.cfg.chart_type,
+            self.cfg.show_volume,
+            self.theme,
+            symbol,
+            self._tf.name,
+            strat_cfg.fast,
+            strat_cfg.slow,
+        )
+        if not self._chart_memo.is_stale(price_id, key):
+            return
+        overlays: dict[str, list[float]] = {}
+        mod = _ema_module()
+        if mod is not None:
+            closes = [b.c for b in bars]
+            for period in (strat_cfg.fast, strat_cfg.slow):
+                if 0 < period <= len(closes):  # skip until enough closes to warm up
+                    ema = mod.calculate_ema(closes, period)
+                    overlays[f"EMA{period}"] = [float(v) for v in ema if v is not None]
         try:
-            self.query_default(price_id, PriceChart).candles = [
-                Candle(t=b.t, o=b.o, h=b.h, l=b.l, c=b.c) for b in bars
-            ]
-            self.query_default(vol_id, VolumeChart).bars = [(b.t, b.vol) for b in bars]
+            price = self.query_default(price_id, PriceChart)
+            volume = self.query_default(vol_id, VolumeChart)
         except NoMatches:
-            pass
+            return  # widgets not mounted: don't record, so a later draw retries
+        price.set_series(
+            [Candle(t=b.t, o=b.o, h=b.h, l=b.l, c=b.c) for b in bars],
+            overlays or None,
+        )
+        volume.set_series([(b.t, b.vol) for b in bars], [b.c >= b.o for b in bars])
+        self._chart_memo.record(price_id, key)
 
     def _update_header(self) -> None:
         try:
