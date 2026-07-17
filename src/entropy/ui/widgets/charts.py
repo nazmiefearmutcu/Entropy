@@ -53,6 +53,9 @@ class PriceChart(PlotextPlot):
     # Bar interval driving the x-axis label format; the app keeps this in sync
     # with the active TimeframeSpec.bar_ns.
     bar_ns: int = _LEGACY_BAR_NS
+    # Chart heading ("SYMBOL · timeframe"); the app keeps this in sync with the
+    # focus/strategy symbol and the active timeframe. Empty renders no title.
+    title: str = ""
 
     def watch_candles(self, _old: list[Candle], new: list[Candle]) -> None:
         if new:
@@ -63,6 +66,8 @@ class PriceChart(PlotextPlot):
 
     def replot(self) -> None:
         self.plt.clear_data()
+        if self.title:
+            self.plt.title(self.title)
         date_form, fmt = _axis_formats(self.bar_ns)
         self.plt.date_form(date_form)
         ds = [dt.datetime.fromtimestamp(c.t / 1e9).strftime(fmt) for c in self.candles]

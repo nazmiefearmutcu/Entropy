@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from collections.abc import Sequence
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -12,10 +14,13 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.reactive import reactive
 from textual.widgets import DataTable, Static
 
 from entropy.app import AppConfig
 from entropy.config import EngineConfig
+from entropy.data.universe import SymbolInfo, UniverseService
+from entropy.data.watchlist import Watchlist
 from entropy.engine.candles import CandleAggregator
 from entropy.engine.engine import Engine
 from entropy.engine.timeframe import get_timeframe
@@ -34,8 +39,10 @@ from .widgets.header import HeaderBar
 from .widgets.highlow_gauges import HighLowGauges
 from .widgets.histogram import EventHistogram
 from .widgets.modals import ErrorScreen, HelpScreen, SettingsScreen
+from .widgets.search import SearchScreen
 from .widgets.status_bar import StatusBar, format_telemetry
 from .widgets.ticker_strip import TickerStrip
+from .widgets.watchlist_board import SPARK_WINDOW, WatchlistBoard, WatchRow, sparkline
 
 if TYPE_CHECKING:
     from crypcodile.sink.base import Sink
@@ -61,8 +68,15 @@ class EntropyApp(App[None]):
         ("question_mark", "help", "Help"),
         ("h", "help", "Help"),
         ("e", "errors", "Errors"),
+        ("slash", "search", "Search"),
+        ("w", "watch_toggle", "Watch"),
         ("q", "quit", "Quit"),
     ]
+
+    # Symbol driving chart pair #1 (#price/#volume); defaults to the crypto
+    # strategy symbol in __init__ (init=False: the watcher only runs on real
+    # changes, so boot keeps the legacy warmup/chart behavior).
+    focus_symbol: reactive[str] = reactive("", init=False)
 
     def __init__(
         self, config: AppConfig | None = None, *args: Any, headless: bool = False, **kwargs: Any
@@ -95,8 +109,8 @@ class EntropyApp(App[None]):
         self._equity = EquitySimFeed(
             self._sink, seed=self.cfg.seed, ticks_per_sec=self.cfg.equity_tps
         )
-        self._price_candles = CandleAggregator(self._candle_interval_ns)   # SPY (sim)
-        self._crypto_candles = CandleAggregator(self._candle_interval_ns)  # BTC (live crypto)
+        self._price_candles = CandleAggregator(self._candle_interval_ns)  # chart #2 (strategy)
+        self._focus_candles = CandleAggregator(self._candle_interval_ns)  # chart #1 (focus)
         self._spikes = 0
         self._snap_drops = 0
         self._error_text = "No errors."
@@ -105,6 +119,19 @@ class EntropyApp(App[None]):
         # Concrete "sim"/"live" chosen by _run_equity_feed (None until the feed
         # worker resolves it); routes the SPY warmup to real vs synthetic bars.
         self._equity_source_resolved: str | None = None
+        watchlist_path = (
+            Path(self.cfg.watchlist_path)
+            if self.cfg.watchlist_path
+            else Path.home() / ".entropy" / "watchlist.json"
+        )
+        self._watchlist = Watchlist(watchlist_path)
+        self._universe = UniverseService()
+        # Per-watched-symbol ring buffer of last prices (one sample per
+        # snapshot) backing the watchlist board's sparkline column.
+        self._watch_prices: dict[str, deque[float]] = {}
+        # set_reactive: seed the default without firing the watcher (chart #1
+        # starts on the crypto strategy symbol, exactly as before).
+        self.set_reactive(EntropyApp.focus_symbol, self.cfg.crypto_strategy_symbol)
 
     def query_default(self, selector: str, expect_type: Any) -> Any:
         try:
@@ -127,10 +154,13 @@ class EntropyApp(App[None]):
                     with Vertical(classes="board-col"):
                         yield Static("Session new highs", classes="board-title")
                         yield DataTable(id="session_highs")
+                    with Vertical(classes="board-col"):
+                        yield Static("Watchlist", classes="board-title")
+                        yield WatchlistBoard(id="watchlist")
             with Vertical(id="charts"):
-                yield PriceChart(id="price")        # BTC (live crypto)
+                yield PriceChart(id="price")        # chart #1: follows focus_symbol
                 yield VolumeChart(id="volume")
-                yield PriceChart(id="price2")       # SPY (sim)
+                yield PriceChart(id="price2")       # chart #2: strategy symbol (SPY)
                 yield VolumeChart(id="volume2")
         yield StatusBar(id="status")
 
@@ -149,12 +179,13 @@ class EntropyApp(App[None]):
         self.query_one("#volume", VolumeChart).display = self.cfg.show_volume
         self.query_one("#volume2", VolumeChart).display = self.cfg.show_volume
         self._set_chart_bar_ns(self._tf.bar_ns)
+        self._set_chart_titles()
         self.query_one("#hist", HighLowGauges).window_labels = self.engine.cfg.window_labels
 
         for tid in ("new_lows", "session_highs"):
             t = self.query_one("#" + tid, DataTable)
             t.add_columns("Symbol", "Count", "Price", "%Chg")
-            t.cursor_type = "none"
+            t.cursor_type = "row"   # row selection focuses the symbol on chart #1
             t.zebra_stripes = False
         self.set_interval(1 / 10, self.sample_snapshot)
         self._warmup_strategies()
@@ -183,11 +214,32 @@ class EntropyApp(App[None]):
             hist.nl_counts = snap.breadth.nl_counts
             refresh_board(self.query_default("#new_lows", DataTable), snap.new_lows, self)
             refresh_board(self.query_default("#session_highs", DataTable), snap.new_highs, self)
-            self._draw_chart("#price", "#volume", self._crypto_candles)   # BTC (live)
-            self._draw_chart("#price2", "#volume2", self._price_candles)  # SPY (sim)
+            self._refresh_watchlist()
+            self._draw_chart("#price", "#volume", self._focus_candles)    # focus symbol
+            self._draw_chart("#price2", "#volume2", self._price_candles)  # strategy (SPY)
             self._update_header()
         except NoMatches:
             pass
+
+    def _refresh_watchlist(self) -> None:
+        """Rebuild the watchlist board rows from engine quotes; each snapshot
+        also appends one price sample per symbol to its sparkline ring buffer."""
+        watched = self._watchlist.items()
+        live = {info.symbol for info in watched}
+        for sym in [s for s in self._watch_prices if s not in live]:
+            del self._watch_prices[sym]
+        rows: list[WatchRow] = []
+        for info in watched:
+            quote = self.engine.quote(info.symbol)
+            history = self._watch_prices.setdefault(info.symbol, deque(maxlen=SPARK_WINDOW))
+            last: float | None = None
+            pct: float | None = None
+            if quote is not None:
+                last, pct = quote
+                history.append(last)
+            rows.append(WatchRow(symbol=info.symbol, last=last, pct=pct,
+                                 spark=sparkline(history)))
+        self.query_default("#watchlist", WatchlistBoard).update_rows(rows, self)
 
     def _set_chart_bar_ns(self, bar_ns: int) -> None:
         """Keep every chart's x-axis format in sync with the active timeframe."""
@@ -196,6 +248,19 @@ class EntropyApp(App[None]):
             self.query_default("#price2", PriceChart).bar_ns = bar_ns
             self.query_default("#volume", VolumeChart).bar_ns = bar_ns
             self.query_default("#volume2", VolumeChart).bar_ns = bar_ns
+        except NoMatches:
+            pass
+
+    def _set_chart_titles(self) -> None:
+        """Chart #1 titles after the focus symbol, chart #2 after the strategy
+        symbol; both carry the active timeframe (refresh on either change)."""
+        try:
+            self.query_default("#price", PriceChart).title = (
+                f"{self.focus_symbol} · {self._tf.name}"
+            )
+            self.query_default("#price2", PriceChart).title = (
+                f"{self.cfg.strategy_symbol} · {self._tf.name}"
+            )
         except NoMatches:
             pass
 
@@ -332,6 +397,54 @@ class EntropyApp(App[None]):
         info = [e for e in events if e.kind is EventKind.INFO]
         self._push_events(info)
 
+    def watch_focus_symbol(self, _old: str, new: str) -> None:
+        """Chart #1 follows the focus symbol: swap in a fresh aggregator (so the
+        previous symbol's candles never blend in), retitle, then warm up history
+        in the background (best-effort)."""
+        if not new:
+            return
+        self._focus_candles = CandleAggregator(self._tf.bar_ns)
+        self._set_chart_titles()
+        self._warmup_focus()
+
+    @work(exclusive=True, group="focus_warmup")
+    async def _warmup_focus(self) -> None:
+        """Seed chart #1 with recent history for the focused symbol.
+
+        Crypto canonicals ("venue:RAW") warm from Binance klines on the raw
+        symbol; bare equity tickers warm from Yahoo bars only when the resolved
+        equity source is live — sim symbols have no history source beyond synth,
+        so the chart starts empty and fills from live ticks. Exclusive group: a
+        rapid focus change cancels the in-flight fetch.
+        """
+        symbol = self.focus_symbol
+        try:
+            if ":" in symbol:
+                bars = await warmup_klines(symbol.split(":", 1)[-1], self._tf.name)
+            elif self._equity_source_resolved == "live":
+                bars = await warmup_equity_bars(symbol, self._tf.name)
+            else:
+                return
+        except Exception as exc:  # network/REST hiccup — warmup is best-effort.
+            self._error_text = f"focus warmup failed: {exc}"
+            self._push_info(
+                f"focus warmup failed ({exc}); chart fills from live ticks", "yellow"
+            )
+            return
+        if not bars or self.focus_symbol != symbol:  # stale fetch: focus moved on
+            return
+        # Per bar, close→high→low→close fills o/h/l/c in its bucket (same
+        # seeding pattern as the SPY chart in _warmup_equity).
+        agg = CandleAggregator(self._tf.bar_ns)
+        for b in bars:
+            agg.add(b.ts_ns, b.close, 0.0)
+            if b.high is not None:
+                agg.add(b.ts_ns, b.high, 0.0)
+            if b.low is not None:
+                agg.add(b.ts_ns, b.low, 0.0)
+            agg.add(b.ts_ns, b.close, 0.0)
+        self._focus_candles = agg
+
     def _feed_status(self, text: str, color: str = "white") -> None:
         """Surface transport connect/disconnect noise as console INFO lines."""
         self._push_info(text, color)
@@ -388,10 +501,13 @@ class EntropyApp(App[None]):
             pass
 
     def _route_candle(self, r: Trade) -> None:
+        # Chart #1 keys off the focus symbol; chart #2 stays hardwired to the
+        # strategy symbol. Independent ifs: focusing the strategy symbol itself
+        # feeds both charts.
+        if r.symbol == self.focus_symbol:
+            self._focus_candles.add(r.local_ts, r.price, r.amount)
         if r.symbol == self.cfg.strategy_symbol:
             self._price_candles.add(r.local_ts, r.price, r.amount)
-        elif r.symbol == self.cfg.crypto_strategy_symbol:
-            self._crypto_candles.add(r.local_ts, r.price, r.amount)
 
     @work(exclusive=True, group="equity_feed")
     async def _run_equity_feed(self) -> None:
@@ -486,6 +602,48 @@ class EntropyApp(App[None]):
     def action_errors(self) -> None:
         self.push_screen(ErrorScreen(self._error_text, id="errors"))
 
+    def action_search(self) -> None:
+        self.push_screen(SearchScreen(id="search"))
+
+    def action_watch_toggle(self) -> None:
+        """`w`: toggle the focused symbol in the persistent watchlist."""
+        self.toggle_watch(self._resolve_symbol(self.focus_symbol))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Any board/watchlist row (keyed by symbol) focuses that symbol."""
+        symbol = event.row_key.value
+        if symbol:
+            self.focus_symbol = symbol
+
+    def _resolve_symbol(self, symbol: str) -> SymbolInfo:
+        """SymbolInfo via exact universe match, else a bare fallback whose
+        asset class comes from the ':' venue-prefix heuristic."""
+        for info in self._universe.search(symbol, limit=5):
+            if info.symbol == symbol:
+                return info
+        has_venue = ":" in symbol
+        return SymbolInfo(
+            symbol=symbol,
+            name=symbol,
+            asset_class="crypto" if has_venue else "equity",
+            venue=symbol.split(":", 1)[0] if has_venue else "us",
+        )
+
+    def toggle_watch(self, info: SymbolInfo) -> bool:
+        """Toggle ``info`` in the watchlist (persisted); returns presence after.
+
+        A failed disk write leaves memory unchanged (Watchlist guarantees it);
+        surface it on the console and in the error screen instead of crashing.
+        """
+        try:
+            present = self._watchlist.toggle(info)
+        except OSError as exc:
+            self._error_text = f"watchlist save failed: {exc}"
+            self._push_info(f"watchlist save failed ({exc})", "red")
+            return info.symbol in self._watchlist
+        self._push_info(f"watchlist {'+' if present else '-'} [{info.symbol}]")
+        return present
+
     def _apply_settings(
         self, *, theme: str, chart_type: str, show_volume: bool, timeframe: str,
         enable_equities: bool, enable_crypto: bool, equity_source: str, equity_tps: int,
@@ -543,7 +701,7 @@ class EntropyApp(App[None]):
             self._warmup_bars = spec.warmup_bars
             self._warmup_dt_ns = spec.bar_ns
             self._price_candles = CandleAggregator(spec.bar_ns)
-            self._crypto_candles = CandleAggregator(spec.bar_ns)
+            self._focus_candles = CandleAggregator(spec.bar_ns)
             self._set_chart_bar_ns(spec.bar_ns)
             self.query_default("#hist", HighLowGauges).window_labels = spec.window_labels
             self._warmup_strategies()  # warms equity + (if enabled) crypto once, with new symbols
@@ -553,6 +711,8 @@ class EntropyApp(App[None]):
                 self._warmup_spy()   # real bars when live, synth otherwise
             if crypto_symbol_changed:
                 self._warmup_crypto()
+        # Chart #2's title tracks strategy_symbol; both titles track the timeframe.
+        self._set_chart_titles()
 
         # Feed enable/disable transitions (the mount-time launch only ever ran once;
         # these switches must keep working for the app's whole lifetime).

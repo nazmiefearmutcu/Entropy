@@ -81,6 +81,24 @@ Screen { background: $background; color: $foreground; layout: vertical; }
     content-align: center middle;
 }
 
+/* Search Screen styling */
+#search-container {
+    width: 76;
+    height: 70%;
+    max-height: 30;
+    background: $panel;
+    border: double $primary;
+    padding: 1 2;
+}
+#search-input {
+    margin-bottom: 1;
+}
+#search-results {
+    height: 1fr;
+    background: $panel;
+    border: none;
+}
+
 /* Error Screen styling */
 #error-body {
     width: 60;

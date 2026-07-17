@@ -287,7 +287,7 @@ class UniverseService:
         for info in self._search_order:
             full = info.symbol.upper()
             key = full.rsplit(":", 1)[-1]  # crypto: match on the raw exchange symbol
-            if q == key or q == full:
+            if q in (key, full):
                 exact.append(info)
             elif key.startswith(q):
                 prefix.append(info)

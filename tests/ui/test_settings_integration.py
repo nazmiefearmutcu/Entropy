@@ -95,7 +95,7 @@ async def test_timeframe_change_reconfigures_candles_and_engine():
     async with app.run_test(size=(120, 60)) as pilot:
         assert app.cfg.timeframe == "15m"
         old_price_agg = app._price_candles
-        old_crypto_agg = app._crypto_candles
+        old_focus_agg = app._focus_candles
         # on_mount synced every chart's axis format to the active timeframe.
         _15m_ns = 15 * 60 * 1_000_000_000
         assert app.query_one("#price", PriceChart).bar_ns == _15m_ns
@@ -113,10 +113,10 @@ async def test_timeframe_change_reconfigures_candles_and_engine():
         assert app.engine.cfg.window_labels == ("5m", "15m", "1h")
         assert app._candle_interval_ns == 5 * 60 * 1_000_000_000
         assert app._price_candles.interval_ns == 5 * 60 * 1_000_000_000
-        assert app._crypto_candles.interval_ns == 5 * 60 * 1_000_000_000
+        assert app._focus_candles.interval_ns == 5 * 60 * 1_000_000_000
         # New aggregators were built for the new timeframe, not mutated in place.
         assert app._price_candles is not old_price_agg
-        assert app._crypto_candles is not old_crypto_agg
+        assert app._focus_candles is not old_focus_agg
         # Charts carry the new timeframe's bar interval for x-axis formatting.
         _5m_ns = 5 * 60 * 1_000_000_000
         assert app.query_one("#price", PriceChart).bar_ns == _5m_ns

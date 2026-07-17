@@ -12,6 +12,8 @@ from entropy.engine.timeframe import TIMEFRAMES
 
 _HELP = """Entropy — keys:
   s  Settings    ?/h  Help    e  Errors    q  Quit
+  /  Symbol search    w  Watch/unwatch the focused symbol
+Click a board or watchlist row to focus its symbol on chart #1.
 Scanner: new highs/lows over 3 rolling windows + session (timeframe-selectable); \
 spikes & snap-drops.
 """

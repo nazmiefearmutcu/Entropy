@@ -15,7 +15,7 @@ async def test_candle_interval_matches_timeframe():
     async with app.run_test(size=(120, 60)):
         spec = get_timeframe("15m")
         assert app._price_candles.interval_ns == spec.bar_ns
-        assert app._crypto_candles.interval_ns == spec.bar_ns
+        assert app._focus_candles.interval_ns == spec.bar_ns
 
 
 @pytest.mark.asyncio
@@ -24,5 +24,5 @@ async def test_candle_interval_follows_nondefault_timeframe():
     async with app.run_test(size=(120, 60)):
         spec = get_timeframe("1h")
         assert app._price_candles.interval_ns == spec.bar_ns
-        assert app._crypto_candles.interval_ns == spec.bar_ns
+        assert app._focus_candles.interval_ns == spec.bar_ns
         assert app.engine.cfg.window_labels == ("1h", "4h", "1d")

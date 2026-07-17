@@ -20,4 +20,7 @@ class AppConfig(msgspec.Struct, frozen=True):
     console_log_path: str = "entropy_console.log"
     trade_csv_path: str = "entropy_trades.csv"
     timeframe: str = "15m"
+    # Persistent watchlist location; empty selects ~/.entropy/watchlist.json
+    # (kept injectable so tests point it at a tmp path).
+    watchlist_path: str = ""
     engine: EngineConfig = msgspec.field(default_factory=EngineConfig)
