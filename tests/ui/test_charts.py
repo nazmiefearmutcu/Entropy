@@ -10,15 +10,19 @@ _DAY_NS = 24 * _HOUR_NS
 
 
 def test_axis_formats_tiers():
-    # sub-hour bars (legacy 1s, 1m/5m/15m timeframes): intraday HH:MM
+    # The tier keys on the FULL CHART SPAN (bar_ns * 120 deque slots), not the
+    # bar alone: 120 x 15m = 30h crosses a midnight, so "H:M" would wrap.
+    # span within one day (legacy 1s, 1m/5m): intraday HH:MM stays unique
     assert _axis_formats(1_000_000_000) == ("H:M", "%H:%M")
-    assert _axis_formats(15 * _MIN_NS) == ("H:M", "%H:%M")
-    assert _axis_formats(_HOUR_NS - 1) == ("H:M", "%H:%M")
-    # hour-scale bars (1h/4h): span midnights, so prefix the day
+    assert _axis_formats(_MIN_NS) == ("H:M", "%H:%M")
+    assert _axis_formats(5 * _MIN_NS) == ("H:M", "%H:%M")
+    assert _axis_formats(12 * _MIN_NS) == ("H:M", "%H:%M")  # 120 bars = exactly 24h
+    # span crosses a midnight (15m/1h/4h): prefix the day to stay unique
+    assert _axis_formats(15 * _MIN_NS) == ("d/m H:M", "%d/%m %H:%M")
     assert _axis_formats(_HOUR_NS) == ("d/m H:M", "%d/%m %H:%M")
     assert _axis_formats(4 * _HOUR_NS) == ("d/m H:M", "%d/%m %H:%M")
     assert _axis_formats(_DAY_NS - 1) == ("d/m H:M", "%d/%m %H:%M")
-    # day-scale and coarser: date only
+    # day-scale and coarser bars: date only
     assert _axis_formats(_DAY_NS) == ("d/m/Y", "%d/%m/%Y")
     assert _axis_formats(7 * _DAY_NS) == ("d/m/Y", "%d/%m/%Y")
 

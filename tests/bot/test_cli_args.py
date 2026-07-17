@@ -46,3 +46,21 @@ def test_main_cli_risk_case_insensitivity(monkeypatch):
 def test_invalid_risk_raises_error():
     with pytest.raises(SystemExit):
         bot_parse_args(["--risk", "invalid_profile"])
+
+
+def test_cash_zero_forwarded_to_bot_and_reaches_botconfig(monkeypatch):
+    """`entropy bot --cash 0` used to be dropped by a truthiness guard
+    (`if args.cash:`), silently reverting to the $100k default."""
+    from entropy.bot.__main__ import build_config
+
+    received: list[str] = []
+    monkeypatch.setattr("entropy.__main__.run_bot", lambda argv: received.extend(argv))
+    main_entry(["bot", "--cash", "0"])
+
+    assert "--cash" in received
+    idx = received.index("--cash")
+    assert received[idx + 1] == "0.0"
+
+    # ...and through the bot's own parser into BotConfig.
+    cfg = build_config(bot_parse_args(received))
+    assert cfg.starting_cash == 0.0

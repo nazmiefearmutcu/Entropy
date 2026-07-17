@@ -70,6 +70,45 @@ async def test_invalid_snapdrop_pct_shows_error_and_does_not_crash():
         await pilot.press("q")
 
 
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "NaN", "Infinity"])
+@pytest.mark.asyncio
+async def test_non_finite_spike_rejected_and_engine_unpoisoned(bad):
+    """float() happily parses inf/nan, and NaN even slips past the <= 0 check —
+    a non-finite threshold must hit the ErrorScreen, never the engine config."""
+    app = EntropyApp(AppConfig(enable_crypto=False))
+    async with app.run_test(size=(120, 60)) as pilot:
+        screen = await _open_settings(pilot, app)
+
+        screen.query_one("#set-spike", Input).value = bad
+        await pilot.pause()
+        await pilot.click("#btn-save")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ErrorScreen)
+        assert app.cfg.engine.spike_pct == 0.40
+        assert app.engine.cfg.spike_pct == 0.40
+
+        await pilot.press("q")
+
+
+@pytest.mark.asyncio
+async def test_non_finite_snapdrop_rejected_and_engine_unpoisoned():
+    app = EntropyApp(AppConfig(enable_crypto=False))
+    async with app.run_test(size=(120, 60)) as pilot:
+        screen = await _open_settings(pilot, app)
+
+        screen.query_one("#set-snapdrop", Input).value = "nan"
+        await pilot.pause()
+        await pilot.click("#btn-save")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ErrorScreen)
+        assert app.cfg.engine.snapdrop_pct == 0.40
+        assert app.engine.cfg.snapdrop_pct == 0.40
+
+        await pilot.press("q")
+
+
 @pytest.mark.asyncio
 async def test_error_screen_dismiss_returns_to_settings_and_saving_flag_resets():
     """After an invalid save the `_saving` guard must reset so a subsequent

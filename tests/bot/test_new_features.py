@@ -35,7 +35,8 @@ def test_volatility_history_and_scaling():
     assert rm.ticks_history["SPY"][0] == (1000 + 10 * _ns, 110.0)
     assert rm.ticks_history["SPY"][-1] == (1000 + 40 * _ns, 140.0)
 
-    # 2. Verify fallback to 1.0 when less than 2 ticks
+    # 2. Verify fallback to 1.0 with fewer than 5 in-window ticks (the same
+    #    sample-size floor the entry guards use)
     rm2 = RiskManager(MEDIUM)
     rm2.update_tick("SPY", 100.0, 1000)
     sl, tp = rm2.stop_tp_prices(PositionSide.LONG, 100.0, "SPY")
@@ -44,11 +45,11 @@ def test_volatility_history_and_scaling():
     assert sl == expected_sl
     assert tp == expected_tp
 
-    # 3. Verify exact volatility scaling calculation
+    # 3. Verify exact volatility scaling calculation (6 in-window ticks)
     rm3 = RiskManager(MEDIUM)
-    rm3.update_tick("SPY", 100.0, 1000)
-    rm3.update_tick("SPY", 110.0, 2000)
-    # Ticks: [100.0, 110.0] -> Mean: 105.0. Std: (( (100-105)**2 + (110-105)**2 ) / 2)**0.5 = 5.0
+    for i, px in enumerate((100.0, 110.0, 100.0, 110.0, 100.0, 110.0)):
+        rm3.update_tick("SPY", px, 1000 + i)
+    # Prices alternate 100/110 -> Mean: 105.0. Std: (25)**0.5 = 5.0
     # Scale factor = 1.0 + 5.0 / 105.0 = 1.0 + 1/21 = 22/21 = 1.047619...
     scale = 22.0 / 21.0
     sl, tp = rm3.stop_tp_prices(PositionSide.LONG, 100.0, "SPY")
@@ -56,6 +57,30 @@ def test_volatility_history_and_scaling():
     expected_tp_scaled = 100.0 * (1 + (MEDIUM.take_profit_pct * scale) / 100)
     assert pytest.approx(sl) == expected_sl_scaled
     assert pytest.approx(tp) == expected_tp_scaled
+
+
+def test_stop_tp_scaling_uses_min_window_floor():
+    """2-4 retained ticks are 'insufficient data' for the entry guards; the
+    stop/tp scaler must use the SAME >=5 floor instead of scaling off 2 ticks."""
+    rm = RiskManager(MEDIUM)
+    rm.update_tick("SPY", 100.0, 1000)
+    rm.update_tick("SPY", 110.0, 2000)  # 2 ticks used to engage scaling
+    sl, tp = rm.stop_tp_prices(PositionSide.LONG, 100.0, "SPY")
+    assert sl == 100.0 * (1 - MEDIUM.stop_loss_pct / 100)
+    assert tp == 100.0 * (1 + MEDIUM.take_profit_pct / 100)
+
+
+def test_stop_tp_scale_clamped_so_long_stop_stays_positive():
+    """A violent window (std/mean ~= 2) with a 40% base stop used to scale the
+    stop distance past 100%, producing a NEGATIVE long stop that never triggers.
+    The scaled distances are clamped at 50%."""
+    rm = RiskManager(make_custom(stop_loss_pct=40.0, take_profit_pct=80.0))
+    for i, px in enumerate((0.01, 0.01, 0.01, 0.01, 1000.0)):
+        rm.update_tick("SPY", px, 1000 + i)
+    sl, tp = rm.stop_tp_prices(PositionSide.LONG, 100.0, "SPY")
+    assert sl == 100.0 * (1 - 50.0 / 100)  # clamped
+    assert tp == 100.0 * (1 + 50.0 / 100)  # clamped
+    assert sl > 0
 
 
 def test_fat_finger_protection():
@@ -85,6 +110,29 @@ def test_fat_finger_protection():
     assert d3.approved
 
 
+def test_fat_finger_absolute_cap_scales_with_account_size():
+    """A flat $10k absolute cap silently disabled the bot at scale: at $500k
+    equity MEDIUM's 2.5% sizing ($12.5k) was ALWAYS rejected. The cap now
+    scales as max($10k, 10% of equity); at/below $100k it is unchanged."""
+    p = Portfolio(500_000.0)
+
+    # MEDIUM-sized entry now passes at $500k
+    rm = RiskManager(MEDIUM)  # per_trade_pct = 2.5 -> $12,500 order
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1)
+    assert d.approved
+    assert d.order is not None
+    assert d.order.qty * 100.0 == pytest.approx(12_500.0)
+
+    # ...while a genuinely fat order still rejects: 11% of $500k = $55k exceeds
+    # max(10k, 0.10 * 500k) = $50k (and sits below the 15% = $75k relative cap,
+    # so it is specifically the scaled absolute term rejecting it).
+    prof_fat = make_custom(per_trade_pct=11.0, max_total_exposure_pct=100.0)
+    rm2 = RiskManager(prof_fat)
+    d2 = rm2.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1)
+    assert not d2.approved
+    assert d2.reason == "fat-finger limit exceeded"
+
+
 def test_price_deviation_guard():
     # Reject entry signal if mark price deviates from rolling average by > 3%
     rm = RiskManager(make_custom(min_volatility_pct=0.0))
@@ -107,6 +155,35 @@ def test_price_deviation_guard():
     # 3. 2.9% deviation (102.9) -> Approve
     d3 = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=102.9, ts_ns=2000)
     assert d3.approved
+
+
+def test_deviation_guard_excludes_the_tick_under_evaluation():
+    """Runner path: update_tick(mark) runs BEFORE evaluate(mark), so the guard's
+    window used to include the evaluated mark itself — diluting the average by
+    (N-1)/N and letting a 3.1% jump through the 3% limit."""
+    rm = RiskManager(make_custom(min_volatility_pct=0.0))
+    for i in range(20):
+        rm.update_tick("SPY", 100.0, 1000 + i)
+    p = Portfolio(100_000.0)
+    ts = 2000
+    rm.update_tick("SPY", 103.1, ts)  # the runner records the tick first...
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=103.1, ts_ns=ts)
+    assert not d.approved  # ...but the mark is judged against the PRIOR window
+    assert d.reason == "price deviation limit exceeded"
+
+
+def test_volatility_floor_excludes_the_tick_under_evaluation():
+    """A dead-flat window must stay 'sideways' even when the outlier mark being
+    evaluated would inject its own variance into the volatility estimate."""
+    rm = RiskManager(MEDIUM)  # min_volatility_pct = 0.15
+    for i in range(20):
+        rm.update_tick("SPY", 100.0, 1000 + i)
+    p = Portfolio(100_000.0)
+    ts = 2000
+    rm.update_tick("SPY", 103.1, ts)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=103.1, ts_ns=ts)
+    assert not d.approved
+    assert d.reason == "sideways market: volatility below threshold"
 
 
 def test_emergency_circuit_breaker():

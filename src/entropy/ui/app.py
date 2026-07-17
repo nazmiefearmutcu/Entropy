@@ -339,8 +339,9 @@ class EntropyApp(App[None]):
     @work(exclusive=True, group="drain")
     async def run_drain(self) -> None:
         q = self._sink.q
+        drained = 0
         while True:
-            r = await q.get()
+            r = await q.get()  # returns WITHOUT yielding while the queue is backed up
             if isinstance(r, Trade):
                 evs = self.engine.on_trade(r.symbol, r.price, r.amount, r.side.value, r.local_ts)
                 for e in evs:
@@ -352,6 +353,11 @@ class EntropyApp(App[None]):
                 if r.symbol in (self.cfg.strategy_symbol, self.cfg.crypto_strategy_symbol):
                     self._on_strategy(r)
                 self._route_candle(r)
+            # Under sustained load q.get() never suspends, which starves the 10 Hz
+            # UI timers: hand the loop back every 200 records.
+            drained += 1
+            if drained % 200 == 0:
+                await asyncio.sleep(0)
 
     def _on_strategy(self, r: Trade) -> None:
         strat = (
@@ -437,8 +443,10 @@ class EntropyApp(App[None]):
         self._feed_status("equities: source=sim")
         await self._equity.run()
 
-    @work(group="feeds")
+    @work(exclusive=True, group="crypto_feed")
     async def _run_crypto_feed(self) -> None:
+        # exclusive + own group: the Settings crypto toggle cancels/relaunches this
+        # worker without touching the equity feed's group.
         # Reconnect noise lives in the console layer (keeps the engine pure).
         self._feed_status("connecting…")
         try:
@@ -447,6 +455,13 @@ class EntropyApp(App[None]):
             header = None
         try:
             task = await start_feed(self._sink)
+        except Exception as exc:
+            if header is not None:
+                header.sources = "coinbase ○  binance ○"   # never connected
+            self._feed_status(f"disconnect: {exc}", "red")
+            self._error_text = f"crypto feed: {exc}"
+            return
+        try:
             if header is not None:
                 header.sources = "coinbase ●  binance ●"   # feed live
             await task
@@ -457,6 +472,10 @@ class EntropyApp(App[None]):
                 header.sources = "coinbase ○  binance ○"   # disconnected
             self._feed_status(f"disconnect: {exc}", "red")
             self._error_text = f"crypto feed: {exc}"
+        finally:
+            # Worker cancelled (settings toggle / quit) or exited: the collect task
+            # must die with it, not keep feeding the sink (mirrors the equity path).
+            task.cancel()
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen(id="help"))
@@ -475,6 +494,8 @@ class EntropyApp(App[None]):
     ) -> None:
         tf_changed = timeframe != self.cfg.timeframe
         equity_source_changed = equity_source != self.cfg.equity_source
+        equities_toggled = enable_equities != self.cfg.enable_equities
+        crypto_toggled = enable_crypto != self.cfg.enable_crypto
         spec = get_timeframe(timeframe)
         # Overlay timeframe-derived windows/scalars + form spike/snapdrop onto the existing
         # engine config so non-form fields (upmove/downmove/leaderboard_k/accel_eps) are preserved.
@@ -533,6 +554,28 @@ class EntropyApp(App[None]):
             if crypto_symbol_changed:
                 self._warmup_crypto()
 
-        if equity_source_changed and self.cfg.enable_equities:
+        # Feed enable/disable transitions (the mount-time launch only ever ran once;
+        # these switches must keep working for the app's whole lifetime).
+        if equities_toggled:
+            if enable_equities:
+                self._push_info("equities: feed enabled")
+                self._run_equity_feed()
+            else:
+                self.workers.cancel_group(self, "equity_feed")
+                self._push_info("equities: feed disabled")
+        elif equity_source_changed and self.cfg.enable_equities:
             # Relaunch resolves the new source; exclusive worker cancels the old feed.
             self._run_equity_feed()
+
+        if crypto_toggled:
+            if enable_crypto:
+                self._push_info("crypto: feed enabled")
+                if not self.crypto_strategy.is_warm:  # first enable: mirror on_mount
+                    self._warmup_crypto()
+                self._run_crypto_feed()
+            else:
+                # Cancelling the worker triggers its finally: the collect task dies too.
+                self.workers.cancel_group(self, "crypto_feed")
+                with suppress(NoMatches):
+                    self.query_default("#header", HeaderBar).sources = "equities only"
+                self._push_info("crypto: feed disabled")

@@ -131,6 +131,10 @@ def init_trade_csv(path: str) -> None:
                 return
             if first is not None:
                 os.replace(path, f"{path}.bak-{int(time.time())}")
+        # Fresh file (brand-new or legacy set aside): stale registry entries from a
+        # previous file at this path would pair a future CLOSE with an entry price
+        # whose OPEN row is not in this file — drop them with the old file.
+        _open_positions.pop(path, None)
         with open(path, "w", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerow(_TRADE_HEADER)
     except OSError as exc:
@@ -141,13 +145,15 @@ def record_trade_open(csv_path: str, symbol: str, side: str, price: float) -> No
     """Append an OPEN row and remember the entry price for the matching close."""
     if not csv_path:
         return
-    # Track the position even if the disk write fails: the position is real either way,
-    # and the eventual CLOSE row can then still carry the correct entry price.
+    # Ensure the file exists FIRST (a fresh file clears any stale registry entries),
+    # then track the position — even if the disk write below fails: the position is
+    # real either way, and the eventual CLOSE row can then still carry the correct
+    # entry price. init_trade_csv swallows OSError itself.
+    init_trade_csv(csv_path)
     _open_positions.setdefault(csv_path, {}).setdefault(
         (symbol.upper(), side.upper()), []
     ).append(price)
     try:
-        init_trade_csv(csv_path)
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([f"{time.time():.3f}", symbol, side, "OPEN", str(price), ""])
     except OSError as exc:
@@ -164,13 +170,18 @@ def record_trade_close(csv_path: str, symbol: str, side: str, price: float) -> N
     """
     if not csv_path:
         return
+    init_trade_csv(csv_path)  # a fresh file clears stale registry entries first
     stack = _open_positions.get(csv_path, {}).get((symbol.upper(), side.upper()))
-    open_price = str(stack.pop()) if stack else ""
+    open_price = str(stack[-1]) if stack else ""  # peek: pop only after the write lands
     try:
-        init_trade_csv(csv_path)
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(
                 [f"{time.time():.3f}", symbol, side, "CLOSE", open_price, str(price)]
             )
     except OSError as exc:
+        # The CLOSE row never hit the disk: keep the entry on the stack so a
+        # retried close still pairs with the correct open price.
         _note_write_failure(exc)
+    else:
+        if stack:
+            stack.pop()

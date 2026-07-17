@@ -44,11 +44,13 @@ class EquitySimFeed:
                         price=px, amount=float(size), side=_SIDE[side])
 
     async def run(self) -> None:
-        per_batch = max(1, int(self.tps * self.batch_dt))
         try:
             while True:
                 if self.gate is None or self.gate(self.clock_ns()):
                     self.sim.maybe_inject_events()
+                    # Recomputed every batch (cheap) so a hot-applied `tps`
+                    # (Settings save) changes the emit rate immediately.
+                    per_batch = max(1, int(self.tps * self.batch_dt))
                     for tr in self._emit_batch(per_batch):
                         await self.sink.put(tr)
                 await asyncio.sleep(self.batch_dt)

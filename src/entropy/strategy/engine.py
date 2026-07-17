@@ -107,11 +107,20 @@ class Strategy:
     def on_price(self, symbol: str, price: float, ts_ns: int) -> list[StrategyEvent]:
         if symbol != self.cfg.symbol:
             return []
+        was_warm = self.is_warm
         ema_update(self._fast, price)
         ema_update(self._slow, price)
         if not self.is_warm:
             return []
         sign = self._signum()
+        if not was_warm and self._prev_sign == 0:
+            # Tick-driven warmup (no warmup() call — e.g. the bot runner): the first
+            # warm tick only ESTABLISHES the baseline sign. Emitting here would fire
+            # a phantom entry off the stale _prev_sign=0 with no actual crossover.
+            # (The warmup() path is unaffected: it leaves the strategy already warm
+            # with _prev_sign seeded, so was_warm is True on its first tick.)
+            self._prev_sign = sign
+            return []
         events: list[StrategyEvent] = []
         desired = self.position.side
         if self._prev_sign <= 0 and sign > 0:

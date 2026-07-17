@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from textual.app import ComposeResult
@@ -143,6 +144,11 @@ class SettingsScreen(ModalScreen[None]):
             snap_val = float(self.query_one("#set-snapdrop", Input).value)
             if tps_val <= 0:
                 raise ValueError("Equity TPS must be a positive integer")
+            # float() happily parses "inf"/"nan"; NaN even slips past the <= 0
+            # comparison below, poisoning the engine config — require finite first.
+            # (TPS is int()-parsed, which already rejects inf/nan strings.)
+            if not (math.isfinite(spike_val) and math.isfinite(snap_val)):
+                raise ValueError("Spike/Snapdrop thresholds must be finite numbers")
             if spike_val <= 0 or snap_val <= 0:
                 raise ValueError("Spike/Snapdrop thresholds must be positive")
             if not strat_sym_val or not crypto_sym_val:

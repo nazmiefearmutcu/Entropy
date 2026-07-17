@@ -23,3 +23,19 @@ def test_ignores_other_symbols():
 
 def test_name_attribute():
     assert EmaCrossStrategy(symbol="SPY").name == "ema_cross"
+
+
+def test_no_warmup_first_warm_tick_emits_no_phantom_signal():
+    """The bot runner never calls warmup(): the tick that warms the EMAs must not
+    emit an entry signal by itself (there is no crossover, only a stale prev
+    sign of 0); a genuine cross afterwards still trades."""
+    strat = EmaCrossStrategy(symbol="SPY", fast=2, slow=4)
+    signals = []
+    for i, px in enumerate([100, 101, 102, 103], start=1):  # 4th tick = warm
+        signals += strat.on_tick("SPY", float(px), i, events=[])
+    assert signals == []  # a phantom ENTER_LONG used to fire on the 4th tick
+
+    out = []
+    for i, px in enumerate([95, 90, 85], start=10):  # real bearish crossover
+        out += strat.on_tick("SPY", float(px), i, events=[])
+    assert any(s.action is SignalAction.ENTER_SHORT for s in out)

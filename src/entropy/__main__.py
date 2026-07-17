@@ -231,14 +231,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     
     if args.command == "bot":
-        # rebuild argv list for the bot module
-        bot_args = []
-        if args.mode:
-            bot_args.extend(["--mode", args.mode])
-        if args.risk:
-            bot_args.extend(["--risk", args.risk])
-        if args.cash:
-            bot_args.extend(["--cash", str(args.cash)])
+        # rebuild argv list for the bot module: mode/risk/cash are always set
+        # (argparse defaults), so forward them unconditionally — a truthiness
+        # guard would silently drop legitimate falsy values like `--cash 0`.
+        bot_args = ["--mode", args.mode, "--risk", args.risk, "--cash", str(args.cash)]
         if args.no_crypto:
             bot_args.append("--no-crypto")
         if args.dashboard:

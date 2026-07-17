@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from entropy.bot.calibration import DummyLedger, calibrate_and_test, run_backtest
 from entropy.bot.orders import Fill, OrderIntent, OrderSide
 
@@ -98,6 +100,43 @@ def test_run_backtest_pnl_calculation(monkeypatch) -> None:
     assert res["win_rate"] == 0.5
     # profit_factor = total_profit / total_loss = 96.5 / 27.0
     assert abs(res["profit_factor"] - (96.5 / 27.0)) < 1e-6
+
+
+def test_end_of_run_liquidations_counted_in_trade_stats(monkeypatch) -> None:
+    """A run that ends with an open winning position must count that position's
+    PnL in closed_pnls / win_rate / total_trades — previously it was folded into
+    final_equity only (portfolio.close bypassed the ledger), skewing every
+    per-trade metric the grid search optimizes."""
+    from entropy.bot.orders import Order
+    from entropy.bot.runner import BotRunner
+
+    class SeededRunner(BotRunner):
+        """Opens one LONG through the real executor on the first tick, then just
+        marks prices — guaranteeing exactly one still-open position at the end."""
+
+        def on_trade(self, symbol, price, amount, side, ts_ns):  # type: ignore[override]
+            self.portfolio.mark(symbol, price)
+            if not self.portfolio.positions and not self.ticks:
+                order = Order(id="t1", symbol=symbol, side=OrderSide.BUY,
+                              intent=OrderIntent.OPEN, qty=10.0, price=price,
+                              ts_ns=ts_ns, strategy="test")
+                self._execute(order)
+            self.ticks += 1
+
+    monkeypatch.setattr("entropy.bot.calibration.BotRunner", SeededRunner)
+    ticks = [
+        {"symbol": "SPY", "price": 100.0, "amount": 1.0, "side": "buy", "ts_ns": 1000},
+        {"symbol": "SPY", "price": 110.0, "amount": 1.0, "side": "buy", "ts_ns": 2000},
+    ]
+    res = run_backtest(ticks, ["SPY"], fast=9, slow=21, min_pct=0.15,
+                       stop_loss_pct=1.0, take_profit_pct=2.0)
+
+    assert res["total_trades"] == 1
+    assert len(res["closed_pnls"]) == 1
+    assert res["closed_pnls"][0] > 0  # the winner liquidated at the final mark
+    assert res["win_rate"] == 1.0
+    # equity and trade stats now tell the same story (fees are tiny, not zero)
+    assert res["final_equity"] == pytest.approx(100_000.0 + res["closed_pnls"][0], abs=1.0)
 
 
 def test_calibration_overtrading_penalty(monkeypatch) -> None:

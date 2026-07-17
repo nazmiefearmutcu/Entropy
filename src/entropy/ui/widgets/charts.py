@@ -14,6 +14,12 @@ _NS_PER_DAY = 24 * _NS_PER_HOUR
 _LEGACY_BAR_NS = 1_000_000_000
 
 
+# A chart deque holds up to this many bars (CandleAggregator's maxlen), so the
+# rendered span is bar_ns * _CHART_BARS — the tier must key on THAT, not bar_ns:
+# 15m bars look sub-hour but 120 of them span 30h, wrapping "H:M" past midnight.
+_CHART_BARS = 120
+
+
 def _axis_formats(bar_ns: int) -> tuple[str, str]:
     """Map a bar interval to ``(plotext date_form, strftime format)`` for the x-axis.
 
@@ -21,14 +27,15 @@ def _axis_formats(bar_ns: int) -> tuple[str, str]:
     one before every alphabetic character (``plotext._date.date_class.correct_form``)
     — so the two returned strings must stay letter-for-letter in sync.
     """
-    if bar_ns < _NS_PER_HOUR:
-        # Sub-hour bars (1m/5m/15m): HH:MM is unique within a session.
-        return "H:M", "%H:%M"
-    if bar_ns < _NS_PER_DAY:
-        # Hour-scale bars (1h/4h) span midnights: prefix the day to stay unique.
+    if bar_ns >= _NS_PER_DAY:
+        # Day-scale and coarser bars: date only.
+        return "d/m/Y", "%d/%m/%Y"
+    if bar_ns * _CHART_BARS > _NS_PER_DAY:
+        # The full chart span crosses a midnight (15m/1h/4h at 120 bars):
+        # prefix the day so labels stay unique for the chart's lifetime.
         return "d/m H:M", "%d/%m %H:%M"
-    # Day-scale and coarser bars: date only.
-    return "d/m/Y", "%d/%m/%Y"
+    # Chart span fits within a day (legacy 1s, 1m/5m): HH:MM is unique.
+    return "H:M", "%H:%M"
 
 
 @dataclass(slots=True)

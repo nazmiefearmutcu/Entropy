@@ -164,6 +164,67 @@ def test_trade_close_oserror_logged_once_never_raises(
     assert all(r.levelno == logging.DEBUG for r in failures)
 
 
+def test_fresh_file_clears_stale_registry(tmp_path: Path):
+    """The module-scope open-position registry is keyed by path and used to
+    survive file recreation: a stale entry would pair a future CLOSE with an
+    entry price whose OPEN row is not in the fresh file."""
+    trade_csv = tmp_path / "trades.csv"
+    record_trade_open(str(trade_csv), "AAPL", "LONG", 150.0)
+
+    # The file starts over (deleted / replaced between runs); registry state from
+    # the previous file must go with it.
+    trade_csv.unlink()
+    init_trade_csv(str(trade_csv))
+
+    record_trade_close(str(trade_csv), "AAPL", "LONG", 155.0)
+    rows = _rows_without_ts(trade_csv)
+    assert len(rows) == 2
+    assert rows[1] == ["AAPL", "LONG", "CLOSE", "", "155.0"]  # no foreign pairing
+
+
+def test_legacy_rename_clears_stale_registry(tmp_path: Path):
+    """Same guarantee when the fresh file is created by the legacy-header rename."""
+    trade_csv = tmp_path / "trades.csv"
+    record_trade_open(str(trade_csv), "AAPL", "LONG", 150.0)
+
+    trade_csv.write_text(
+        "Symbol,Side,Open Price,Close Price\r\nAAPL,LONG,150.0,\r\n", encoding="utf-8"
+    )
+    init_trade_csv(str(trade_csv))  # renames to .bak, starts a fresh file
+
+    record_trade_close(str(trade_csv), "AAPL", "LONG", 155.0)
+    rows = _rows_without_ts(trade_csv)
+    assert rows[-1] == ["AAPL", "LONG", "CLOSE", "", "155.0"]
+
+
+def test_trade_close_oserror_keeps_registry_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The entry price is popped only after the CLOSE row lands on disk: a failed
+    write must leave the stack intact so a retried close still pairs correctly."""
+    trade_csv = tmp_path / "trades.csv"
+    record_trade_open(str(trade_csv), "AAPL", "LONG", 150.0)
+
+    real_open = builtins.open
+    failing = {"on": True}
+
+    def flaky_open(file, mode="r", *args, **kwargs):  # type: ignore[no-untyped-def]
+        if failing["on"] and os.fspath(file) == str(trade_csv) and "a" in mode:
+            raise OSError("disk full")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", flaky_open)
+    record_trade_close(str(trade_csv), "AAPL", "LONG", 155.0)  # append fails
+    stack = ledger_mod._open_positions[str(trade_csv)][("AAPL", "LONG")]
+    assert stack == [150.0]  # entry NOT lost with the failed row
+
+    failing["on"] = False
+    record_trade_close(str(trade_csv), "AAPL", "LONG", 156.0)  # retry succeeds
+    rows = _rows_without_ts(trade_csv)
+    assert rows[-1] == ["AAPL", "LONG", "CLOSE", "150.0", "156.0"]
+    assert ledger_mod._open_positions[str(trade_csv)][("AAPL", "LONG")] == []
+
+
 def test_legacy_trade_csv_renamed_to_bak(tmp_path: Path):
     """A file with the old rewrite-format header is set aside, never mixed with new rows."""
     trade_csv = tmp_path / "trades.csv"

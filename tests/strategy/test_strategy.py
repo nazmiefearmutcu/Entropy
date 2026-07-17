@@ -54,3 +54,29 @@ def test_running_pnl_mark():
     _warm(s, [100, 100, 100])
     s.on_price("T", 101.0, 11)         # OPEN_LONG size 2
     assert abs(s.running_pnl(104.0) - 6.0) < 1e-9
+
+def test_tick_driven_warm_transition_emits_no_phantom_entry():
+    """Without warmup() (the bot-runner path) the tick that makes the strategy
+    warm must only ESTABLISH the baseline sign: a rising tape used to fire
+    OPEN_LONG off the stale _prev_sign=0 with no actual crossover."""
+    s = Strategy(StrategyConfig(symbol="T", fast=2, slow=3))
+    evs = []
+    for i, px in enumerate((100.0, 101.0, 102.0)):  # warm on the 3rd tick, fast>slow
+        evs += s.on_price("T", px, i)
+    assert evs == []                       # no phantom entry at the transition
+    assert s.position.side == Side.FLAT
+    assert s._prev_sign == 1               # baseline established from the tape
+    # A genuine crossover after the transition still fires normally.
+    out = []
+    for i, px in enumerate((95.0, 90.0), start=10):
+        out += s.on_price("T", px, i)
+    assert EventKind.OPEN_SHORT in [e.kind for e in out]
+
+def test_warmup_path_unchanged_first_cross_still_fires():
+    """The UI path calls warmup(bars): the first on_price after a flat warmup
+    (prev sign 0, strategy already warm) must keep emitting on a real cross."""
+    s = Strategy(StrategyConfig(symbol="T", fast=2, slow=3))
+    _warm(s, [100, 100, 100])              # warm, _prev_sign == 0 (flat)
+    assert s.on_price("T", 100.0, 10) == []
+    o = s.on_price("T", 101.0, 11)
+    assert [e.kind for e in o] == [EventKind.OPEN_LONG]

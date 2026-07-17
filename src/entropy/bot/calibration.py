@@ -6,6 +6,8 @@ import time
 from typing import Any
 
 from entropy.bot.config import BotConfig
+from entropy.bot.orders import Fill, OrderIntent, OrderSide
+from entropy.bot.portfolio import PositionSide
 from entropy.bot.risk.profiles import make_custom
 from entropy.bot.runner import BotRunner
 from entropy.feeds.crypto import BINANCE_MAJORS
@@ -126,10 +128,20 @@ def run_backtest(
     for tick in ticks:
         runner.on_trade(tick["symbol"], tick["price"], tick["amount"], tick["side"], tick["ts_ns"])
 
-    # Close all remaining open positions at final prices
+    # Close all remaining open positions at final prices. The close bypasses the
+    # executor, so record an equivalent synthetic CLOSE fill into the dummy ledger:
+    # otherwise these liquidations are counted in final_equity but invisible to
+    # win_rate/profit_factor/sharpe/total_trades (their OPEN fills never pair up).
     final_ts = ticks[-1]["ts_ns"] if ticks else 0
     for symbol in list(runner.portfolio.positions):
+        pos = runner.portfolio.positions[symbol]
         mark_px = runner.portfolio.mark_of(symbol)
+        close_side = OrderSide.SELL if pos.side is PositionSide.LONG else OrderSide.BUY
+        dummy_ledger.record_fill(
+            Fill(order_id=f"liq-{symbol}", symbol=symbol, side=close_side, qty=pos.qty,
+                 price=mark_px, fee=0.0, slippage=0.0, ts_ns=final_ts),
+            OrderIntent.CLOSE,
+        )
         runner.portfolio.close(symbol, mark_px, final_ts, fee=0.0)
 
     # Calculate metrics

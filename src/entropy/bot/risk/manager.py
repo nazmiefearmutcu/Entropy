@@ -18,6 +18,11 @@ _MAX_TICKS = 512
 # spirit) and exits are never blocked.
 _MIN_WINDOW_TICKS = 5
 
+# Ceiling on the volatility-scaled stop/take-profit distances (% of entry). A
+# violent window (std/mean > ~0.5 with a 40% base stop) could otherwise scale
+# stop_loss_pct past 100 and yield a NEGATIVE long stop that never triggers.
+_MAX_STOP_TP_PCT = 50.0
+
 
 class RiskDecision(msgspec.Struct, frozen=True):
     approved: bool
@@ -91,18 +96,21 @@ class RiskManager:
     ) -> tuple[float, float]:
         p = self.profile
         scale_factor = 1.0
-        if symbol is not None and symbol in self.ticks_history:
-            history = self.ticks_history[symbol]
-            if len(history) >= 2:
-                prices = [p[1] for p in history]
-                mean = sum(prices) / len(prices)
-                if mean > 0:
-                    variance = sum((x - mean) ** 2 for x in prices) / len(prices)
-                    std = variance ** 0.5
-                    scale_factor = 1.0 + std / mean
+        if symbol is not None:
+            history = self.ticks_history.get(symbol)
+            if history:
+                # Same windowed sample the entry guards use (>= 5 in-window ticks);
+                # anything thinner falls back to the profile's base percentages.
+                prices = self._window_prices(symbol, history[-1][0])
+                if len(prices) >= _MIN_WINDOW_TICKS:
+                    mean = sum(prices) / len(prices)
+                    if mean > 0:
+                        variance = sum((x - mean) ** 2 for x in prices) / len(prices)
+                        std = variance ** 0.5
+                        scale_factor = 1.0 + std / mean
 
-        stop_loss_pct = p.stop_loss_pct * scale_factor
-        take_profit_pct = p.take_profit_pct * scale_factor
+        stop_loss_pct = min(p.stop_loss_pct * scale_factor, _MAX_STOP_TP_PCT)
+        take_profit_pct = min(p.take_profit_pct * scale_factor, _MAX_STOP_TP_PCT)
 
         if side is PositionSide.LONG:
             return entry_px * (1 - stop_loss_pct / 100), entry_px * (1 + take_profit_pct / 100)
@@ -145,6 +153,13 @@ class RiskManager:
 
         volatility_pct: float | None = None
         prices = self._window_prices(signal.symbol, ts_ns)
+        # The runner records the tick under evaluation (update_tick) BEFORE calling
+        # evaluate, so the window's newest entry can be the mark itself. A mark must
+        # be judged against the PRIOR window: including it dilutes the deviation
+        # average and injects the outlier's own variance into the volatility floor.
+        history = self.ticks_history.get(signal.symbol)
+        if prices and history and history[-1] == (ts_ns, mark_px):
+            prices = prices[:-1]
 
         # Volatility Floor Filter (over the profile's time window)
         if (
@@ -176,9 +191,12 @@ class RiskManager:
         if projected > (self.profile.max_total_exposure_pct / 100.0) * equity:
             return RiskDecision(False, None, "exposure cap exceeded")
 
-        # Fat-finger protection
+        # Fat-finger protection: relative cap plus an absolute cap that scales with
+        # account size. A flat $10k absolute cap would reject every normal-sized
+        # entry once equity outgrows it (e.g. MEDIUM's 2.5% = $12.5k at $500k);
+        # accounts at/below $100k keep the exact legacy thresholds via max().
         order_size = qty * mark_px
-        if order_size > 0.15 * equity or order_size > 10000.0:
+        if order_size > 0.15 * equity or order_size > max(10_000.0, 0.10 * equity):
             return RiskDecision(False, None, "fat-finger limit exceeded")
 
         side = OrderSide.BUY if signal.action is SignalAction.ENTER_LONG else OrderSide.SELL
