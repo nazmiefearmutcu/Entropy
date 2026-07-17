@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from entropy.app import AppConfig
@@ -5,8 +7,14 @@ from entropy.engine.timeframe import get_timeframe
 from entropy.strategy.engine import Bar
 from entropy.ui.app import EntropyApp
 from entropy.ui.widgets.charts import PriceChart
+from entropy.ui.widgets.console import AlgoConsole
 
 BAR_NS = get_timeframe("15m").bar_ns
+
+
+def _console_text(app: EntropyApp) -> str:
+    console = app.query_one("#console", AlgoConsole)
+    return "\n".join(strip.text for strip in console.lines)
 
 
 def _app(tmp_path) -> EntropyApp:
@@ -107,15 +115,75 @@ async def test_focus_warmup_failure_notes_console_and_survives(tmp_path, monkeyp
         text = ""
         for _ in range(40):
             await pilot.pause()
-            from entropy.ui.widgets.console import AlgoConsole
-
-            console = app.query_one("#console", AlgoConsole)
-            text = "\n".join(strip.text for strip in console.lines)
+            text = _console_text(app)
             if "focus warmup failed" in text:
                 break
         assert "focus warmup failed (binance down)" in text
         assert "binance down" in app._error_text
         assert app.focus_symbol == "binance-spot:ETHUSDT"   # app kept running
+        await pilot.press("q")
+
+
+@pytest.mark.asyncio
+async def test_coinbase_focus_skips_warmup_silently(tmp_path, monkeypatch):
+    """Non-Binance crypto venues have no kline source: focusing a coinbase
+    canonical must call NO warmup and log nothing — chart fills from ticks."""
+    calls: list[tuple[str, str]] = []
+
+    async def fake_klines(symbol, interval="1m", limit=200):
+        calls.append((symbol, interval))
+        return _bars()
+
+    monkeypatch.setattr("entropy.ui.app.warmup_klines", fake_klines)
+    app = _app(tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        old = app._focus_candles
+        baseline = _console_text(app)
+        app.focus_symbol = "coinbase:BTC-USD"
+        for _ in range(10):
+            await pilot.pause()
+        assert calls == []                        # Binance klines never hit
+        assert app._focus_candles is not old      # fresh aggregator still swapped
+        assert len(app._focus_candles.bars()) == 0
+        assert app.query_one("#price", PriceChart).title == "coinbase:BTC-USD · 15m"
+        new_lines = _console_text(app).replace(baseline, "")
+        assert "warmup" not in new_lines          # skip is silent, no yellow noise
+        await pilot.press("q")
+
+
+@pytest.mark.asyncio
+async def test_tf_change_mid_fetch_discards_stale_seed(tmp_path, monkeypatch):
+    """A timeframe change while the focus warmup fetch is in flight must not
+    seed old-timeframe bars into the new-timeframe aggregator."""
+    gate = asyncio.Event()
+
+    async def slow_klines(symbol, interval="1m", limit=200):
+        await gate.wait()
+        return _bars()
+
+    monkeypatch.setattr("entropy.ui.app.warmup_klines", slow_klines)
+    app = _app(tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.focus_symbol = "binance-spot:ETHUSDT"   # worker captures tf=15m
+        await pilot.pause()                          # let it start + block on gate
+        cfg = app.cfg
+        app._apply_settings(
+            theme=cfg.theme, chart_type=cfg.chart_type, show_volume=cfg.show_volume,
+            timeframe="5m", enable_equities=cfg.enable_equities,
+            enable_crypto=cfg.enable_crypto, equity_source=cfg.equity_source,
+            equity_tps=cfg.equity_tps, strategy_symbol=cfg.strategy_symbol,
+            crypto_strategy_symbol=cfg.crypto_strategy_symbol,
+            spike_pct=cfg.engine.spike_pct, snapdrop_pct=cfg.engine.snapdrop_pct,
+        )
+        assert app._tf.name == "5m"
+        gate.set()                                   # fetch returns AFTER the change
+        for _ in range(20):
+            await pilot.pause()
+        _5m_ns = 5 * 60 * 1_000_000_000
+        assert app._focus_candles.interval_ns == _5m_ns
+        assert len(app._focus_candles.bars()) == 0   # stale 15m seed discarded
         await pilot.press("q")
 
 

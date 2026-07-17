@@ -27,7 +27,19 @@ def row_text(r: LeaderRow, app: Any | None = None) -> tuple[Text, Text, Text, Te
 def refresh_board(
     table: DataTable[object], rows: tuple[LeaderRow, ...], app: Any | None = None
 ) -> None:
-    table.clear()
+    """Refresh a leaderboard; rebuild only when the symbol set/order changed.
+
+    Rows are keyed by symbol (row selection resolves the symbol for the app's
+    focus plumbing), which also enables in-place cell updates while membership
+    is unchanged — a clear()+rebuild at the 10 Hz snapshot rate would reset the
+    keyboard row cursor on every tick.
+    """
+    symbols = [r.symbol for r in rows]
+    if symbols != [key.value for key in table.rows]:
+        table.clear()
+        for r in rows:
+            table.add_row(*row_text(r, app), key=r.symbol)
+        return
     for r in rows:
-        # Keyed by symbol so row selection can resolve it (app focus-symbol plumbing).
-        table.add_row(*row_text(r, app), key=r.symbol)
+        for column_key, cell in zip(table.columns, row_text(r, app), strict=True):
+            table.update_cell(r.symbol, column_key, cell, update_width=True)

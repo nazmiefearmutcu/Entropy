@@ -411,18 +411,24 @@ class EntropyApp(App[None]):
     async def _warmup_focus(self) -> None:
         """Seed chart #1 with recent history for the focused symbol.
 
-        Crypto canonicals ("venue:RAW") warm from Binance klines on the raw
-        symbol; bare equity tickers warm from Yahoo bars only when the resolved
-        equity source is live — sim symbols have no history source beyond synth,
-        so the chart starts empty and fills from live ticks. Exclusive group: a
-        rapid focus change cancels the in-flight fetch.
+        Only ``binance-spot:RAW`` canonicals have a kline warmup source; other
+        crypto venues (coinbase) skip silently. Bare equity tickers warm from
+        Yahoo bars only when the resolved equity source is live — sim symbols
+        have no history source beyond synth. Skipped symbols start empty and
+        fill from live ticks. Exclusive group: a rapid focus change cancels the
+        in-flight fetch; the post-await guard also drops a seed that a focus or
+        timeframe change made stale mid-fetch.
         """
         symbol = self.focus_symbol
+        tf_name = self._tf.name
         try:
             if ":" in symbol:
-                bars = await warmup_klines(symbol.split(":", 1)[-1], self._tf.name)
+                venue, raw = symbol.split(":", 1)
+                if venue != "binance-spot":
+                    return  # no kline source for this venue — not an error
+                bars = await warmup_klines(raw, tf_name)
             elif self._equity_source_resolved == "live":
-                bars = await warmup_equity_bars(symbol, self._tf.name)
+                bars = await warmup_equity_bars(symbol, tf_name)
             else:
                 return
         except Exception as exc:  # network/REST hiccup — warmup is best-effort.
@@ -431,8 +437,8 @@ class EntropyApp(App[None]):
                 f"focus warmup failed ({exc}); chart fills from live ticks", "yellow"
             )
             return
-        if not bars or self.focus_symbol != symbol:  # stale fetch: focus moved on
-            return
+        if not bars or self.focus_symbol != symbol or self._tf.name != tf_name:
+            return  # stale fetch: focus or timeframe moved on mid-flight
         # Per bar, close→high→low→close fills o/h/l/c in its bucket (same
         # seeding pattern as the SPY chart in _warmup_equity).
         agg = CandleAggregator(self._tf.bar_ns)
