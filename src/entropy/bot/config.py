@@ -4,6 +4,7 @@ import msgspec
 
 from .risk.profiles import RiskProfile, get_profile
 from .strategies.base import Strategy
+from .strategies.consensus import ConsensusStrategy
 from .strategies.ema_cross import EmaCrossStrategy
 from .strategies.momentum_scalper import MomentumScalper
 
@@ -19,7 +20,7 @@ class LiveConfig(msgspec.Struct, frozen=True):
 class BotConfig(msgspec.Struct, frozen=True):
     mode: str = "paper"  # "paper" | "live"
     risk_profile: str = "medium"
-    strategies: tuple[str, ...] = ("momentum_scalper", "ema_cross")
+    strategies: tuple[str, ...] = ("consensus", "ema_cross")
     symbols: tuple[str, ...] = ()  # () = all symbols from the feed
     starting_cash: float = 100_000.0
     fee_bps: float = 1.0
@@ -44,7 +45,9 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
     syms = cfg.symbols or None
     out: list[Strategy] = []
     for name in cfg.strategies:
-        if name == "momentum_scalper":
+        if name == "consensus":
+            out.append(ConsensusStrategy(symbols=syms))
+        elif name == "momentum_scalper":
             out.append(MomentumScalper(symbols=syms, min_pct=cfg.momentum_min_pct))
         elif name == "ema_cross":
             out.append(
