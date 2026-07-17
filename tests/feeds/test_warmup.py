@@ -2,7 +2,12 @@
 import pytest
 from stockodile.schema.records import Bar as StkBar
 
-from entropy.feeds.warmup import bars_from_ohlcv, bars_from_stockodile, warmup_equity_bars
+from entropy.feeds.warmup import (
+    bars_from_ohlcv,
+    bars_from_stockodile,
+    warmup_equity_bars,
+    warmup_klines,
+)
 from entropy.strategy.engine import Bar
 
 
@@ -19,6 +24,60 @@ def test_bars_from_ohlcv_maps_fields():
     bars = bars_from_ohlcv([_O(10, 1, 2, 0.5, 1.5), _O(20, 1.5, 3, 1, 2.5)])
     assert bars == [Bar(ts_ns=10, close=1.5, high=2, low=0.5),
                     Bar(ts_ns=20, close=2.5, high=3, low=1)]
+
+
+# --- warmup_klines backfill window (no network: backfill factory stubbed) -----
+
+_MIN_NS = 60 * 1_000_000_000
+
+
+@pytest.mark.parametrize("interval,bar_ns", [
+    ("1m", _MIN_NS),            # legacy behavior unchanged
+    ("15m", 15 * _MIN_NS),      # default UI timeframe: was 60s/bar -> ~13 bars
+    ("1h", 60 * _MIN_NS),       # was 60s/bar -> <=3 bars
+    ("4h", 240 * _MIN_NS),
+    ("1d", 1440 * _MIN_NS),     # not an engine timeframe: suffix-parsed
+])
+async def test_warmup_klines_window_spans_limit_times_interval(
+    monkeypatch, interval, bar_ns
+):
+    """The backfill window must cover `limit` bars of the ACTUAL interval, not
+    limit*60s regardless of interval."""
+    captured: list[tuple[str, int, int]] = []
+
+    class FakeBackfill:
+        async def backfill_klines(self, *, venue, symbol, interval, start_ns, end_ns):
+            captured.append((interval, start_ns, end_ns))
+            return
+            yield  # pragma: no cover — makes this an (empty) async generator
+
+    monkeypatch.setattr(
+        "crypcodile.exchanges.binance.backfill.make_live_backfill",
+        lambda: FakeBackfill(),
+    )
+    bars = await warmup_klines("BTCUSDT", interval=interval, limit=200)
+    assert bars == []
+    ((got_interval, start_ns, end_ns),) = captured
+    assert got_interval == interval  # the request still carries the interval
+    assert end_ns - start_ns == 200 * bar_ns
+
+
+async def test_warmup_klines_unknown_interval_falls_back_to_1m(monkeypatch):
+    captured: list[tuple[int, int]] = []
+
+    class FakeBackfill:
+        async def backfill_klines(self, *, venue, symbol, interval, start_ns, end_ns):
+            captured.append((start_ns, end_ns))
+            return
+            yield  # pragma: no cover
+
+    monkeypatch.setattr(
+        "crypcodile.exchanges.binance.backfill.make_live_backfill",
+        lambda: FakeBackfill(),
+    )
+    await warmup_klines("BTCUSDT", interval="bogus", limit=200)
+    ((start_ns, end_ns),) = captured
+    assert end_ns - start_ns == 200 * _MIN_NS  # legacy 1m assumption, no raise
 
 
 # --- stockodile Bar conversion + warmup_equity_bars (no network) --------------

@@ -11,7 +11,35 @@ from entropy.strategy.engine import Bar
 # a 10s outer timeout guaranteed a spurious fallback after a single 429.
 _YAHOO_TIMEOUT_S = 30.0
 
-_4H_NS = 4 * 3_600 * 1_000_000_000
+_NS_PER_S = 1_000_000_000
+_4H_NS = 4 * 3_600 * _NS_PER_S
+
+# Binance-style interval suffixes ("30m", "1d", "1w"...) for intervals that are
+# not engine timeframes.
+_INTERVAL_UNIT_NS = {
+    "s": _NS_PER_S,
+    "m": 60 * _NS_PER_S,
+    "h": 3_600 * _NS_PER_S,
+    "d": 86_400 * _NS_PER_S,
+    "w": 7 * 86_400 * _NS_PER_S,
+}
+
+
+def _interval_ns(interval: str) -> int:
+    """Bar span of a kline interval string ("1m"/"15m"/"1h"/"4h"/"1d"…).
+
+    Engine timeframe names resolve via TIMEFRAMES; other Binance-style strings
+    parse as <count><unit>. Unrecognized strings fall back to 1m (the legacy
+    assumption) — warmup is best-effort, a bad name must not raise here.
+    """
+    from entropy.engine.timeframe import TIMEFRAMES
+    tf = TIMEFRAMES.get(interval)
+    if tf is not None:
+        return tf.bar_ns
+    unit_ns = _INTERVAL_UNIT_NS.get(interval[-1:].lower())
+    if unit_ns is not None and interval[:-1].isdigit():
+        return int(interval[:-1]) * unit_ns
+    return 60 * _NS_PER_S
 
 
 def bars_from_ohlcv(ohlcv_rows: Iterable[Any]) -> list[Bar]:
@@ -32,7 +60,9 @@ async def warmup_klines(symbol_raw: str, interval: str = "1m", limit: int = 200)
     from crypcodile.exchanges.binance.backfill import make_live_backfill
     bf = make_live_backfill()
     now = time.clock_gettime_ns(time.CLOCK_REALTIME)
-    start = now - limit * 60 * 1_000_000_000
+    # Window must span `limit` bars of the ACTUAL interval: a fixed 60s-per-bar
+    # window served ~13 bars of history on 15m (EMA21 never seeded) and <=3 on 1h.
+    start = now - limit * _interval_ns(interval)
     rows = []
     async for bar in bf.backfill_klines(venue="binance-spot", symbol=symbol_raw,
                                         interval=interval, start_ns=start, end_ns=now):

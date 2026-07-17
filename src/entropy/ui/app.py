@@ -496,8 +496,10 @@ class EntropyApp(App[None]):
         # exclusive (own group, so it can't cancel the crypto warmup): a newer
         # warmup after a rapid timeframe/symbol change cancels the in-flight
         # fetch, keeping stale bars away from the current strategy.
+        symbol = self.cfg.strategy_symbol
+        tf_name = self._tf.name
         try:
-            bars = await warmup_equity_bars(self.cfg.strategy_symbol, self._tf.name)
+            bars = await warmup_equity_bars(symbol, tf_name)
         except Exception as exc:  # network/timeout/empty — warmup is best-effort.
             self._error_text = f"equity warmup failed: {exc}"
             self._push_info(f"equity warmup failed ({exc}); using synthetic bars",
@@ -506,6 +508,18 @@ class EntropyApp(App[None]):
                 self._push_events(self.strategy.warmup(self._synth_spy_bars()))
                 self._push_info(f"watching [{self.cfg.strategy_symbol}]")
             return
+        # Post-await staleness guard (mirrors _warmup_focus): a settings save
+        # while the fetch was in flight may have flipped the source back to sim
+        # (the relaunched feed worker does NOT cancel this group) or moved the
+        # symbol/timeframe on. Seeding real Yahoo bars onto a strategy/chart now
+        # fed by ~$100 sim ticks would create a price discontinuity and could
+        # journal spurious paper trades — discard the fetch instead.
+        if (
+            self._equity_source_resolved != "live"
+            or self.cfg.strategy_symbol != symbol
+            or self._tf.name != tf_name
+        ):
+            return  # stale fetch: source/symbol/timeframe moved on mid-flight
         # On first boot the mount-time warmup already synth-warmed this strategy
         # (live resolution happens later, inside the feed worker): rebuild it so
         # the real bars seed a clean EMA instead of appending to a synthetic one.
@@ -514,7 +528,7 @@ class EntropyApp(App[None]):
         # close it; only the EMAs/_prev_sign reseed from the real bars.
         if self.strategy.is_warm:
             position = self.strategy.position
-            self.strategy = Strategy(StrategyConfig(symbol=self.cfg.strategy_symbol))
+            self.strategy = Strategy(StrategyConfig(symbol=symbol))
             self.strategy.position = position
         events = self.strategy.warmup(bars)
         # Seed the SPY candle chart from the same bars (the sim path draws from

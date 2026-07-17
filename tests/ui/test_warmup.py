@@ -114,6 +114,59 @@ async def test_live_warmup_seeds_strategy_and_candles_from_real_bars(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_live_warmup_discards_bars_when_source_flips_to_sim_mid_fetch(monkeypatch):
+    """A settings save flipping equity source live->sim does NOT cancel an
+    in-flight _warmup_equity worker (only the feed group relaunches): when the
+    Yahoo fetch finally returns, the real bars must be DISCARDED — seeding them
+    onto a strategy/chart now fed by ~$100 sim ticks would create a price
+    discontinuity and could journal spurious paper trades."""
+    _stub_live_feed(monkeypatch)
+    bar_ns = 15 * 60 * 1_000_000_000
+    fabricated = [Bar(ts_ns=i * bar_ns, close=512.0, high=513.0, low=511.0)
+                  for i in range(1, 25)]
+    release = asyncio.Event()
+
+    async def held(symbol, interval="15m", limit=64):
+        await release.wait()  # held open until the test flips the source
+        return fabricated
+
+    monkeypatch.setattr("entropy.ui.app.warmup_equity_bars", held)
+    app = EntropyApp(AppConfig(enable_crypto=False, equity_source="live", equity_tps=10))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(40):  # wait for the feed worker to resolve live
+            await pilot.pause()
+            if app._equity_source_resolved == "live":
+                break
+        assert app._equity_source_resolved == "live"
+
+        # Settings save flips the source to sim while the fetch is in flight.
+        app._apply_settings(
+            theme=app.cfg.theme, chart_type=app.cfg.chart_type,
+            show_volume=app.cfg.show_volume, timeframe=app.cfg.timeframe,
+            enable_equities=True, enable_crypto=False, equity_source="sim",
+            equity_tps=10, strategy_symbol=app.cfg.strategy_symbol,
+            crypto_strategy_symbol=app.cfg.crypto_strategy_symbol,
+            spike_pct=app.cfg.engine.spike_pct, snapdrop_pct=app.cfg.engine.snapdrop_pct,
+        )
+        for _ in range(40):
+            await pilot.pause()
+            if app._equity_source_resolved == "sim":
+                break
+        assert app._equity_source_resolved == "sim"
+
+        release.set()  # Yahoo "returns" only after the flip
+        for _ in range(20):
+            await pilot.pause()
+
+        # Stale bars discarded: the strategy keeps its synth/sim state and the
+        # SPY chart was not reseeded with 512-level candles.
+        assert app.strategy.is_warm
+        assert app.strategy._slow.value != 512.0
+        assert all(c.c != 512.0 for c in app._price_candles.bars())
+        await pilot.press("q")
+
+
+@pytest.mark.asyncio
 async def test_live_warmup_rebuild_carries_open_position(monkeypatch):
     """A live tick can open a position (journaled to the trade CSV) while the
     Yahoo fetch is in flight; the strategy rebuild must transplant it so the
