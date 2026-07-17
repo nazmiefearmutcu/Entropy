@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
-from entropy.bot.calibration import DummyLedger, calibrate_and_test, run_backtest
+from entropy.bot.calibration import (
+    DummyLedger,
+    calibrate_and_test,
+    run_backtest,
+    split_folds,
+    walk_forward,
+)
 from entropy.bot.orders import Fill, OrderIntent, OrderSide
+
+# A 1-combo grid so walk-forward tests run one train + one eval backtest per fold.
+TINY_GRID: dict[str, list[Any]] = {
+    "fast": [9],
+    "slow": [21],
+    "min_pct": [0.15],
+    "threshold": [0.5],
+    "bar_s": [5.0],
+    "stop_loss_pct": [1.0],
+    "take_profit_pct": [2.0],
+}
 
 
 def test_calibrate_and_test() -> None:
@@ -187,5 +206,193 @@ def test_calibration_overtrading_penalty(monkeypatch) -> None:
     # The best parameter should be fast=9 (Config B) because of the penalty on fast=5 (Config A)
     # If the penalty wasn't applied, fast=5 would have been chosen.
     assert res["best_params"]["fast"] == 9
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward K-fold calibration
+# ---------------------------------------------------------------------------
+
+
+def test_split_folds_exact_even() -> None:
+    # 10 ticks / 4 folds -> 5 segments of 2 ticks each
+    assert split_folds(10, 4) == [
+        ((0, 2), (2, 4)),
+        ((2, 4), (4, 6)),
+        ((4, 6), (6, 8)),
+        ((6, 8), (8, 10)),
+    ]
+
+
+def test_split_folds_uneven_remainder() -> None:
+    # 11 ticks / 4 folds -> 5 segments, first gets the remainder: [3, 2, 2, 2, 2]
+    assert split_folds(11, 4) == [
+        ((0, 3), (3, 5)),
+        ((3, 5), (5, 7)),
+        ((5, 7), (7, 9)),
+        ((7, 9), (9, 11)),
+    ]
+
+
+def test_split_folds_properties() -> None:
+    for n_ticks, n_folds in [(100, 4), (57, 3), (7, 6), (10_001, 5)]:
+        folds = split_folds(n_ticks, n_folds)
+        assert len(folds) == n_folds
+        for (t0, t1), (e0, e1) in folds:
+            # train strictly precedes eval; segments are contiguous & non-empty
+            assert 0 <= t0 < t1 == e0 < e1 <= n_ticks
+            # no index overlap between train and eval of the same fold
+            assert set(range(t0, t1)).isdisjoint(range(e0, e1))
+        # fold i's eval segment is fold i+1's train segment (sliding window)
+        for i in range(n_folds - 1):
+            assert folds[i][1] == folds[i + 1][0]
+        # segments tile the full stream exactly
+        assert folds[0][0][0] == 0
+        assert folds[-1][1][1] == n_ticks
+
+
+def test_split_folds_invalid() -> None:
+    with pytest.raises(ValueError):
+        split_folds(10, 0)
+    with pytest.raises(ValueError):
+        split_folds(10, -1)
+    with pytest.raises(ValueError):
+        split_folds(3, 3)  # needs at least n_folds + 1 ticks
+    with pytest.raises(ValueError):
+        split_folds(0, 2)
+
+
+def test_walk_forward_rejects_bad_fold_count() -> None:
+    for bad in (1, 0, -1):
+        with pytest.raises(ValueError):
+            walk_forward(n_folds=bad, n_ticks=100, seed=1, grid=TINY_GRID)
+
+
+def test_walk_forward_deterministic() -> None:
+    grid = dict(TINY_GRID, fast=[5, 9])  # 2 combos so grid search actually selects
+    r1 = walk_forward(n_folds=2, n_ticks=600, seed=99, grid=grid)
+    r2 = walk_forward(n_folds=2, n_ticks=600, seed=99, grid=grid)
+    assert r1 == r2
+
+
+def test_walk_forward_end_to_end_tiny() -> None:
+    res = walk_forward(n_folds=2, n_ticks=400, seed=5, grid=TINY_GRID)
+
+    assert res["n_folds"] == 2
+    assert res["n_ticks"] == 400
+    assert len(res["symbols"]["equities"]) == 3
+    assert len(res["symbols"]["crypto"]) == 3
+
+    assert len(res["folds"]) == 2
+    for i, fold in enumerate(res["folds"], start=1):
+        assert fold["fold"] == i
+        (t0, t1), (e0, e1) = fold["train_range"], fold["eval_range"]
+        assert t0 < t1 <= e0 < e1
+        for key in ("fast", "slow", "min_pct", "threshold", "bar_s",
+                    "stop_loss_pct", "take_profit_pct"):
+            assert key in fold["params"]
+        assert set(fold["oos"]) == {
+            "total_return", "win_rate", "profit_factor", "sharpe", "total_trades",
+        }
+
+    agg = res["aggregate"]
+    for key in ("mean_return", "median_return", "worst_fold_return",
+                "worst_fold", "distinct_param_sets"):
+        assert key in agg
+    returns = [f["oos"]["total_return"] for f in res["folds"]]
+    assert agg["worst_fold_return"] == min(returns)
+    assert agg["worst_fold"] == returns.index(min(returns)) + 1
+    assert 1 <= agg["distinct_param_sets"] <= 2
+
+
+def test_walk_forward_leakage_tripwire(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record exactly which tick indices each backtest sees: eval indices must
+    never appear in that fold's training calls, and all training indices must
+    strictly precede the eval indices."""
+    from entropy.bot import calibration
+
+    base_ts = 1_700_000_000_000_000_000  # generate_ticks base timestamp
+    recorded: list[set[int]] = []
+
+    def spy(
+        ticks: list[dict[str, Any]],
+        symbols: list[str],
+        fast: int,
+        slow: int,
+        min_pct: float,
+        stop_loss_pct: float,
+        take_profit_pct: float,
+        *,
+        threshold: float | None = None,
+        bar_s: float | None = None,
+    ) -> dict[str, Any]:
+        recorded.append({(t["ts_ns"] - base_ts) // 1_000_000_000 for t in ticks})
+        return {
+            "final_equity": 100_000.0, "total_return": 0.0, "total_trades": 0,
+            "win_rate": 0.0, "profit_factor": 1.0, "sharpe": 0.0, "closed_pnls": [],
+        }
+
+    monkeypatch.setattr(calibration, "run_backtest", spy)
+    res = calibration.walk_forward(n_folds=2, n_ticks=60, seed=7, grid=TINY_GRID)
+
+    # 1-combo grid -> per fold: one train call then one eval call
+    assert len(recorded) == 4
+    for i, fold in enumerate(res["folds"]):
+        train_idx, eval_idx = recorded[2 * i], recorded[2 * i + 1]
+        assert train_idx == set(range(*fold["train_range"]))
+        assert eval_idx == set(range(*fold["eval_range"]))
+        assert not (train_idx & eval_idx)
+        assert max(train_idx) < min(eval_idx)
+
+
+def _stub_wf_result() -> dict[str, Any]:
+    params = {"fast": 9, "slow": 21, "min_pct": 0.15, "threshold": 0.5,
+              "bar_s": 5.0, "stop_loss_pct": 1.0, "take_profit_pct": 2.0}
+    oos = {"total_return": 0.01, "win_rate": 0.5, "profit_factor": 1.2,
+           "sharpe": 0.3, "total_trades": 4}
+    return {
+        "n_folds": 2, "n_ticks": 100, "seed": 7,
+        "symbols": {"equities": ["A", "B", "C"], "crypto": ["X", "Y", "Z"]},
+        "folds": [
+            {"fold": 1, "train_range": (0, 33), "eval_range": (33, 66),
+             "params": dict(params), "oos": dict(oos)},
+            {"fold": 2, "train_range": (33, 66), "eval_range": (66, 100),
+             "params": dict(params), "oos": dict(oos)},
+        ],
+        "aggregate": {"mean_return": 0.01, "median_return": 0.01,
+                      "worst_fold_return": 0.01, "worst_fold": 1,
+                      "mean_win_rate": 0.5, "mean_sharpe": 0.3,
+                      "total_oos_trades": 8, "distinct_param_sets": 1},
+    }
+
+
+def test_cli_walk_forward_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from entropy.bot import calibration
+
+    called: dict[str, Any] = {}
+
+    def fake_wf(n_folds: int = 4, n_ticks: int = 9_000, seed: int = 42,
+                grid: Any = None) -> dict[str, Any]:
+        called["n_folds"] = n_folds
+        called["seed"] = seed
+        return _stub_wf_result()
+
+    monkeypatch.setattr(calibration, "walk_forward", fake_wf)
+    from entropy.__main__ import main
+
+    main(["calibrate", "--walk-forward", "2", "--seed", "7"])
+    assert called == {"n_folds": 2, "seed": 7}
+
+
+def test_cli_walk_forward_rejects_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    from entropy.__main__ import main
+    from entropy.bot import calibration
+
+    def boom(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("walk_forward must not run for invalid N")
+
+    monkeypatch.setattr(calibration, "walk_forward", boom)
+    for bad in ("1", "0", "-1"):
+        with pytest.raises(SystemExit):
+            main(["calibrate", "--walk-forward", bad])
 
 

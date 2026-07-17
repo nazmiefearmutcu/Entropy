@@ -116,7 +116,95 @@ def run_calibrate(args: argparse.Namespace) -> None:
     )
     
     console.print(results_table)
+    _print_disclaimer()
     console.print("[bold green]✔ Calibration & Accuracy test runs complete.[/]\n")
+
+
+def _print_disclaimer() -> None:
+    from entropy.bot.calibration import DISCLAIMER
+
+    console.print(f"[bold yellow]⚠ {DISCLAIMER}[/]")
+
+
+def run_walk_forward(args: argparse.Namespace) -> None:
+    """Run walk-forward K-fold calibration and render per-fold OOS metrics."""
+    from entropy.bot import calibration
+
+    console.print(
+        Panel("[bold green]ENTROPY WALK-FORWARD K-FOLD CALIBRATION[/]", expand=False)
+    )
+    console.print(
+        f"Running [cyan]{args.walk_forward}[/] walk-forward folds "
+        f"(Seed: {args.seed})..."
+    )
+    res = calibration.walk_forward(n_folds=args.walk_forward, seed=args.seed)
+
+    console.print("\n[bold]Selected Random Symbols for Evaluation:[/]")
+    console.print(f"  ● Equities: {', '.join(res['symbols']['equities'])}")
+    console.print(f"  ● Crypto:   {', '.join(res['symbols']['crypto'])}")
+
+    table = Table(
+        title=f"Walk-Forward OOS Performance ({res['n_folds']} folds, "
+              f"{res['n_ticks']} ticks)",
+        show_header=True,
+        header_style="bold blue",
+    )
+    table.add_column("Fold", style="bold")
+    table.add_column("Train Range", style="cyan")
+    table.add_column("Eval Range", style="cyan")
+    table.add_column("Chosen Params")
+    table.add_column("OOS Return", justify="right")
+    table.add_column("Win Rate", justify="right")
+    table.add_column("PF", justify="right")
+    table.add_column("Sharpe", justify="right")
+    table.add_column("Trades", justify="right")
+
+    for fold in res["folds"]:
+        p = fold["params"]
+        oos = fold["oos"]
+        (t0, t1), (e0, e1) = fold["train_range"], fold["eval_range"]
+        ret_style = "green" if oos["total_return"] >= 0 else "red"
+        table.add_row(
+            str(fold["fold"]),
+            f"[{t0}, {t1})",
+            f"[{e0}, {e1})",
+            f"ema {p['fast']}/{p['slow']} mom {p['min_pct']:.2f} "
+            f"cons {p['threshold']:.2f}@{p['bar_s']:g}s "
+            f"sl/tp {p['stop_loss_pct']:.1f}/{p['take_profit_pct']:.1f}",
+            f"[{ret_style}]{oos['total_return']:+.2%}[/]",
+            f"{oos['win_rate']:.2%}",
+            f"{oos['profit_factor']:.2f}",
+            f"{oos['sharpe']:.2f}",
+            str(oos["total_trades"]),
+        )
+
+    agg = res["aggregate"]
+    agg_style = "green" if agg["mean_return"] >= 0 else "red"
+    table.add_section()
+    table.add_row(
+        "[bold]AGG[/]",
+        "—",
+        "—",
+        f"{agg['distinct_param_sets']} distinct param set(s)",
+        f"[{agg_style}]{agg['mean_return']:+.2%}[/]",
+        f"{agg['mean_win_rate']:.2%}",
+        "—",
+        f"{agg['mean_sharpe']:.2f}",
+        str(agg["total_oos_trades"]),
+    )
+    console.print(table)
+
+    worst_style = "green" if agg["worst_fold_return"] >= 0 else "red"
+    console.print(
+        f"[bold]Median OOS return:[/] {agg['median_return']:+.2%}   "
+        f"[bold {worst_style}]WORST fold: #{agg['worst_fold']} at "
+        f"{agg['worst_fold_return']:+.2%}[/]   "
+        f"[bold]Param stability:[/] {agg['distinct_param_sets']}/{res['n_folds']} "
+        f"distinct sets chosen"
+    )
+    _print_disclaimer()
+    console.print("[bold green]✔ Walk-forward calibration complete.[/]\n")
+
 
 def run_benchmark() -> None:
     """Run speed benchmarks."""
@@ -224,6 +312,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     cal_parser.add_argument(
         "--seed", type=int, default=42, help="random seed for symbol selection & simulation"
     )
+    cal_parser.add_argument(
+        "--walk-forward", type=int, default=None, metavar="N",
+        help="run walk-forward K-fold OOS calibration with N folds (N >= 2) "
+             "instead of the single back/forward split"
+    )
     
     # Benchmark command
     subparsers.add_parser("benchmark", help="Run system throughput & latency benchmarks")
@@ -249,7 +342,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             bot_args.extend(["--trade-csv", trade_csv])
         run_bot(bot_args)
     elif args.command == "calibrate":
-        run_calibrate(args)
+        if args.walk_forward is not None:
+            if args.walk_forward < 2:
+                parser.error(
+                    f"--walk-forward requires N >= 2, got {args.walk_forward}"
+                )
+            run_walk_forward(args)
+        else:
+            run_calibrate(args)
     elif args.command == "benchmark":
         run_benchmark()
     else:

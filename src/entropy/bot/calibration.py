@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import itertools
 import math
 import random
+import statistics
 import time
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from entropy.bot.config import BotConfig
@@ -10,9 +13,17 @@ from entropy.bot.orders import Fill, OrderIntent, OrderSide
 from entropy.bot.portfolio import PositionSide
 from entropy.bot.risk.profiles import make_custom
 from entropy.bot.runner import BotRunner
+from entropy.bot.strategies.consensus import ConsensusStrategy
 from entropy.feeds.crypto import BINANCE_MAJORS
 from entropy.feeds.equities.sim import EquitySimulator, SymRuntime
 from entropy.feeds.equities.universe import UNIVERSE, SymParams
+
+#: Honest framing for every calibration report: the numbers below come from a
+#: seeded GBM simulator, so a good score here does NOT imply a live-market edge.
+DISCLAIMER = (
+    "Synthetic-data calibration: all metrics come from a seeded GBM simulator "
+    "and do NOT imply any live-market edge."
+)
 
 
 class DummyLedger:
@@ -93,9 +104,19 @@ def run_backtest(
     slow: int,
     min_pct: float,
     stop_loss_pct: float,
-    take_profit_pct: float
+    take_profit_pct: float,
+    *,
+    threshold: float | None = None,
+    bar_s: float | None = None
 ) -> dict[str, Any]:
-    """Runs a fast in-memory backtest with specified configuration."""
+    """Runs a fast in-memory backtest with specified configuration.
+
+    When both ``threshold`` and ``bar_s`` are given, a ``ConsensusStrategy``
+    configured with them joins the momentum/EMA pair; omitting both keeps the
+    original two-strategy behaviour byte-for-byte.
+    """
+    if (threshold is None) != (bar_s is None):
+        raise ValueError("threshold and bar_s must be provided together")
     cfg = BotConfig(
         mode="paper",
         risk_profile="medium",
@@ -116,6 +137,11 @@ def run_backtest(
     # Patch ledger to use DummyLedger (no disk writes)
     dummy_ledger = DummyLedger()
     runner.ledger = dummy_ledger  # type: ignore[assignment]
+
+    if threshold is not None and bar_s is not None:
+        runner.strategies.append(
+            ConsensusStrategy(symbols=tuple(symbols), bar_s=bar_s, threshold=threshold)
+        )
     
     # Configure custom risk profile
     custom_profile = make_custom(
@@ -302,4 +328,187 @@ def calibrate_and_test(
         "best_params": best_params,
         "back_results": back_results,
         "forward_results": forward_results
+    }
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward K-fold calibration
+# ---------------------------------------------------------------------------
+
+#: Fallback used when a fold's grid search finds no combo with >= 2 trades.
+_WF_FALLBACK_PARAMS: dict[str, Any] = {
+    "fast": 9,
+    "slow": 21,
+    "min_pct": 0.15,
+    "threshold": 0.5,
+    "bar_s": 5.0,
+    "stop_loss_pct": 1.0,
+    "take_profit_pct": 2.0,
+}
+
+#: Default walk-forward grid: 2x2x2 EMA/momentum x 2x2 consensus = 32 combos
+#: (deliberately smaller than the single-shot grid so `entropy calibrate
+#: --walk-forward 3` stays well under a minute; stop/take-profit are pinned
+#: but remain overridable through the ``grid`` argument).
+_WF_DEFAULT_GRID: dict[str, tuple[Any, ...]] = {
+    "fast": (5, 9),
+    "slow": (21, 30),
+    "min_pct": (0.10, 0.25),
+    "threshold": (0.5, 0.75),
+    "bar_s": (5.0, 10.0),
+    "stop_loss_pct": (1.0,),
+    "take_profit_pct": (2.0,),
+}
+
+_GRID_KEYS = ("fast", "slow", "min_pct", "threshold", "bar_s",
+              "stop_loss_pct", "take_profit_pct")
+
+
+def split_folds(n_ticks: int, n_folds: int) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Split ``range(n_ticks)`` into ``n_folds + 1`` sequential segments and
+    pair them into walk-forward folds.
+
+    Fold ``i`` (0-based) trains on segment ``i`` and evaluates on segment
+    ``i + 1`` only, so training data always strictly precedes evaluation data.
+    Returns ``[((train_start, train_end), (eval_start, eval_end)), ...]`` with
+    half-open index ranges. When ``n_ticks`` does not divide evenly, the
+    earliest segments absorb the remainder (one extra tick each).
+    """
+    if n_folds < 1:
+        raise ValueError(f"n_folds must be >= 1, got {n_folds}")
+    n_segments = n_folds + 1
+    if n_ticks < n_segments:
+        raise ValueError(
+            f"n_ticks={n_ticks} cannot fill {n_segments} non-empty segments"
+        )
+    base, remainder = divmod(n_ticks, n_segments)
+    bounds = [0]
+    for i in range(n_segments):
+        bounds.append(bounds[-1] + base + (1 if i < remainder else 0))
+    folds: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    for i in range(n_folds):
+        train = (bounds[i], bounds[i + 1])
+        eval_ = (bounds[i + 1], bounds[i + 2])
+        # No-leakage guarantee: training indices end exactly where eval begins.
+        assert train[0] < train[1] <= eval_[0] < eval_[1], (train, eval_)
+        folds.append((train, eval_))
+    return folds
+
+
+def _grid_search(
+    train_ticks: list[dict[str, Any]],
+    symbols: list[str],
+    grid: Mapping[str, Sequence[Any]],
+) -> dict[str, Any]:
+    """Existing grid machinery (score = 10*return + sharpe - overtrading
+    penalty, >= 2 trades required) applied to one training segment."""
+    best_score = -math.inf
+    best_params: dict[str, Any] | None = None
+    for combo in itertools.product(*(grid[k] for k in _GRID_KEYS)):
+        params = dict(zip(_GRID_KEYS, combo, strict=True))
+        if params["slow"] <= params["fast"]:
+            continue
+        res = run_backtest(
+            train_ticks, symbols,
+            params["fast"], params["slow"], params["min_pct"],
+            params["stop_loss_pct"], params["take_profit_pct"],
+            threshold=params["threshold"], bar_s=params["bar_s"],
+        )
+        score = (
+            res["total_return"] * 10.0
+            + res["sharpe"]
+            - (res["total_trades"] * 0.02)
+        )
+        if score > best_score and res["total_trades"] >= 2:
+            best_score = score
+            best_params = params
+    return best_params if best_params is not None else dict(_WF_FALLBACK_PARAMS)
+
+
+def walk_forward(
+    n_folds: int = 4,
+    n_ticks: int = 9_000,
+    seed: int = 42,
+    grid: Mapping[str, Sequence[Any]] | None = None,
+) -> dict[str, Any]:
+    """Walk-forward K-fold calibration on ONE synthetic tick stream.
+
+    The stream is split into ``n_folds + 1`` sequential segments; each fold
+    grid-searches parameters on segment ``i`` and reports out-of-sample
+    metrics from segment ``i + 1`` only. Aggregates report the mean/median
+    return, the WORST fold (no cherry-picking), and how many distinct
+    parameter sets the folds chose (instability = overfitting warning).
+    """
+    if n_folds < 2:
+        raise ValueError(f"walk-forward needs n_folds >= 2, got {n_folds}")
+    full_grid: dict[str, Sequence[Any]] = dict(_WF_DEFAULT_GRID)
+    if grid is not None:
+        full_grid.update(grid)
+    missing = [k for k in _GRID_KEYS if not full_grid.get(k)]
+    if missing:
+        raise ValueError(f"grid is missing values for: {missing}")
+
+    # Same seeded symbol universe as calibrate_and_test, without mutating
+    # the global random state.
+    rng = random.Random(seed)
+    equities_pool = [s for s in UNIVERSE if s not in ("SPY", "QQQ", "IWM")]
+    selected_equities = rng.sample(equities_pool, 3)
+    selected_crypto = rng.sample(list(BINANCE_MAJORS), 3)
+    symbols = selected_equities + selected_crypto
+
+    ticks = generate_ticks(symbols, n_ticks, seed=seed)
+    folds = split_folds(len(ticks), n_folds)
+
+    fold_reports: list[dict[str, Any]] = []
+    for i, (train_range, eval_range) in enumerate(folds, start=1):
+        (t0, t1), (e0, e1) = train_range, eval_range
+        # Leakage tripwire: every training index must precede every eval index.
+        assert t1 <= e0, f"fold {i}: train {train_range} overlaps eval {eval_range}"
+        params = _grid_search(ticks[t0:t1], symbols, full_grid)
+        oos = run_backtest(
+            ticks[e0:e1], symbols,
+            params["fast"], params["slow"], params["min_pct"],
+            params["stop_loss_pct"], params["take_profit_pct"],
+            threshold=params["threshold"], bar_s=params["bar_s"],
+        )
+        fold_reports.append({
+            "fold": i,
+            "train_range": train_range,
+            "eval_range": eval_range,
+            "params": params,
+            "oos": {
+                "total_return": oos["total_return"],
+                "win_rate": oos["win_rate"],
+                "profit_factor": oos["profit_factor"],
+                "sharpe": oos["sharpe"],
+                "total_trades": oos["total_trades"],
+            },
+        })
+
+    returns = [f["oos"]["total_return"] for f in fold_reports]
+    worst_return = min(returns)
+    distinct_params = {
+        tuple(sorted(f["params"].items())) for f in fold_reports
+    }
+    aggregate = {
+        "mean_return": statistics.fmean(returns),
+        "median_return": statistics.median(returns),
+        "worst_fold_return": worst_return,
+        "worst_fold": returns.index(worst_return) + 1,
+        "mean_win_rate": statistics.fmean(f["oos"]["win_rate"] for f in fold_reports),
+        "mean_sharpe": statistics.fmean(f["oos"]["sharpe"] for f in fold_reports),
+        "total_oos_trades": sum(f["oos"]["total_trades"] for f in fold_reports),
+        "distinct_param_sets": len(distinct_params),
+    }
+
+    return {
+        "n_folds": n_folds,
+        "n_ticks": n_ticks,
+        "seed": seed,
+        "symbols": {
+            "equities": selected_equities,
+            "crypto": selected_crypto,
+        },
+        "folds": fold_reports,
+        "aggregate": aggregate,
     }
