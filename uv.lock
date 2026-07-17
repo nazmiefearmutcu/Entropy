@@ -619,7 +619,7 @@ wheels = [
 [[package]]
 name = "crypcodile"
 version = "0.1.45"
-source = { git = "https://github.com/nazmiefearmutcu/Crypcodile.git#d8cd35dba02a08ab89bd415667188fa467f1ca50" }
+source = { git = "https://github.com/nazmiefearmutcu/Crypcodile.git#1e8494da647f07ed5e717f8b92817e74b88805e9" }
 dependencies = [
     { name = "aiohttp" },
     { name = "duckdb" },
@@ -627,6 +627,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "mmh3" },
     { name = "msgspec" },
+    { name = "numpy" },
     { name = "polars" },
     { name = "prompt-toolkit" },
     { name = "pyarrow" },
