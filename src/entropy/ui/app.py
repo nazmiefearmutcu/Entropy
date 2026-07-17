@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,7 +16,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Input, Static
 
 from entropy.app import AppConfig
 from entropy.config import EngineConfig
@@ -34,11 +35,19 @@ from entropy.strategy.engine import Bar, EventKind, Strategy, StrategyConfig, St
 
 from .widgets.boards import refresh_board
 from .widgets.charts import Candle, ChartRedrawMemo, PriceChart, VolumeChart
+from .widgets.command_bar import CommandBar, CommandError, parse_command
 from .widgets.console import AlgoConsole
 from .widgets.header import HeaderBar
 from .widgets.highlow_gauges import HighLowGauges
 from .widgets.histogram import EventHistogram
 from .widgets.modals import ErrorScreen, HelpScreen, SettingsScreen
+from .widgets.quote_panel import (
+    FUNDAMENTALS_TTL_S,
+    Fundamentals,
+    QuotePanel,
+    QuoteState,
+    fetch_fundamentals_google,
+)
 from .widgets.search import SearchScreen
 from .widgets.status_bar import StatusBar, format_telemetry
 from .widgets.ticker_strip import TickerStrip
@@ -48,6 +57,8 @@ if TYPE_CHECKING:
     from crypcodile.sink.base import Sink
 
     from entropy.feeds.equities.live import EquityProviderPlan
+
+log = logging.getLogger(__name__)
 
 _MARKET_STATUS_TTL_S = 30.0  # header chip: recompute the calendar at most this often
 
@@ -87,6 +98,7 @@ class EntropyApp(App[None]):
         ("e", "errors", "Errors"),
         ("slash", "search", "Search"),
         ("w", "watch_toggle", "Watch"),
+        ("colon", "command_bar", "Cmd"),
         ("q", "quit", "Quit"),
     ]
 
@@ -149,6 +161,16 @@ class EntropyApp(App[None]):
         # Per-chart-pair redraw memo: the 10 Hz snapshot skips the full
         # plotext rebuild while a chart's data/settings fingerprint holds.
         self._chart_memo = ChartRedrawMemo()
+        # Fundamentals for the quote panel: injectable one-shot fetcher (tests
+        # swap in a fake), {symbol: (monotonic_ts, data|None)} TTL cache, an
+        # injectable clock, and an in-flight marker so the 10 Hz snapshot
+        # doesn't relaunch (and thereby cancel) the exclusive worker.
+        self._fundamentals_fetcher: Callable[[str], Awaitable[Fundamentals | None]] = (
+            fetch_fundamentals_google
+        )
+        self._fundamentals_cache: dict[str, tuple[float, Fundamentals | None]] = {}
+        self._fundamentals_now: Callable[[], float] = time.monotonic
+        self._fundamentals_inflight: str | None = None
         # set_reactive: seed the default without firing the watcher (chart #1
         # starts on the crypto strategy symbol, exactly as before).
         self.set_reactive(EntropyApp.focus_symbol, self.cfg.crypto_strategy_symbol)
@@ -180,8 +202,10 @@ class EntropyApp(App[None]):
             with Vertical(id="charts"):
                 yield PriceChart(id="price")        # chart #1: follows focus_symbol
                 yield VolumeChart(id="volume")
+                yield QuotePanel(id="quote")        # focus-symbol detail readout
                 yield PriceChart(id="price2")       # chart #2: strategy symbol (SPY)
                 yield VolumeChart(id="volume2")
+        yield CommandBar(id="cmdbar")               # ":" reveals; hidden by default
         yield StatusBar(id="status")
 
     def on_mount(self) -> None:
@@ -235,6 +259,7 @@ class EntropyApp(App[None]):
             refresh_board(self.query_default("#new_lows", DataTable), snap.new_lows, self)
             refresh_board(self.query_default("#session_highs", DataTable), snap.new_highs, self)
             self._refresh_watchlist()
+            self._refresh_quote_panel()
             self._draw_chart(   # chart pair #1: focus symbol
                 "#price", "#volume", self._focus_candles,
                 symbol=self.focus_symbol, strat_cfg=self._focus_strategy_cfg(),
@@ -266,6 +291,63 @@ class EntropyApp(App[None]):
             rows.append(WatchRow(symbol=info.symbol, last=last, pct=pct,
                                  spark=sparkline(history)))
         self.query_default("#watchlist", WatchlistBoard).update_rows(rows, self)
+
+    def _refresh_quote_panel(self) -> None:
+        """Repaint the quote panel from cached engine/fundamentals state.
+
+        Cheap by design (runs at 10 Hz inside sample_snapshot): engine reads
+        are O(1) dict lookups and fundamentals come from the TTL cache — only
+        a cache miss kicks the async fetch worker, and only for bare-equity
+        focus on a live source with the equities feed enabled.
+        """
+        symbol = self.focus_symbol
+        if ":" in symbol:
+            asset = "CRYPTO"
+        elif self._equity_source_resolved == "live":
+            asset = "EQUITY"
+        else:
+            asset = "SIM"
+        quote = self.engine.quote(symbol)
+        rng = self.engine.session_range(symbol)
+        show_fund = asset == "EQUITY"
+        fund: Fundamentals | None = None
+        if show_fund and self.cfg.enable_equities:
+            entry = self._fundamentals_cache.get(symbol)
+            if entry is not None and (
+                self._fundamentals_now() - entry[0] < FUNDAMENTALS_TTL_S
+            ):
+                fund = entry[1]
+            elif self._fundamentals_inflight != symbol:
+                # Lazy one-shot per symbol per TTL; "—" placeholders meanwhile.
+                self._fundamentals_inflight = symbol
+                self._fetch_fundamentals(symbol)
+        self.query_default("#quote", QuotePanel).state = QuoteState(
+            symbol=symbol, asset=asset,
+            last=quote[0] if quote is not None else None,
+            pct=quote[1] if quote is not None else None,
+            hi=rng[0] if rng is not None else None,
+            lo=rng[1] if rng is not None else None,
+            fundamentals=fund, show_fundamentals=show_fund,
+        )
+
+    @work(exclusive=True, group="fundamentals")
+    async def _fetch_fundamentals(self, symbol: str) -> None:
+        """Background fundamentals fetch for the quote panel.
+
+        Failures are silent by contract (debug log + cached None) so a scrape
+        hiccup can never disturb the UI loop; caching the failure also rate-
+        limits retries to one per TTL. A cancellation (exclusive relaunch for
+        a newer symbol) writes nothing — the finally only clears the marker.
+        """
+        try:
+            data = await self._fundamentals_fetcher(symbol)
+        except Exception:
+            log.debug("fundamentals fetch failed for %s", symbol, exc_info=True)
+            data = None
+        finally:
+            if self._fundamentals_inflight == symbol:
+                self._fundamentals_inflight = None
+        self._fundamentals_cache[symbol] = (self._fundamentals_now(), data)
 
     def _set_chart_bar_ns(self, bar_ns: int) -> None:
         """Keep every chart's x-axis format in sync with the active timeframe."""
@@ -679,6 +761,72 @@ class EntropyApp(App[None]):
 
     def action_search(self) -> None:
         self.push_screen(SearchScreen(id="search"))
+
+    def action_command_bar(self) -> None:
+        """`:`: reveal + focus the Bloomberg-style command line."""
+        self.query_default("#cmdbar", CommandBar).show()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter in the command bar executes; valid commands hide the bar,
+        errors keep it open for correction. Other Inputs' submits (settings
+        fields, modal search) are filtered out by id."""
+        if event.input.id != "cmdbar":
+            return
+        if self._execute_command(event.value):
+            self.query_default("#cmdbar", CommandBar).hide()
+
+    def _execute_command(self, text: str) -> bool:
+        """Run one command-bar command; True = handled (hide the bar),
+        False = parse/validation error (bar stays open). Feedback lands on
+        the console in the existing `equities: ...` line style."""
+        result = parse_command(text)
+        if isinstance(result, CommandError):
+            self._push_info(f"cmd: {result.message}", "red")
+            return False
+        verb, arg = result.verb, result.arg
+        if verb == "chart":
+            self.focus_symbol = arg
+            self._push_info(f"cmd: chart → [{arg}]")
+        elif verb in ("watch", "unwatch"):
+            info = self._resolve_symbol(arg)
+            present = info.symbol in self._watchlist
+            if (verb == "watch") == present:  # already in the requested state
+                state = "watched" if present else "not watched"
+                self._push_info(f"cmd: [{info.symbol}] already {state}")
+            else:
+                self.toggle_watch(info)   # pushes its own "watchlist ±" line
+        elif verb == "tf":
+            self._apply_settings_patch(timeframe=arg)
+            self._push_info(f"cmd: timeframe → {arg}")
+        elif verb == "theme":
+            if arg not in self.available_themes:
+                self._push_info(f"cmd: unknown theme {arg!r}", "red")
+                return False
+            self._apply_settings_patch(theme=arg)
+            self._push_info(f"cmd: theme → {arg}")
+        elif verb == "source":
+            self._apply_settings_patch(equity_source=arg)
+            self._push_info(f"cmd: equity source → {arg}")
+        else:  # help — parse_command admits no other verb
+            self.push_screen(HelpScreen(id="help"))
+        return True
+
+    def _apply_settings_patch(self, **overrides: Any) -> None:
+        """Re-drive _apply_settings (the settings modal's single hot-apply
+        path) with the current config plus ``overrides`` — the command bar
+        changes one field without duplicating any rebuild/relaunch logic."""
+        cfg = self.cfg
+        kwargs: dict[str, Any] = {
+            "theme": cfg.theme, "chart_type": cfg.chart_type,
+            "show_volume": cfg.show_volume, "timeframe": cfg.timeframe,
+            "enable_equities": cfg.enable_equities, "enable_crypto": cfg.enable_crypto,
+            "equity_source": cfg.equity_source, "equity_tps": cfg.equity_tps,
+            "strategy_symbol": cfg.strategy_symbol,
+            "crypto_strategy_symbol": cfg.crypto_strategy_symbol,
+            "spike_pct": cfg.engine.spike_pct, "snapdrop_pct": cfg.engine.snapdrop_pct,
+        }
+        kwargs.update(overrides)
+        self._apply_settings(**kwargs)
 
     def action_watch_toggle(self) -> None:
         """`w`: toggle the focused symbol in the persistent watchlist."""

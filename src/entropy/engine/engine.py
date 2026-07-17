@@ -286,6 +286,18 @@ class Engine:
             return None
         return t.last_price, t.session.pct_chg(t.last_price) * 100
 
+    def session_range(self, symbol: str) -> tuple[float, float] | None:
+        """Session ``(high, low)`` for one symbol, or None before its first trade.
+
+        Read-only companion to :meth:`quote` (no tape mutation, no events):
+        backs the UI's quote-detail hi/lo line straight off the tape's
+        SessionExtreme.
+        """
+        t = self._tapes.get(symbol)
+        if t is None or t.session.hi is None or t.session.lo is None:
+            return None
+        return t.session.hi, t.session.lo
+
     def reset_session(self, ts_ns: int | None = None) -> None:
         # Full tape rebuild: post-reset trades must see exactly what a fresh
         # engine would — the rolling MonotonicExtreme windows and the momentum
