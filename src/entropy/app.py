@@ -16,6 +16,11 @@ class AppConfig(msgspec.Struct, frozen=True):
     theme: str = "entropy"
     chart_type: str = "candlestick"
     show_volume: bool = True
+    # Market-depth (DOM) ladder for the focus symbol. Hidden by default (the
+    # `:depth` command toggles it); bins/top_n tune the synthetic VAP ladder.
+    show_depth: bool = False
+    depth_bins: int = 40
+    depth_top_n: int = 6
     risk_profile: str = "medium"
     console_log_path: str = "entropy_console.log"
     trade_csv_path: str = "entropy_trades.csv"

@@ -6,6 +6,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +38,12 @@ from .widgets.boards import refresh_board
 from .widgets.charts import Candle, ChartRedrawMemo, PriceChart, VolumeChart
 from .widgets.command_bar import CommandBar, CommandError, parse_command
 from .widgets.console import AlgoConsole
+from .widgets.depth_panel import (
+    DEPTH_TTL_S,
+    DepthPanel,
+    DepthView,
+    fetch_depth,
+)
 from .widgets.header import HeaderBar
 from .widgets.highlow_gauges import HighLowGauges
 from .widgets.histogram import EventHistogram
@@ -171,6 +178,16 @@ class EntropyApp(App[None]):
         self._fundamentals_cache: dict[str, tuple[float, Fundamentals | None]] = {}
         self._fundamentals_now: Callable[[], float] = time.monotonic
         self._fundamentals_inflight: str | None = None
+        # Market depth for the depth panel: the SAME lazy/TTL/inflight machinery
+        # as fundamentals. The injected fetcher is a config-bound partial so the
+        # callable stays symbol-only (tests swap it wholesale); the cache holds
+        # the last DepthView (or None) per symbol behind DEPTH_TTL_S.
+        self._depth_fetcher: Callable[[str], Awaitable[DepthView | None]] = partial(
+            fetch_depth, bins=self.cfg.depth_bins, top_n=self.cfg.depth_top_n
+        )
+        self._depth_cache: dict[str, tuple[float, DepthView | None]] = {}
+        self._depth_now: Callable[[], float] = time.monotonic
+        self._depth_inflight: str | None = None
         # set_reactive: seed the default without firing the watcher (chart #1
         # starts on the crypto strategy symbol, exactly as before).
         self.set_reactive(EntropyApp.focus_symbol, self.cfg.crypto_strategy_symbol)
@@ -203,6 +220,7 @@ class EntropyApp(App[None]):
                 yield PriceChart(id="price")        # chart #1: follows focus_symbol
                 yield VolumeChart(id="volume")
                 yield QuotePanel(id="quote")        # focus-symbol detail readout
+                yield DepthPanel(id="depth")        # DOM ladder (hidden by default)
                 yield PriceChart(id="price2")       # chart #2: strategy symbol (SPY)
                 yield VolumeChart(id="volume2")
         yield CommandBar(id="cmdbar")               # ":" reveals; hidden by default
@@ -222,6 +240,7 @@ class EntropyApp(App[None]):
         self.query_one("#price2", PriceChart).chart_type = self.cfg.chart_type
         self.query_one("#volume", VolumeChart).display = self.cfg.show_volume
         self.query_one("#volume2", VolumeChart).display = self.cfg.show_volume
+        self.query_one("#depth", DepthPanel).display = self.cfg.show_depth
         self._set_chart_bar_ns(self._tf.bar_ns)
         self._set_chart_titles()
         self.query_one("#hist", HighLowGauges).window_labels = self.engine.cfg.window_labels
@@ -260,6 +279,7 @@ class EntropyApp(App[None]):
             refresh_board(self.query_default("#session_highs", DataTable), snap.new_highs, self)
             self._refresh_watchlist()
             self._refresh_quote_panel()
+            self._refresh_depth_panel()
             self._draw_chart(   # chart pair #1: focus symbol
                 "#price", "#volume", self._focus_candles,
                 symbol=self.focus_symbol, strat_cfg=self._focus_strategy_cfg(),
@@ -348,6 +368,62 @@ class EntropyApp(App[None]):
             if self._fundamentals_inflight == symbol:
                 self._fundamentals_inflight = None
         self._fundamentals_cache[symbol] = (self._fundamentals_now(), data)
+
+    def _refresh_depth_panel(self) -> None:
+        """Repaint the depth ladder from the TTL cache; a cache miss kicks the
+        lazy one-shot fetch worker.
+
+        Gated three ways so it stays cheap and correct: the panel must be
+        VISIBLE (``:depth`` toggles it; hidden by default), the equities feed
+        enabled, and the focus a BARE ticker on the LIVE source — synthetic/L1
+        depth is an equities-only capability, so crypto/sim focus shows the
+        ``—`` placeholder instead of firing a pointless fetch.
+        """
+        try:
+            panel = self.query_default("#depth", DepthPanel)
+        except NoMatches:
+            return
+        if not panel.display:
+            return
+        symbol = self.focus_symbol
+        eligible = (
+            ":" not in symbol
+            and self._equity_source_resolved == "live"
+            and self.cfg.enable_equities
+        )
+        if not eligible:
+            panel.symbol = ""       # ineligible: badge falls back to "—"
+            panel.view = None
+            return
+        panel.symbol = symbol       # keep the badge naming the focus symbol
+        entry = self._depth_cache.get(symbol)
+        if entry is not None and (self._depth_now() - entry[0] < DEPTH_TTL_S):
+            panel.view = entry[1]
+        elif self._depth_inflight != symbol:
+            # Lazy one-shot per symbol per TTL; "—" placeholder meanwhile.
+            self._depth_inflight = symbol
+            panel.view = None
+            self._fetch_depth(symbol)
+
+    @work(exclusive=True, group="depth")
+    async def _fetch_depth(self, symbol: str) -> None:
+        """Background depth snapshot for the depth panel.
+
+        Failures are silent by contract (debug log + cached None) so a Yahoo
+        429 or an Alpaca auth error can never disturb the UI loop; caching the
+        failure also rate-limits retries to one per TTL. An exclusive relaunch
+        for a newer symbol cancels this cleanly — the finally only clears the
+        marker, writing nothing for the abandoned symbol.
+        """
+        try:
+            data = await self._depth_fetcher(symbol)
+        except Exception:
+            log.debug("depth fetch failed for %s", symbol, exc_info=True)
+            data = None
+        finally:
+            if self._depth_inflight == symbol:
+                self._depth_inflight = None
+        self._depth_cache[symbol] = (self._depth_now(), data)
 
     def _set_chart_bar_ns(self, bar_ns: int) -> None:
         """Keep every chart's x-axis format in sync with the active timeframe."""
@@ -821,6 +897,17 @@ class EntropyApp(App[None]):
         elif verb == "source":
             self._apply_settings_patch(equity_source=arg)
             self._push_info(f"cmd: equity source → {arg}")
+        elif verb == "depth":
+            panel = self.query_default("#depth", DepthPanel)
+            if arg:                       # `depth SYM`: focus it + ensure visible
+                self.focus_symbol = arg
+                panel.display = True
+                self._push_info(f"cmd: depth → [{arg}]")
+            else:                         # `depth`: toggle the ladder
+                panel.display = not panel.display
+                self._push_info(f"cmd: depth {'on' if panel.display else 'off'}")
+            # Persist the toggle so a later settings rebuild reinstates it.
+            self.cfg = msgspec.structs.replace(self.cfg, show_depth=bool(panel.display))
         else:  # help — parse_command admits no other verb
             self.push_screen(HelpScreen(id="help"))
         return True

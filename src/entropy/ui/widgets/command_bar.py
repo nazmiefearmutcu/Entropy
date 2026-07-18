@@ -29,11 +29,12 @@ _ARITY = {
     "tf": (1, 1),
     "theme": (1, 1),
     "source": (1, 1),
+    "depth": (0, 1),
     "help": (0, 0),
 }
 
 _USAGE = "chart SYM · watch/unwatch SYM · tf 1m|5m|15m|1h|4h · theme NAME · " \
-         "source sim|live|auto · help"
+         "source sim|live|auto · depth [SYM] · help"
 
 
 class Command(msgspec.Struct, frozen=True):
@@ -69,10 +70,19 @@ def parse_command(text: str) -> Command | CommandError:
         return CommandError(f"unknown command {verb!r} — {_USAGE}")
     lo, hi = arity
     if not (lo <= len(args) <= hi):
-        expect = "no argument" if hi == 0 else "exactly one argument"
+        if hi == 0:
+            expect = "no argument"
+        elif lo == 0:          # variadic 0-or-1 verbs (depth): 0 args is valid too
+            expect = "at most one argument"
+        else:
+            expect = "exactly one argument"
         return CommandError(f"{verb} takes {expect}")
     if verb == "help":
         return Command(verb=verb)
+    if verb == "depth":
+        # Zero-arg toggles the panel; one arg focuses that symbol (normalized
+        # like chart/watch). Handled here because it is the only variadic verb.
+        return Command(verb=verb, arg=normalize_symbol(args[0]) if args else "")
     arg = args[0]
     if verb in ("chart", "watch", "unwatch"):
         return Command(verb=verb, arg=normalize_symbol(arg))

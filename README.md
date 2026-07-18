@@ -31,8 +31,13 @@ multiple rolling windows — all on a selectable **15-minute-centric timeframe**
   boards, or the command bar), with EMA9/21 overlays, up/down-colored volume, timeframe-aware
   axes, and throttled redraws. A quote panel shows last / Δ% / session hi-lo, plus fundamentals
   (P/E, market cap, 52-week hi/lo) for live equities.
+- **Market-depth ladder.** A DOM-style bid/ask ladder for the focus symbol, powered by
+  stockodile's `depth` capability. Keyless it synthesizes a *relative* volume-at-price ladder from
+  free Yahoo 1-minute bars (badged `SYNTH·yahoo_1m_vap`); set the Alpaca keys and the same panel
+  transparently upgrades to real L1 top-of-book (`L1·alpaca_l1`) with a live spread. Hidden by
+  default — `:depth` toggles it, `:depth SYM` focuses and shows it.
 - **Command bar.** `:` opens a mini command line — `chart SYM · watch/unwatch SYM ·
-  tf 1m|5m|15m|1h|4h · theme NAME · source sim|live|auto · help`.
+  tf 1m|5m|15m|1h|4h · theme NAME · source sim|live|auto · depth [SYM] · help`.
 - **Breadth / entropy engine.** Per-window new-high / new-low detection (O(1) monotonic windows),
   session extremes, spikes, snap-drops, buy/sell breadth, and an activity ticker.
 - **Candlestick & line charts** with a toggleable volume pane, for both the crypto and equity legs.
@@ -83,7 +88,7 @@ Inside the dashboard:
 |-----------|---------------------------------------------------|
 | `/`       | Symbol search (US tickers + crypto majors)        |
 | `w`       | Toggle the focused symbol on the watchlist        |
-| `:`       | Command bar (`chart` / `watch` / `tf` / `theme` / `source` / `help`) |
+| `:`       | Command bar (`chart` / `watch` / `tf` / `theme` / `source` / `depth` / `help`) |
 | `s`       | Settings                                          |
 | `?` / `h` | Help                                              |
 | `e`       | Errors console                                    |
@@ -105,6 +110,13 @@ The keyless Google Finance default is an **approximation**: scraped last prices 
 synthetic trades (tick-rule sides), not exchange prints — fine for scanning, not for microstructure.
 Set the Alpaca or Finnhub keys for real trade feeds. Charts warm up from real 15-minute Yahoo bars,
 and the crypto leg (crypcodile) is unchanged alongside.
+
+The **depth panel** (`:depth`) follows the same keyless-then-upgrade philosophy. With no keys it
+shows a *synthetic* volume-at-price ladder — where volume historically concentrated, not real
+resting orders — synthesized from free Yahoo 1-minute bars and clearly badged `SYNTH`. With
+`ALPACA_API_KEY` + `ALPACA_API_SECRET` set, stockodile serves real top-of-book L1 instead (badged
+`L1`, with a live spread), no code or config change needed. A depth fetch that is rate-limited or
+fails degrades silently to a `—` placeholder and never disturbs the scanner.
 
 ## Timeframes
 

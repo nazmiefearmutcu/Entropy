@@ -35,6 +35,9 @@ from entropy.ui.widgets.modals import HelpScreen
     ("source sim", Command(verb="source", arg="sim")),
     ("source LIVE", Command(verb="source", arg="live")),
     ("source auto", Command(verb="source", arg="auto")),
+    ("depth", Command(verb="depth", arg="")),                 # 0-arg toggle form
+    ("depth aapl", Command(verb="depth", arg="AAPL")),        # 1-arg focus form
+    ("DEPTH tsla", Command(verb="depth", arg="TSLA")),
     ("help", Command(verb="help", arg="")),
     ("HELP", Command(verb="help", arg="")),
 ])
@@ -56,10 +59,20 @@ def test_parse_valid(text: str, expected: Command) -> None:
     "theme",
     "source",
     "source real",      # not sim|live|auto
+    "depth a b",        # depth takes at most one argument
+    "depth a b c",
     "help me",          # help takes no argument
 ])
 def test_parse_invalid(text: str) -> None:
     assert isinstance(parse_command(text), CommandError)
+
+
+def test_depth_arity_message_allows_zero_or_one() -> None:
+    # depth is the only 0-or-1 verb: its over-arity message must not claim
+    # "exactly one argument" (zero — the toggle form — is valid too).
+    err = parse_command("depth a b")
+    assert isinstance(err, CommandError)
+    assert "at most one argument" in err.message
 
 
 def test_parse_error_messages_name_the_problem() -> None:

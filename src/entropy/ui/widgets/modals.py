@@ -14,7 +14,7 @@ _HELP = """Entropy — keys:
   s  Settings    ?/h  Help    e  Errors    q  Quit
   /  Symbol search    w  Watch/unwatch the focused symbol
   :  Command bar — chart SYM · watch SYM · unwatch SYM ·
-     tf 1m|5m|15m|1h|4h · theme NAME · source sim|live|auto · help
+     tf 1m|5m|15m|1h|4h · theme NAME · source sim|live|auto · depth [SYM] · help
 Click a board or watchlist row to focus its symbol on chart #1.
 Scanner: new highs/lows over 3 rolling windows + session (timeframe-selectable); \
 spikes & snap-drops.

@@ -3035,13 +3035,12 @@ wheels = [
 
 [[package]]
 name = "stockodile"
-version = "0.1.2"
-source = { git = "https://github.com/nazmiefearmutcu/stockodile.git#9e144cb71a4d0a9417b99614f62871f90b5cf93a" }
+version = "0.2.0"
+source = { git = "https://github.com/nazmiefearmutcu/stockodile.git#8ea71db58bad58d68abbfdbd798b38b18eb7afef" }
 dependencies = [
     { name = "aiohttp" },
     { name = "beautifulsoup4" },
     { name = "duckdb" },
-    { name = "fastapi" },
     { name = "mmh3" },
     { name = "msgspec" },
     { name = "numpy" },
@@ -3051,8 +3050,6 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "rich" },
     { name = "typer" },
-    { name = "uvicorn" },
-    { name = "web3" },
     { name = "websockets" },
     { name = "yfinance" },
 ]
