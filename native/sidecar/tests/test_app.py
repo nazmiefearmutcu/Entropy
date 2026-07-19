@@ -21,3 +21,9 @@ def test_ws_live_streams_one_snapshot():
         msg = ws.receive_json()
     assert msg["type"] == "snapshot"
     assert msg["focus"]["symbol"] == "AAPL"
+
+
+def test_command_endpoint_sets_focus():
+    client = TestClient(create_app())
+    r = client.post("/api/command", json={"verb": "chart", "arg": "MSFT"})
+    assert r.json()["ok"] is True

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import msgspec
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from entropy_sidecar.stream import SnapshotSource
@@ -47,5 +47,17 @@ def create_app(*, source: SnapshotSource | None = None, tick_hz: float = 10.0) -
                 await asyncio.sleep(interval)
         except WebSocketDisconnect:
             return
+
+    from entropy_sidecar.commands import apply_command
+    from entropy_sidecar.contract import CommandRequest
+
+    @app.post("/api/command")
+    async def command(request: Request) -> dict[str, object]:
+        # Decode the raw body with msgspec into CommandRequest — FastAPI can't
+        # use a msgspec.Struct as a Pydantic body model, so parse it directly
+        # (keeps the contract single-sourced instead of duplicating a schema).
+        req = msgspec.json.decode(await request.body(), type=CommandRequest)
+        res = apply_command(app.state.source, f"{req.verb} {req.arg}".strip())
+        return {"ok": res.ok, "message": res.message}
 
     return app
