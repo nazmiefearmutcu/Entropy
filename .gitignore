@@ -23,3 +23,8 @@ entropy_trades.csv.bak-*
 
 # internal design/plan docs stay out of the tree (see c577b68)
 docs/superpowers/
+
+# native app build artifacts
+native/tauri/src-tauri/binaries/
+native/sidecar/build/
+native/sidecar/dist/

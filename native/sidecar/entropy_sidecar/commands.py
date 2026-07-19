@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from entropy.ui.widgets.command_bar import CommandError, parse_command
-
 from entropy_sidecar.contract import CommandResult
 from entropy_sidecar.stream import SnapshotSource
 
