@@ -1,0 +1,24 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs><clipPath id="sq"><rect x="80" y="80" width="864" height="864" rx="200"/></clipPath></defs>
+  <!-- dark squircle, subtle flat two-tone split at the mid axis (no gloss) -->
+  <g clip-path="url(#sq)">
+    <rect x="80" y="80" width="864" height="432" fill="#13151C"/>
+    <rect x="80" y="512" width="864" height="432" fill="#0B0C11"/>
+  </g>
+  <rect x="81.5" y="81.5" width="861" height="861" rx="198.5" fill="none" stroke="#23262F" stroke-width="3"/>
+  <!-- mid / reference axis (order-book baseline) -->
+  <line x1="196" y1="512" x2="828" y2="512" stroke="#3A3E49" stroke-width="6" stroke-linecap="round"/>
+  <g>
+    <!-- outer green up (short) -->
+    <rect x="197" y="416" width="54" height="96"  rx="27" fill="#3FB950"/>
+    <rect x="773" y="416" width="54" height="96"  rx="27" fill="#3FB950"/>
+    <!-- mid red down -->
+    <rect x="293" y="512" width="54" height="150" rx="27" fill="#E5534B"/>
+    <rect x="677" y="512" width="54" height="150" rx="27" fill="#E5534B"/>
+    <!-- inner green up (tall) -->
+    <rect x="389" y="316" width="54" height="196" rx="27" fill="#3FB950"/>
+    <rect x="581" y="316" width="54" height="196" rx="27" fill="#3FB950"/>
+    <!-- amber signal peak (center, dominant) -->
+    <rect x="479" y="212" width="66" height="300" rx="33" fill="#F5C518"/>
+  </g>
+</svg>
