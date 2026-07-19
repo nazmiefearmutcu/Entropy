@@ -1,13 +1,16 @@
 # Entropy
 
-**A real-time terminal market scanner, algo console, and trading bot — in your terminal.**
+**A real-time market scanner, algo console, and trading bot — as a terminal app _and_ a native macOS app.**
 
 Entropy is a [Textual](https://textual.textualize.io/) TUI that streams live crypto and real US
 equities (with a deterministic simulator fallback), aggregates them into candlestick charts, and
 runs a breadth/"entropy" engine that surfaces new highs & lows, spikes, and snap-drops across
-multiple rolling windows — all on a selectable **15-minute-centric timeframe**.
+multiple rolling windows — all on a selectable **15-minute-centric timeframe**. The same engine
+also ships as a **native macOS cockpit** — [download the latest `.dmg`](https://github.com/nazmiefearmutcu/Entropy/releases/latest).
 
-![Entropy running — live candlestick charts, breadth gauges, and the new-highs/lows scanner on the 15m timeframe](docs/assets/entropy.png)
+| Terminal (TUI) | Native macOS app |
+| :---: | :---: |
+| ![Entropy TUI — candlestick charts, breadth gauges, and the new-highs/lows scanner](docs/assets/entropy.png) | ![Entropy native macOS cockpit — breadth, scanner boards, focus chart, and depth ladder](docs/assets/entropy-native.png) |
 
 ---
 
@@ -70,6 +73,17 @@ uv run entropy ui  # launch the scanner dashboard
 Requires Python ≥ 3.12. The [crypcodile](https://github.com/nazmiefearmutcu/Crypcodile) (crypto)
 and [stockodile](https://github.com/nazmiefearmutcu/stockodile) (equities) feed packages are
 resolved automatically from GitHub via `[tool.uv.sources]`.
+
+### Native macOS app
+
+Prefer a real window over a terminal? Download the latest
+**[`Entropy.app` DMG](https://github.com/nazmiefearmutcu/Entropy/releases/latest)** (Apple Silicon),
+or build it from source — see [`native/README.md`](native/README.md). The native app reuses the
+same Python engine (bundled — no Python needed to run the release) behind a Tauri shell + a React
+cockpit, and coexists with the TUI.
+
+> The published build is unsigned; on first launch **right-click `Entropy.app` → Open**, or run
+> `xattr -cr /Applications/Entropy.app`.
 
 ## Usage
 
