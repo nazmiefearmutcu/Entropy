@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 import msgspec
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -19,12 +20,25 @@ _ALLOWED_ORIGINS = [
 
 
 def create_app(*, source: SnapshotSource | None = None, tick_hz: float = 10.0) -> FastAPI:
-    app = FastAPI(title="entropy-sidecar")
+    src = source or SnapshotSource()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Start the equity sim feed + drain on server startup, stop on shutdown.
+        # (TestClient without a `with` block never triggers lifespan, so unit
+        # tests that seed the engine directly stay feed-free and deterministic.)
+        await src.start_feeds()
+        try:
+            yield
+        finally:
+            await src.stop_feeds()
+
+    app = FastAPI(title="entropy-sidecar", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware, allow_origins=_ALLOWED_ORIGINS,
         allow_methods=["*"], allow_headers=["*"],
     )
-    app.state.source = source or SnapshotSource()
+    app.state.source = src
     interval = 1.0 / tick_hz
 
     @app.get("/health")
