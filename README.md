@@ -1,141 +1,89 @@
 # Entropy
 
-**A real-time market scanner, algo console, and trading bot — as a terminal app _and_ a native macOS app.**
+**Real-time market-breadth scanner and algo console. Terminal app or native macOS app, same engine.**
 
-Entropy is a [Textual](https://textual.textualize.io/) TUI that streams live crypto and real US
-equities (with a deterministic simulator fallback), aggregates them into candlestick charts, and
-runs a breadth/"entropy" engine that surfaces new highs & lows, spikes, and snap-drops across
-multiple rolling windows — all on a selectable **15-minute-centric timeframe**. The same engine
-also ships as a **native macOS cockpit** — [download the latest `.dmg`](https://github.com/nazmiefearmutcu/Entropy/releases/latest).
+Entropy watches a few hundred symbols at once and tells you what the tape is doing right now — what's
+printing new highs and lows across rolling windows, where breadth is tilting, which names are spiking
+or snapping. It sits that next to a focus chart, a quote panel, and an order-book ladder in one dense
+view. Runs in a terminal, or as a native macOS window over the same Python engine.
 
 | Terminal (TUI) | Native macOS app |
 | :---: | :---: |
-| ![Entropy TUI — candlestick charts, breadth gauges, and the new-highs/lows scanner](docs/assets/entropy.png) | ![Entropy native macOS cockpit — breadth, scanner boards, focus chart, and depth ladder](docs/assets/entropy-native.png) |
+| [![Entropy TUI — candlestick charts, breadth gauges, and the new-highs/lows scanner](docs/assets/entropy.png)](docs/assets/entropy.png) | [![Entropy native macOS cockpit — breadth, scanner boards, focus chart, and depth ladder](docs/assets/entropy-native.png)](docs/assets/entropy-native.png) |
 
----
+Live crypto (Coinbase / Binance) and US equities feed the engine; a seeded simulator stands in when
+there's no market open or no API keys. One timeframe drives everything — the candles, the three
+scanner windows, momentum and breadth cadence, chart warmup — and it's switchable live (default 15m).
 
-## Highlights
+**Two things stated plainly.** The keyless defaults are approximations, not exchange truth: scraped
+last-prices re-emitted as ticks, and a *synthetic* depth ladder inferred from 1-minute bars (real
+feeds are a keys-away upgrade — see [Data](#data)). And the bundled bot tunes signal quality on the
+streams it's handed, seeded-simulator numbers included. Neither is a claim of live-market edge.
 
-- **15-minute operating timeframe, fully selectable.** Candles, scanner windows (`15m / 1h / 4h /
-  session`), momentum horizon, breadth, and warmup all derive from one timeframe abstraction.
-  Switch between `1m / 5m / 15m / 1h / 4h` live from the Settings screen — the engine and charts
-  reconfigure on the fly.
-- **Live crypto + live US equities.** Real crypto ticks (Coinbase / Binance via
-  [crypcodile](https://github.com/nazmiefearmutcu/Crypcodile)) alongside real US-equity data via
-  [stockodile](https://github.com/nazmiefearmutcu/stockodile) — keyless by default, upgraded by
-  optional API keys — with a deterministic equities simulator as fallback, all unified through one
-  engine. `--equity-source sim|live|auto` picks the mode (`auto` goes live while NYSE is open); an
-  **NYSE OPEN/CLOSED** chip in the header shows the market state.
-- **Watchlist & symbol search.** `/` opens a ranked symbol search over ~500 US tickers (SEC EDGAR
-  snapshot, refreshable via a 24h cache) plus the crypto majors; `w` toggles the focused symbol on
-  a watchlist persisted to `~/.entropy/watchlist.json`. The watchlist board shows last / Δ% / a
-  sparkline per symbol, and selecting any board row focuses it.
-- **Focus-symbol charting & quote panel.** Chart #1 follows whatever symbol you focus (search,
-  boards, or the command bar), with EMA9/21 overlays, up/down-colored volume, timeframe-aware
-  axes, and throttled redraws. A quote panel shows last / Δ% / session hi-lo, plus fundamentals
-  (P/E, market cap, 52-week hi/lo) for live equities.
-- **Market-depth ladder.** A DOM-style bid/ask ladder for the focus symbol, powered by
-  stockodile's `depth` capability. Keyless it synthesizes a *relative* volume-at-price ladder from
-  free Yahoo 1-minute bars (badged `SYNTH·yahoo_1m_vap`); set the Alpaca keys and the same panel
-  transparently upgrades to real L1 top-of-book (`L1·alpaca_l1`) with a live spread. Hidden by
-  default — `:depth` toggles it, `:depth SYM` focuses and shows it.
-- **Command bar.** `:` opens a mini command line — `chart SYM · watch/unwatch SYM ·
-  tf 1m|5m|15m|1h|4h · theme NAME · source sim|live|auto · depth [SYM] · help`.
-- **Breadth / entropy engine.** Per-window new-high / new-low detection (O(1) monotonic windows),
-  session extremes, spikes, snap-drops, buy/sell breadth, and an activity ticker.
-- **Candlestick & line charts** with a toggleable volume pane, for both the crypto and equity legs.
-- **A clean, sectioned Settings screen** — appearance, timeframe, data feeds, and scanner/engine
-  thresholds, with live hot-apply (including feed toggles and the sim tick rate) and input
-  validation. 7 built-in themes.
-- **An automated trading bot** (`entropy bot`) — paper core with risk profiles, a live-execution
-  scaffold, and a TUI dashboard — running on its own sub-second momentum cadence. Ships a
-  multi-indicator **consensus** strategy (default, alongside `ema_cross`): a weighted EMA + MACD +
-  RSI + Bollinger vote with a volatility/trend regime filter and exit hysteresis. This targets
-  better *signal quality* on the synthetic/live streams it runs on — it is not a claim of
-  live-market edge.
-- **Strategy calibration & benchmarks** — grid-search back/forward accuracy tests, **walk-forward
-  K-fold calibration** (`entropy calibrate --walk-forward N`) with per-fold out-of-sample metrics,
-  the worst fold and parameter stability surfaced (no cherry-picking), and throughput/latency
-  benchmarks from the CLI. All calibration output carries a disclaimer: metrics come from a seeded
-  simulator and imply no live edge.
-- **Hardened plumbing.** NaN-tick guards and non-decreasing clocks in the engine, an append-only
-  trade CSV, and settings that hot-apply without a restart.
+## Run it
 
-## Quick start
-
-Entropy uses [uv](https://docs.astral.sh/uv/). From a clone:
+**Terminal** — needs Python 3.12+ and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync            # resolve deps (pulls the crypcodile + stockodile feed packages from GitHub)
-uv run entropy ui  # launch the scanner dashboard
+uv sync              # pulls the crypcodile + stockodile feed packages from GitHub
+uv run entropy ui    # scanner dashboard
 ```
 
-Requires Python ≥ 3.12. The [crypcodile](https://github.com/nazmiefearmutcu/Crypcodile) (crypto)
-and [stockodile](https://github.com/nazmiefearmutcu/stockodile) (equities) feed packages are
-resolved automatically from GitHub via `[tool.uv.sources]`.
+**Native macOS app** — grab the [latest `.dmg`](https://github.com/nazmiefearmutcu/Entropy/releases/latest)
+(Apple Silicon) or build from [`native/README.md`](native/README.md). The engine is bundled, so
+there's nothing else to install.
 
-### Native macOS app
-
-Prefer a real window over a terminal? Download the latest
-**[`Entropy.app` DMG](https://github.com/nazmiefearmutcu/Entropy/releases/latest)** (Apple Silicon),
-or build it from source — see [`native/README.md`](native/README.md). The native app reuses the
-same Python engine (bundled — no Python needed to run the release) behind a Tauri shell + a React
-cockpit, and coexists with the TUI.
-
-> The published build is unsigned; on first launch **right-click `Entropy.app` → Open**, or run
+> Unsigned build. On first launch: right-click `Entropy.app` → **Open**, or run
 > `xattr -cr /Applications/Entropy.app`.
 
-## Usage
+## In the terminal
 
 ```bash
-uv run entropy ui                        # main TUI scanner dashboard (default)
-uv run entropy ui --equity-source auto   # live equities while NYSE is open, sim otherwise
-uv run entropy bot                       # automated trade bot CLI / TUI
-uv run entropy calibrate                 # calibrate strategies + back/forward accuracy tests
-uv run entropy calibrate --walk-forward 4  # walk-forward K-fold OOS calibration
-uv run entropy benchmark                 # system throughput & latency benchmarks
+uv run entropy ui --equity-source auto     # live equities while NYSE is open, else sim
+uv run entropy bot                         # trading bot (paper core + live-execution scaffold)
+uv run entropy calibrate --walk-forward 4  # walk-forward K-fold out-of-sample calibration
+uv run entropy benchmark                   # throughput + latency
 ```
 
-Inside the dashboard:
+The dashboard is keyboard-first:
 
-| Key       | Action                                            |
-|-----------|---------------------------------------------------|
-| `/`       | Symbol search (US tickers + crypto majors)        |
-| `w`       | Toggle the focused symbol on the watchlist        |
-| `:`       | Command bar (`chart` / `watch` / `tf` / `theme` / `source` / `depth` / `help`) |
-| `s`       | Settings                                          |
-| `?` / `h` | Help                                              |
-| `e`       | Errors console                                    |
-| `q`       | Quit                                              |
+| Key       | Action                                                                          |
+|-----------|---------------------------------------------------------------------------------|
+| `/`       | Symbol search (~500 US tickers + crypto majors)                                 |
+| `w`       | Toggle the focused symbol on the watchlist                                       |
+| `:`       | Command bar — `chart` / `watch` / `tf` / `theme` / `source` / `depth` / `help`   |
+| `s`       | Settings (appearance, timeframe, feeds, scanner thresholds — all hot-apply)      |
+| `?` / `h` | Help · `e` Errors · `q` Quit                                                     |
 
-## Equity data sources
+`:` is a Bloomberg-style command line — `chart AAPL`, `tf 15m`, `source live`, `depth NVDA`. The focus
+chart follows whatever you select (search, a board row, a command) with EMA9/21 overlays and up/down
+volume; the watchlist (persisted to `~/.entropy/`) carries last / Δ% / a sparkline per name. Seven
+themes, live timeframe switching, no restarts.
 
-Equities run in one of three modes — `sim`, `live`, or `auto` (live while the US market is open
-per the NYSE calendar, sim otherwise) — set via `--equity-source` or the Settings screen. In live
-mode, stockodile picks one provider from the environment:
+## Data
 
-| Provider           | Keys                                   | Data                                   | Symbols |
-|--------------------|----------------------------------------|----------------------------------------|---------|
-| **Google Finance** | none (default)                         | last-price quotes polled every ~10s    | no cap  |
-| **Alpaca**         | `ALPACA_API_KEY` + `ALPACA_API_SECRET` | real IEX trades over websocket         | 30      |
-| **Finnhub**        | `FINNHUB_API_KEY`                      | real trades over websocket             | 50      |
+Equities run in `sim`, `live`, or `auto` (live while NYSE is open per the market calendar). In live
+mode, stockodile picks one provider from your environment:
 
-The keyless Google Finance default is an **approximation**: scraped last prices are re-emitted as
-synthetic trades (tick-rule sides), not exchange prints — fine for scanning, not for microstructure.
-Set the Alpaca or Finnhub keys for real trade feeds. Charts warm up from real 15-minute Yahoo bars,
-and the crypto leg (crypcodile) is unchanged alongside.
+| Provider           | Keys                                   | Data                                | Cap    |
+|--------------------|----------------------------------------|-------------------------------------|--------|
+| **Google Finance** | none (default)                         | last-price quotes polled every ~10s | none   |
+| **Alpaca**         | `ALPACA_API_KEY` + `ALPACA_API_SECRET` | real IEX trades over websocket      | 30     |
+| **Finnhub**        | `FINNHUB_API_KEY`                      | real trades over websocket          | 50     |
 
-The **depth panel** (`:depth`) follows the same keyless-then-upgrade philosophy. With no keys it
-shows a *synthetic* volume-at-price ladder — where volume historically concentrated, not real
-resting orders — synthesized from free Yahoo 1-minute bars and clearly badged `SYNTH`. With
-`ALPACA_API_KEY` + `ALPACA_API_SECRET` set, stockodile serves real top-of-book L1 instead (badged
-`L1`, with a live spread), no code or config change needed. A depth fetch that is rate-limited or
-fails degrades silently to a `—` placeholder and never disturbs the scanner.
+The keyless Google Finance path re-emits scraped last-prices as tick-rule trades — fine for scanning,
+wrong for microstructure. Add Alpaca or Finnhub keys for real prints. Charts warm from real 15-minute
+Yahoo bars either way, and the crypto leg (crypcodile) is unaffected.
+
+The **depth ladder** (`:depth`) works the same keyless-then-upgrade way. With no keys it synthesizes a
+volume-at-price ladder from free 1-minute bars — *where volume sat*, not resting orders — badged
+`SYNTH`. Set the Alpaca keys and the exact same panel serves real L1 top-of-book (`L1`, live spread),
+no code change. A rate-limited or failed fetch quietly degrades to `—` and never disturbs the scanner.
 
 ## Timeframes
 
-The whole terminal is parameterized by a single timeframe registry. The default is **15m**; each
-timeframe defines its bar interval, three rolling scanner windows, and the momentum/breadth cadence:
+A single registry parameterizes the whole terminal. Each timeframe sets its bar interval, three
+rolling scanner windows, and the momentum/breadth cadence:
 
 | Timeframe | Bar    | Scanner windows   |
 |-----------|--------|-------------------|
@@ -145,36 +93,45 @@ timeframe defines its bar interval, three rolling scanner windows, and the momen
 | 1h        | 1 hr   | 1h / 4h / 1d      |
 | 4h        | 4 hr   | 4h / 12h / 1d     |
 
-(Plus the cumulative **session** high/low, always tracked.)
+The cumulative **session** high/low is always tracked on top of the three windows.
 
-## Architecture
+## The native app
+
+Not a rewrite — a second frontend. A Tauri (Rust) shell spawns the Python engine headless as a bundled
+sidecar, streams each `EngineSnapshot` over a local WebSocket at ~10 Hz, and renders the cockpit in
+React — [lightweight-charts](https://github.com/tradingview/lightweight-charts) for candles, a DOM
+depth ladder ported from the TUI, a `:` command bar. Same core as the terminal; the two are just
+different windows onto it. Build steps and internals in [`native/README.md`](native/README.md).
+
+## Layout
 
 ```
 src/entropy/
   engine/    breadth/entropy engine, rolling windows, candle aggregation, timeframe registry
-  feeds/     live crypto (crypcodile) + equities (stockodile live / sim / auto), kline warmup
-  data/      symbol universe (SEC EDGAR + crypto majors) and the persistent watchlist
+  feeds/     live crypto (crypcodile) + equities (stockodile: live / sim / auto), kline warmup
+  data/      symbol universe (SEC EDGAR + crypto majors), persistent watchlist
   strategy/  EMA / breakout signal engine used by the live TUI
-  ui/        Textual app + widgets (charts, quote panel, search, command bar, watchlist,
-             gauges, ticker, boards, settings modals), themes
-  bot/       standalone trading bot — strategies (consensus, ema_cross, …), risk profiles,
-             portfolio, calibration, runner, dashboard
-  config.py  engine config (+ per-timeframe derivation)
-  app.py     AppConfig
+  ui/        Textual app + widgets (charts, quote/depth panels, search, command bar, boards…)
+  bot/       standalone trading bot — strategies (consensus, ema_cross), risk, calibration, runner
+native/
+  sidecar/   FastAPI wrapper over the entropy engine (WebSocket stream + REST commands)
+  frontend/  React + Vite + Tailwind cockpit
+  tauri/     Rust shell — spawns the sidecar, opens the window
 ```
 
-The main app runs on the selected timeframe (via `EngineConfig.from_timeframe(...)`), while the bot
-keeps its own legacy sub-minute cadence — the two coexist through the same engine without
-interfering.
+The main app runs on the selected timeframe; the bot keeps its own sub-minute cadence. One engine,
+no interference.
 
 ## Development
 
 ```bash
-uv run pytest             # full test suite
+uv run pytest                 # engine, feeds, UI, bot
 uv run ruff check src tests
 uv run mypy src
 ```
 
-## License
+## License & disclaimer
 
-Apache-2.0.
+Apache-2.0. This is a personal project, not investment advice. The bot's execution paths can place
+real orders if you wire real broker keys — that's on you. Backtests and calibration numbers come from
+a seeded simulator and imply nothing about live returns.
