@@ -132,6 +132,6 @@ uv run mypy src
 
 ## License & disclaimer
 
-Apache-2.0. This is a personal project, not investment advice. The bot's execution paths can place
+[Apache-2.0](LICENSE). This is a personal project, not investment advice. The bot's execution paths can place
 real orders if you wire real broker keys — that's on you. Backtests and calibration numbers come from
 a seeded simulator and imply nothing about live returns.
