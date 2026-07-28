@@ -12,8 +12,10 @@ view. Runs in a terminal, or as a native macOS window over the same Python engin
 | [![Entropy TUI — candlestick charts, breadth gauges, and the new-highs/lows scanner](docs/assets/entropy.png)](docs/assets/entropy.png) | [![Entropy native macOS cockpit — breadth, scanner boards, focus chart, and depth ladder](docs/assets/entropy-native.png)](docs/assets/entropy-native.png) |
 
 Live crypto (Coinbase / Binance) and US equities feed the engine; a seeded simulator stands in when
-there's no market open or no API keys. One timeframe drives everything — the candles, the three
-scanner windows, momentum and breadth cadence, chart warmup — and it's switchable live (default 15m).
+there's no market open or no API keys. Three cadences are set independently and switch live: the
+**scanner timeframe** (rolling windows, momentum, breadth — default 15m), the **chart candle
+interval** (1s to 1d, or "follow the timeframe"), and the **bot's own computation cadence**. All of
+it persists to `~/.entropy/settings.json`, shared by both frontends.
 
 **Two things stated plainly.** The keyless defaults are approximations, not exchange truth: scraped
 last-prices re-emitted as ticks, and a *synthetic* depth ladder inferred from 1-minute bars (real
@@ -25,7 +27,7 @@ streams it's handed, seeded-simulator numbers included. Neither is a claim of li
 **Terminal** — needs Python 3.12+ and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync              # pulls the crypcodile + stockodile feed packages from GitHub
+uv sync              # pulls the crocodile feed engine from GitHub
 uv run entropy ui    # scanner dashboard
 ```
 
@@ -41,9 +43,13 @@ there's nothing else to install.
 ```bash
 uv run entropy ui --equity-source auto     # live equities while NYSE is open, else sim
 uv run entropy bot                         # trading bot (paper core + live-execution scaffold)
+uv run entropy bot --timeframe 5m --vote-mode adaptive --strategies consensus
 uv run entropy calibrate --walk-forward 4  # walk-forward K-fold out-of-sample calibration
 uv run entropy benchmark                   # throughput + latency
 ```
+
+The bot starts from your saved settings; flags override for that run only and are not written back.
+`--ignore-saved` starts from built-in defaults.
 
 The dashboard is keyboard-first:
 
@@ -63,7 +69,7 @@ themes, live timeframe switching, no restarts.
 ## Data
 
 Equities run in `sim`, `live`, or `auto` (live while NYSE is open per the market calendar). In live
-mode, stockodile picks one provider from your environment:
+mode, crocodile picks one provider from your environment:
 
 | Provider           | Keys                                   | Data                                | Cap    |
 |--------------------|----------------------------------------|-------------------------------------|--------|
@@ -73,7 +79,7 @@ mode, stockodile picks one provider from your environment:
 
 The keyless Google Finance path re-emits scraped last-prices as tick-rule trades — fine for scanning,
 wrong for microstructure. Add Alpaca or Finnhub keys for real prints. Charts warm from real 15-minute
-Yahoo bars either way, and the crypto leg (crypcodile) is unaffected.
+Yahoo bars either way, and the crypto leg is unaffected.
 
 The **depth ladder** (`:depth`) works the same keyless-then-upgrade way. With no keys it synthesizes a
 volume-at-price ladder from free 1-minute bars — *where volume sat*, not resting orders — badged
@@ -82,18 +88,54 @@ no code change. A rate-limited or failed fetch quietly degrades to `—` and nev
 
 ## Timeframes
 
-A single registry parameterizes the whole terminal. Each timeframe sets its bar interval, three
-rolling scanner windows, and the momentum/breadth cadence:
+A single registry parameterizes the scanner. Each timeframe sets three rolling windows and the
+momentum/breadth cadence:
 
-| Timeframe | Bar    | Scanner windows   |
-|-----------|--------|-------------------|
-| 1m        | 1 min  | 1m / 5m / 15m     |
-| 5m        | 5 min  | 5m / 15m / 1h     |
-| **15m**   | 15 min | **15m / 1h / 4h** |
-| 1h        | 1 hr   | 1h / 4h / 1d      |
-| 4h        | 4 hr   | 4h / 12h / 1d     |
+| Timeframe | Default bar | Scanner windows   |
+|-----------|-------------|-------------------|
+| 1m        | 1 min       | 1m / 5m / 15m     |
+| 5m        | 5 min       | 5m / 15m / 1h     |
+| **15m**   | 15 min      | **15m / 1h / 4h** |
+| 1h        | 1 hr        | 1h / 4h / 1d      |
+| 4h        | 4 hr        | 4h / 12h / 1d     |
 
 The cumulative **session** high/low is always tracked on top of the three windows.
+
+**Chart candles are a separate knob.** The scanner timeframe and the candle width used to be one
+setting, so watching 1-minute candles meant dropping the scanner to a 1-minute cadence too. They are
+now independent: pick any interval from `1s` through `1d`, or leave it on *Follow timeframe* for the
+old coupled behaviour. Sub-minute equity candles have no history provider (Yahoo starts at 1m), so
+those charts fill from the live tape instead of warming — the app says so rather than silently
+serving the wrong bars.
+
+## The bot
+
+The bot runs its own engine on its own cadence, and every parameter is now a setting rather than a
+constant in the source: scanner timeframe, strategy bar length, indicator periods, vote weights and
+thresholds, regime bounds, hold/cooldown, and the risk profile (with per-field overrides).
+
+Its consensus strategy was rebuilt. The original scored every bar with a fixed mapping — EMA and
+MACD voting trend-following, RSI and Bollinger voting mean-reversion — and those two families
+disagree by construction exactly when a trend is strongest. A sustained rally pins RSI above 70 and
+%B above 0.95, so the oscillators subtracted 0.35 from a 0.65 trend score and the 0.30 total never
+cleared the 0.50 entry threshold. Measured on synthetic paths: a clean +44% trend over 600 bars
+produced **zero** signals, while 200 bars of flat chop produced **36** (18 round trips). Silent in
+trends, hyperactive in chop — precisely inverted.
+
+`vote_mode` now defaults to `adaptive`: a Kaufman efficiency ratio classifies the bar as trending or
+ranging, the oscillators are read for momentum confirmation in the former and mean-reversion in the
+latter, and the weights tilt toward whichever block carries the information. On the same paths that
+becomes 1 entry that rides the trend, and 3 signals across trend/chop/reversal instead of 38.
+`vote_mode="legacy"` restores the original mapping bit-for-bit for reproducing old runs; the test
+suite pins both behaviours.
+
+Two reliability bugs went with it. Mechanical stops and take-profits closed positions without telling
+the strategy, so after its first take-profit a strategy went on believing it was long and never
+opened again for the rest of the move; risk-rejected entries left the same phantom state. The runner
+now re-arms strategies on any close they did not ask for.
+
+None of this is a claim of live-market edge. The numbers above are synthetic paths with no fees, and
+they measure one thing: which way the strategy points and when it stays out.
 
 ## The native app
 
@@ -108,7 +150,7 @@ different windows onto it. Build steps and internals in [`native/README.md`](nat
 ```
 src/entropy/
   engine/    breadth/entropy engine, rolling windows, candle aggregation, timeframe registry
-  feeds/     live crypto (crypcodile) + equities (stockodile: live / sim / auto), kline warmup
+  feeds/     live crypto + equities (live / sim / auto) via crocodile, kline warmup
   data/      symbol universe (SEC EDGAR + crypto majors), persistent watchlist
   strategy/  EMA / breakout signal engine used by the live TUI
   ui/        Textual app + widgets (charts, quote/depth panels, search, command bar, boards…)
@@ -119,8 +161,9 @@ native/
   tauri/     Rust shell — spawns the sidecar, opens the window
 ```
 
-The main app runs on the selected timeframe; the bot keeps its own sub-minute cadence. One engine,
-no interference.
+The scanner, the charts and the bot each run on their own configured cadence over the same engine
+code. `src/entropy/settings.py` is the single persisted source of truth both frontends read and
+write, so a change made in one shows up in the other.
 
 ## Development
 

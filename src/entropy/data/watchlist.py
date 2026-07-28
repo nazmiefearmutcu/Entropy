@@ -13,7 +13,7 @@ from pathlib import Path
 
 import msgspec
 
-from entropy.data.universe import SymbolInfo
+from entropy.data.universe import SymbolInfo, make_symbol_info
 
 log = logging.getLogger(__name__)
 
@@ -96,11 +96,14 @@ class Watchlist:
         for item in stored:
             if not item.symbol or item.symbol in self._items:
                 continue
-            self._items[item.symbol] = SymbolInfo(
-                symbol=item.symbol,
-                name=item.name,
-                asset_class=item.asset_class,
-                venue=item.venue or _derive_venue(item.symbol),
+            # Only the four persisted fields live on disk; ticker/exchange/base/
+            # quote are derived so an old file gains the new display columns
+            # without a migration, and so the file never carries a stale name.
+            self._items[item.symbol] = make_symbol_info(
+                item.symbol,
+                item.name,
+                item.asset_class,
+                item.venue or _derive_venue(item.symbol),
             )
 
     def _save(self) -> None:

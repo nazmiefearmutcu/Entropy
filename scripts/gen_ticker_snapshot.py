@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate src/entropy/data/us_tickers_snapshot.json (dev-run-once; REAL network).
 
-Fetches SEC EDGAR's company_tickers.json (ordered by market cap) via stockodile's
+Fetches SEC EDGAR's company_tickers.json (ordered by market cap) via crocodile's
 rate-limited client and keeps the first ~500 entries. If EDGAR is unreachable, falls
 back to the sim-feed universe (entropy.feeds.equities.universe.UNIVERSE) with a
 built-in name map so the committed artifact always exists.
@@ -94,7 +94,7 @@ FALLBACK_NAMES: dict[str, str] = {
 
 
 async def fetch_edgar() -> list[dict[str, str]]:
-    from stockodile.providers.sec_edgar.client import SecEdgarClient
+    from crocodile.equity.providers.sec_edgar.client import SecEdgarClient
 
     from entropy.data.universe import EDGAR_TICKERS_URL, parse_edgar_payload
 

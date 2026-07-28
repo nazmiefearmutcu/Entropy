@@ -1,25 +1,13 @@
 import type { Fundamentals } from '../contract'
+import { compact, price as fmtPrice, DASH } from '../format'
+import { useFocusMeta, useFundamentals } from '../store'
+import { Chip } from '../ui/controls'
+import { Delta, Stat } from '../ui/data'
 
-const dash = '—'
-
-const compact = (v: number) =>
-  v >= 1e12
-    ? (v / 1e12).toFixed(2) + 'T'
-    : v >= 1e9
-      ? (v / 1e9).toFixed(2) + 'B'
-      : v >= 1e6
-        ? (v / 1e6).toFixed(2) + 'M'
-        : v.toFixed(2)
-
-function fundLine(f: Fundamentals | null) {
-  if (!f) return `P/E ${dash} · MktCap ${dash} · 52w ${dash}/${dash}`
-  const pe = f.pe != null ? f.pe.toFixed(1) : dash
-  const cap = f.market_cap != null ? compact(f.market_cap) : dash
-  const hi = f.high_52w != null ? f.high_52w.toFixed(2) : dash
-  const lo = f.low_52w != null ? f.low_52w.toFixed(2) : dash
-  return `P/E ${pe} · MktCap ${cap} · 52w ${hi}/${lo}`
-}
-
+/**
+ * Quote readout strip under the chart. Hairline-separated cells rather than a
+ * bordered card — it is supporting chrome for the hero, not a peer of it.
+ */
 export function QuotePanel(p: {
   symbol: string
   asset: string
@@ -29,25 +17,58 @@ export function QuotePanel(p: {
   lo: number | null
   fundamentals: Fundamentals | null
 }) {
+  const f = p.fundamentals
+  const equity = p.asset === 'EQUITY'
   return (
-    <div className="p-2 border border-neutral-800 rounded text-xs">
-      <div>
-        <span className="font-semibold">{p.symbol}</span>{' '}
-        <span className="text-[10px] bg-sky-500/20 text-sky-400 px-1 rounded">{p.asset}</span>
+    <div className="flex shrink-0 items-stretch gap-px bg-base">
+      <div className="flex min-w-[128px] items-center gap-2 bg-panel px-2.5 py-1.5">
+        <span className="font-mono text-sm font-semibold text-ink">{p.symbol || DASH}</span>
+        <Chip tone={equity ? 'info' : 'accent'}>{p.asset}</Chip>
       </div>
-      <div>
-        Last {p.last != null ? p.last.toFixed(2) : dash}{' '}
-        {p.pct != null && (
-          <span className={p.pct >= 0 ? 'text-green-500' : 'text-red-500'}>
-            {p.pct >= 0 ? '+' : ''}
-            {p.pct.toFixed(2)}%
-          </span>
+      <div className="flex flex-1 items-center gap-5 overflow-x-auto bg-panel px-3 py-1.5">
+        <Stat label="Last" value={fmtPrice(p.last)} />
+        <div className="min-w-0">
+          <div className="text-micro uppercase tracking-label text-ink-mute">Change</div>
+          <Delta value={p.pct} />
+        </div>
+        <Stat label="Session hi" value={fmtPrice(p.hi)} tone="text-ink-dim" />
+        <Stat label="Session lo" value={fmtPrice(p.lo)} tone="text-ink-dim" />
+        {equity && (
+          <>
+            <span className="h-7 w-px shrink-0 bg-line" />
+            <Stat
+              label="P/E"
+              value={f?.pe != null ? f.pe.toFixed(1) : DASH}
+              tone="text-ink-dim"
+              title="Trailing price / earnings"
+            />
+            <Stat
+              label="Mkt cap"
+              value={compact(f?.market_cap ?? null)}
+              tone="text-ink-dim"
+              title="Market capitalisation"
+            />
+            <Stat label="52w hi" value={fmtPrice(f?.high_52w ?? null)} tone="text-ink-dim" />
+            <Stat label="52w lo" value={fmtPrice(f?.low_52w ?? null)} tone="text-ink-dim" />
+          </>
         )}
       </div>
-      <div className="text-neutral-400">
-        Hi {p.hi != null ? p.hi.toFixed(2) : dash} Lo {p.lo != null ? p.lo.toFixed(2) : dash}
-      </div>
-      {p.asset === 'EQUITY' && <div className="text-neutral-600">{fundLine(p.fundamentals)}</div>}
     </div>
+  )
+}
+
+export function QuoteStrip() {
+  const focus = useFocusMeta()
+  const fundamentals = useFundamentals()
+  return (
+    <QuotePanel
+      symbol={focus.symbol}
+      asset={focus.asset}
+      last={focus.last}
+      pct={focus.pct}
+      hi={focus.hi}
+      lo={focus.lo}
+      fundamentals={fundamentals}
+    />
   )
 }

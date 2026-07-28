@@ -4,7 +4,7 @@
 Not collected by pytest (scripts/ sits outside testpaths). Run manually:
     python scripts/smoke_equity.py
 Exits non-zero if warmup bars come back empty, or if the live feed produced
-zero ticks while the US market is open per stockodile's USMarketCalendar.
+zero ticks while the US market is open per crocodile's USMarketCalendar.
 """
 import asyncio
 import os
@@ -58,7 +58,7 @@ async def main() -> int:
     print(f"ticks in {FEED_WINDOW_S:.0f}s: {ticks}  "
           f"adapter errors: {getattr(adapter, 'errors', 'n/a')}")
 
-    from stockodile.scheduler.calendar import USMarketCalendar
+    from crocodile.core.scheduler.calendar import USMarketCalendar
     market_open = bool(
         USMarketCalendar().is_market_open(datetime.now(ZoneInfo("America/New_York")))
     )

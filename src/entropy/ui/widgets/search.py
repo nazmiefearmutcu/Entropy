@@ -60,9 +60,16 @@ class SearchScreen(ModalScreen[None]):
         options = self.query_one("#search-results", OptionList)
         options.clear_options()
         for info in results:
+            # Terminal-style row: the exchange's OWN ticker leads, the instrument
+            # is spelled out beside it, and the venue is a trailing badge. The
+            # canonical `venue:PAIR` id stays the option id — it is what the app
+            # focuses on — but it never has to be read.
             star = "★" if info.symbol in app._watchlist else " "
-            prompt = Text(f"{star} {info.symbol} — {info.name}")
-            prompt.append(f"  [{info.asset_class}]", style="dim")
+            ticker = info.ticker or info.symbol
+            prompt = Text(f"{star} ")
+            prompt.append(f"{ticker:<12}", style="bold")
+            prompt.append(f" {info.name}")
+            prompt.append(f"  {info.exchange}", style="dim")
             options.add_option(Option(prompt, id=info.symbol))
         if results:
             options.highlighted = min(keep if keep is not None else 0, len(results) - 1)

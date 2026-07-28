@@ -1,10 +1,15 @@
 # src/entropy/feeds/equities/live.py
-"""Real US-equity feed: stockodile providers bridged into the crypcodile bus.
+"""Real US-equity feed: crocodile equity providers bridged onto the Entropy bus.
 
-stockodile emits its own record types (``stockodile.schema.records``); the
-Entropy pipeline speaks crypcodile ``Trade``. ``RecordAdapterSink`` translates
-between the two so the Engine/UI see equities exactly like crypto ticks,
-keyed by BARE upper tickers ("AAPL") with the exchange prefixed "stk-".
+Crocodile 0.3 merged the two forks onto ONE record schema, so this is no longer a
+translation between two vocabularies. What is left for the adapter to do is the
+part the merge did not remove: equity prints carry no aggressor side, so the tick
+rule fills one in, and bar-shaped records have to be folded into a tick pipeline.
+
+Records are keyed by BARE upper tickers ("AAPL"). The asset class now travels in
+the record's own ``asset_class`` field; the old ``exchange="stk-<provider>"``
+prefix existed only because the crypto schema had nowhere else to put it, and
+nothing ever read it back.
 """
 from __future__ import annotations
 
@@ -15,14 +20,12 @@ from collections.abc import Sequence
 from typing import Any
 
 import msgspec
-from crypcodile.schema.enums import Side
-from crypcodile.schema.records import Trade
-from crypcodile.sink.base import Sink
-from stockodile.client.collect import collect
-from stockodile.providers.factory import make_provider
-from stockodile.reference.registry import InstrumentRegistry
-from stockodile.schema.records import Bar as StkBar
-from stockodile.schema.records import Trade as StkTrade
+from crocodile.core.schema.enums import Side
+from crocodile.core.schema.records import OHLCV, Trade
+from crocodile.core.sink.base import Sink
+from crocodile.equity.client.collect import collect
+from crocodile.equity.providers.factory import make_provider
+from crocodile.equity.reference.registry import InstrumentRegistry
 
 log = logging.getLogger(__name__)
 
@@ -32,13 +35,13 @@ _FINNHUB_CAP = 50  # Finnhub free tier: max 50 WS subscriptions
 
 
 class RecordAdapterSink(Sink):
-    """crypcodile Sink that accepts stockodile records and forwards crypcodile Trades.
+    """Sink that side-stamps equity records and folds bars into the tick stream.
 
-    Runs inside stockodile's collect() TaskGroup: a raised exception would kill
+    Runs inside crocodile's collect() TaskGroup: a raised exception would kill
     the whole feed, so per-record failures are swallowed and counted instead.
 
-    Sides are inferred with the tick rule (stockodile trades carry no side, and
-    BreadthTracker counts every non-"sell" side as a buy — emitting UNKNOWN
+    Sides are inferred with the tick rule (equity prints carry no aggressor side,
+    and BreadthTracker counts every non-"sell" side as a buy — forwarding UNKNOWN
     would skew breadth to 100% buy).
     """
 
@@ -65,31 +68,43 @@ class RecordAdapterSink(Sink):
 
     async def put(self, record: Any) -> None:
         try:
-            if isinstance(record, StkTrade):
-                price, amount, rec_id = record.price, record.size, record.id
-            elif isinstance(record, StkBar):
+            if isinstance(record, Trade):
+                # Already the record the pipeline speaks. Replacing two fields
+                # beats rebuilding it: provenance (`prov*`), `venue` and `tape`
+                # survive, and a field added to Trade upstream keeps flowing
+                # instead of being silently dropped by an outdated constructor.
+                symbol = record.symbol.upper()
+                trade = msgspec.structs.replace(
+                    record,
+                    symbol=symbol,
+                    side=self._infer_side(symbol, record.price),
+                )
+            elif isinstance(record, OHLCV):
                 # Forward-looking: providers are currently built with
-                # channels=["trade"] and emit no Bars; kept so bar-emitting
+                # channels=["trade"] and emit no bars; kept so bar-emitting
                 # providers plug in unchanged. CAVEAT: if a bar channel is ever
                 # wired, the WHOLE bar's volume lands on one tick-rule-sided
                 # Trade, skewing breadth toward that side — it needs a per-bar
                 # buy/sell split before going live.
-                price, amount, rec_id = record.close, record.volume or 0.0, ""
+                symbol = record.symbol.upper()
+                trade = Trade(
+                    source=record.source,
+                    symbol=symbol,
+                    symbol_raw=record.symbol_raw,
+                    local_ts=record.local_ts,
+                    asset_class=record.asset_class,
+                    source_ts=record.source_ts,
+                    prov=record.prov,
+                    prov_basis=record.prov_basis,
+                    prov_confidence=record.prov_confidence,
+                    prov_inputs=record.prov_inputs,
+                    id="",
+                    price=record.close,
+                    amount=record.volume or 0.0,
+                    side=self._infer_side(symbol, record.close),
+                )
             else:
                 return  # quotes/fundamentals/etc.: not part of the tick pipeline
-            symbol = record.symbol.upper()
-            trade = Trade(
-                exchange=f"stk-{record.provider}",
-                symbol=symbol,
-                symbol_raw=record.symbol_raw,
-                exchange_ts=record.source_ts if record.source_ts is not None
-                else record.local_ts,
-                local_ts=record.local_ts,
-                id=rec_id,
-                price=price,
-                amount=amount,
-                side=self._infer_side(symbol, price),
-            )
             await self.out.put(trade)
         except Exception:
             self.errors += 1
@@ -113,7 +128,7 @@ def build_equity_providers(
     out: Sink,
     registry: InstrumentRegistry,
 ) -> EquityProviderPlan:
-    """Pick ONE stockodile provider from the environment and build it.
+    """Pick ONE crocodile equity provider from the environment and build it.
 
     Alpaca (both keys) > Finnhub (key) > Google Finance (keyless default).
     Symbol lists are trimmed to the provider's hard cap, preserving order;
@@ -148,9 +163,9 @@ async def start_equity_feed(
     """Start the live equity feed; mirrors crypto.start_feed's calling shape,
     plus the provider plan so the app can report what is actually running.
 
-    Unlike crypcodile connectors, stockodile providers assign their own
-    transport in __init__ (or override run() entirely), so no manual
-    AiohttpWsTransport wiring is needed here.
+    Unlike the crypto connectors, equity providers assign their own transport in
+    __init__ (or override run() entirely), so no manual AiohttpWsTransport
+    wiring is needed here.
     """
     adapter = RecordAdapterSink(sink)
     # Intentionally unpopulated: equities have no discover step (unlike crypto's

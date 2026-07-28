@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-from crypcodile.schema.records import Trade
+from crocodile.core.schema.records import Trade
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -19,13 +19,19 @@ from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import DataTable, Input, Static
 
+from entropy import settings as settings_store
 from entropy.app import AppConfig
+from entropy.bot.config import BotConfig
 from entropy.config import EngineConfig
-from entropy.data.universe import SymbolInfo, UniverseService
+from entropy.data.universe import SymbolInfo, UniverseService, make_symbol_info
 from entropy.data.watchlist import Watchlist
 from entropy.engine.candles import CandleAggregator
 from entropy.engine.engine import Engine
-from entropy.engine.timeframe import get_timeframe
+from entropy.engine.timeframe import (
+    chart_warmup_interval,
+    get_timeframe,
+    resolve_chart_interval,
+)
 from entropy.feeds.bus import QueueSink
 from entropy.feeds.crypto import start_feed
 from entropy.feeds.equities.feed import EquitySimFeed
@@ -61,7 +67,7 @@ from .widgets.ticker_strip import TickerStrip
 from .widgets.watchlist_board import SPARK_WINDOW, WatchlistBoard, WatchRow, sparkline
 
 if TYPE_CHECKING:
-    from crypcodile.sink.base import Sink
+    from crocodile.core.sink.base import Sink
 
     from entropy.feeds.equities.live import EquityProviderPlan
 
@@ -69,18 +75,21 @@ log = logging.getLogger(__name__)
 
 _MARKET_STATUS_TTL_S = 30.0  # header chip: recompute the calendar at most this often
 
-# Cached stockodile.analytics module ref for the EMA chart overlays.
+# Main-screen tables whose row selection drives the focus symbol.
+_FOCUSING_TABLES = frozenset({"new_lows", "session_highs", "watchlist"})
+
+# Cached crocodile.core.analytics.indicators module ref for the EMA chart overlays.
 # None = not yet tried, False = unavailable (never retried), module otherwise.
 _analytics: Any = None
 
 
 def _ema_module() -> Any | None:
-    """Lazy stockodile.analytics import: first chart draw pays it once; a
+    """Lazy crocodile.core.analytics.indicators import: first chart draw pays it once; a
     missing/broken dep degrades to overlay-free charts, never a crash."""
     global _analytics
     if _analytics is None:
         try:
-            from stockodile import analytics
+            from crocodile.core.analytics import indicators as analytics
             _analytics = analytics
         except Exception:
             _analytics = False
@@ -91,7 +100,7 @@ async def start_equity_feed(
     sink: Sink, symbols: Sequence[str]
 ) -> tuple[asyncio.Task[None], EquityProviderPlan]:
     """Lazy indirection over the live module: the sim path must never import
-    stockodile, and tests monkeypatch this symbol to stub the live feed."""
+    crocodile, and tests monkeypatch this symbol to stub the live feed."""
     from entropy.feeds.equities import live
     return await live.start_equity_feed(sink, symbols)
 
@@ -100,6 +109,8 @@ class EntropyApp(App[None]):
     CSS_PATH = "entropy.tcss"
     BINDINGS = [
         ("s", "settings", "Settings"),
+        ("b", "bot", "Bot"),
+        ("ctrl+w", "watchlist", "Watchlist"),
         ("question_mark", "help", "Help"),
         ("h", "help", "Help"),
         ("e", "errors", "Errors"),
@@ -118,9 +129,19 @@ class EntropyApp(App[None]):
         self, config: AppConfig | None = None, *args: Any, headless: bool = False, **kwargs: Any
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.cfg = config or AppConfig()
+        # No explicit config = "open my Entropy": the persisted settings file is
+        # the source of truth. An explicit AppConfig (tests, embedders) wins, but
+        # the bot half still loads — the settings modal has to show something
+        # real, and load() cannot fail.
+        stored = settings_store.load()
+        self.cfg = config if config is not None else stored.app
+        self.bot_cfg: BotConfig = stored.bot
         self._tf = get_timeframe(self.cfg.timeframe)
-        self._candle_interval_ns = self._tf.bar_ns
+        # Chart candle width is deliberately NOT the engine timeframe: the
+        # scanner can run 15m windows while the chart draws 1m candles.
+        self._chart_interval_name, self._chart_bar_ns = resolve_chart_interval(
+            self.cfg.chart_interval, self.cfg.timeframe
+        )
         self._warmup_bars = self._tf.warmup_bars
         self._warmup_dt_ns = self._tf.bar_ns
         self._sink = QueueSink()
@@ -145,8 +166,8 @@ class EntropyApp(App[None]):
         self._equity = EquitySimFeed(
             self._sink, seed=self.cfg.seed, ticks_per_sec=self.cfg.equity_tps
         )
-        self._price_candles = CandleAggregator(self._candle_interval_ns)  # chart #2 (strategy)
-        self._focus_candles = CandleAggregator(self._candle_interval_ns)  # chart #1 (focus)
+        self._price_candles = self._new_aggregator()  # chart #2 (strategy)
+        self._focus_candles = self._new_aggregator()  # chart #1 (focus)
         self._spikes = 0
         self._snap_drops = 0
         self._error_text = "No errors."
@@ -191,6 +212,30 @@ class EntropyApp(App[None]):
         # set_reactive: seed the default without firing the watcher (chart #1
         # starts on the crypto strategy symbol, exactly as before).
         self.set_reactive(EntropyApp.focus_symbol, self.cfg.crypto_strategy_symbol)
+
+    @property
+    def _candle_interval_ns(self) -> int:
+        """Legacy alias for the chart's candle width, kept because it predates
+        the chart-interval/timeframe split and several callers still read it."""
+        return self._chart_bar_ns
+
+    def _new_aggregator(self) -> CandleAggregator:
+        return CandleAggregator(self._chart_bar_ns, maxlen=max(self.cfg.chart_bars, 1))
+
+    def _seed_aggregator(self, bars: Sequence[Bar]) -> CandleAggregator:
+        """Fresh aggregator filled from warmup ``bars`` at the CHART interval.
+
+        Per bar, close→high→low→close fills o/h/l/c in its bucket; a fresh
+        object also drops any candles built at the previous interval."""
+        agg = self._new_aggregator()
+        for b in bars:
+            agg.add(b.ts_ns, b.close, 0.0)
+            if b.high is not None:
+                agg.add(b.ts_ns, b.high, 0.0)
+            if b.low is not None:
+                agg.add(b.ts_ns, b.low, 0.0)
+            agg.add(b.ts_ns, b.close, 0.0)
+        return agg
 
     def query_default(self, selector: str, expect_type: Any) -> Any:
         try:
@@ -241,7 +286,7 @@ class EntropyApp(App[None]):
         self.query_one("#volume", VolumeChart).display = self.cfg.show_volume
         self.query_one("#volume2", VolumeChart).display = self.cfg.show_volume
         self.query_one("#depth", DepthPanel).display = self.cfg.show_depth
-        self._set_chart_bar_ns(self._tf.bar_ns)
+        self._set_chart_bar_ns(self._chart_bar_ns)
         self._set_chart_titles()
         self.query_one("#hist", HighLowGauges).window_labels = self.engine.cfg.window_labels
 
@@ -270,6 +315,7 @@ class EntropyApp(App[None]):
                 dropped=self._sink.dropped,
             )
             status.sell_pct = snap.breadth.sell_pct
+            status.focus_symbol = self.focus_symbol
             self.query_default("#ticker", TickerStrip).groups = snap.ticker
             self.query_default("#event_hist", EventHistogram).raw_hz = snap.breadth.raw_hz
             hist = self.query_default("#hist", HighLowGauges)
@@ -426,24 +472,40 @@ class EntropyApp(App[None]):
         self._depth_cache[symbol] = (self._depth_now(), data)
 
     def _set_chart_bar_ns(self, bar_ns: int) -> None:
-        """Keep every chart's x-axis format in sync with the active timeframe."""
+        """Keep every chart's x-axis format in sync with the candle interval.
+
+        The retained-bar count goes with it: the axis-format tier keys on the
+        chart's total SPAN (bar_ns x bars), so a bigger ring can cross a
+        midnight at an interval that normally would not.
+        """
+        bars = self.cfg.chart_bars
         try:
-            self.query_default("#price", PriceChart).bar_ns = bar_ns
-            self.query_default("#price2", PriceChart).bar_ns = bar_ns
-            self.query_default("#volume", VolumeChart).bar_ns = bar_ns
-            self.query_default("#volume2", VolumeChart).bar_ns = bar_ns
+            for cid in ("#price", "#price2"):
+                chart = self.query_default(cid, PriceChart)
+                chart.bar_ns = bar_ns
+                chart.chart_bars = bars
+            for vid in ("#volume", "#volume2"):
+                vol = self.query_default(vid, VolumeChart)
+                vol.bar_ns = bar_ns
+                vol.chart_bars = bars
         except NoMatches:
             pass
 
+    def _chart_title_suffix(self) -> str:
+        """Candle interval, spelled out against the scan cadence when the two
+        differ — otherwise a reader would assume the chart shows the timeframe."""
+        if self._chart_interval_name == self._tf.name:
+            return self._tf.name
+        return f"{self._chart_interval_name} candles · {self._tf.name} scan"
+
     def _set_chart_titles(self) -> None:
         """Chart #1 titles after the focus symbol, chart #2 after the strategy
-        symbol; both carry the active timeframe (refresh on either change)."""
+        symbol; both carry the candle interval (refresh on either change)."""
+        suffix = self._chart_title_suffix()
         try:
-            self.query_default("#price", PriceChart).title = (
-                f"{self.focus_symbol} · {self._tf.name}"
-            )
+            self.query_default("#price", PriceChart).title = f"{self.focus_symbol} · {suffix}"
             self.query_default("#price2", PriceChart).title = (
-                f"{self.cfg.strategy_symbol} · {self._tf.name}"
+                f"{self.cfg.strategy_symbol} · {suffix}"
             )
         except NoMatches:
             pass
@@ -466,7 +528,7 @@ class EntropyApp(App[None]):
         # Fingerprint of everything the pair renders from. Unchanged → skip
         # the full plotext clear+rebuild (this runs at 10 Hz for two pairs);
         # any new bar, tick on the last bar, chart-type/volume toggle, theme,
-        # symbol, timeframe, or EMA-period change invalidates it.
+        # symbol, candle interval, timeframe, or EMA-period change invalidates it.
         key: tuple[object, ...] = (
             len(bars),
             last.c if last is not None else None,
@@ -475,6 +537,7 @@ class EntropyApp(App[None]):
             self.cfg.show_volume,
             self.theme,
             symbol,
+            self._chart_interval_name,
             self._tf.name,
             strat_cfg.fast,
             strat_cfg.slow,
@@ -524,7 +587,7 @@ class EntropyApp(App[None]):
         if last is not None and now - last < _MARKET_STATUS_TTL_S:
             return self._market_status_cache
         self._market_status_ts = now
-        self._market_status_cache = market_status()  # "" if stockodile is unavailable
+        self._market_status_cache = market_status()  # "" if crocodile is unavailable
         return self._market_status_cache
 
     def _push_info(self, text: str, color: str = "white") -> None:
@@ -608,19 +671,46 @@ class EntropyApp(App[None]):
             self.strategy.position = position
         events = self.strategy.warmup(bars)
         # Seed the SPY candle chart from the same bars (the sim path draws from
-        # live sim ticks instead). Fresh aggregator: drops any synthetic-era
-        # candles; per bar, close→high→low→close fills o/h/l/c in its bucket.
-        agg = CandleAggregator(self._candle_interval_ns)
-        for b in bars:
-            agg.add(b.ts_ns, b.close, 0.0)
-            if b.high is not None:
-                agg.add(b.ts_ns, b.high, 0.0)
-            if b.low is not None:
-                agg.add(b.ts_ns, b.low, 0.0)
-            agg.add(b.ts_ns, b.close, 0.0)
-        self._price_candles = agg
+        # live sim ticks instead) — but only while the chart still draws at the
+        # timeframe's width. A decoupled chart interval needs its own history,
+        # so it gets its own (single) fetch rather than a mis-bucketed reuse.
+        if self._chart_interval_name == tf_name:
+            self._price_candles = self._seed_aggregator(bars)
+        else:
+            self._warmup_price_chart()
         self._push_events([e for e in events if e.kind is EventKind.INFO])
         self._push_info(f"watching [{self.cfg.strategy_symbol}]")
+
+    @work(exclusive=True, group="chart_warmup")
+    async def _warmup_price_chart(self) -> None:
+        """Seed chart #2 at the CHART interval when it no longer matches the
+        timeframe (otherwise ``_warmup_equity`` reuses the bars it already
+        fetched, so the common case still costs one round trip)."""
+        symbol = self.cfg.strategy_symbol
+        interval = self._chart_interval_name
+        if self._equity_source_resolved != "live":
+            return  # sim prices have no history source
+        provider_interval = chart_warmup_interval(interval, crypto=False)
+        if provider_interval is None:
+            self._push_info(
+                f"chart: no {interval} history for [{symbol}]; filling from live ticks"
+            )
+            return
+        try:
+            bars = await warmup_equity_bars(symbol, provider_interval)
+        except Exception as exc:  # network/REST hiccup — warmup is best-effort.
+            self._error_text = f"chart warmup failed: {exc}"
+            self._push_info(
+                f"chart warmup failed ({exc}); chart fills from live ticks", "yellow"
+            )
+            return
+        if (
+            not bars
+            or self.cfg.strategy_symbol != symbol
+            or self._chart_interval_name != interval
+        ):
+            return  # stale fetch: symbol or candle interval moved on mid-flight
+        self._price_candles = self._seed_aggregator(bars)
 
     @work(exclusive=True, group="warmup")
     async def _warmup_crypto(self) -> None:
@@ -644,7 +734,7 @@ class EntropyApp(App[None]):
         in the background (best-effort)."""
         if not new:
             return
-        self._focus_candles = CandleAggregator(self._tf.bar_ns)
+        self._focus_candles = self._new_aggregator()
         self._set_chart_titles()
         self._warmup_focus()
 
@@ -655,42 +745,43 @@ class EntropyApp(App[None]):
         Only ``binance-spot:RAW`` canonicals have a kline warmup source; other
         crypto venues (coinbase) skip silently. Bare equity tickers warm from
         Yahoo bars only when the resolved equity source is live — sim symbols
-        have no history source beyond synth. Skipped symbols start empty and
-        fill from live ticks. Exclusive group: a rapid focus change cancels the
-        in-flight fetch; the post-await guard also drops a seed that a focus or
-        timeframe change made stale mid-fetch.
+        have no history source beyond synth. The fetch asks for the CHART's
+        candle interval, not the timeframe, and an interval no provider serves
+        (sub-minute equities) is skipped rather than requested under a bogus
+        name. Skipped symbols start empty and fill from live ticks. Exclusive
+        group: a rapid focus change cancels the in-flight fetch; the post-await
+        guard also drops a seed that a focus or interval change made stale.
         """
         symbol = self.focus_symbol
-        tf_name = self._tf.name
+        interval = self._chart_interval_name
+        crypto = ":" in symbol
+        raw = symbol
+        if crypto:
+            venue, raw = symbol.split(":", 1)
+            if venue != "binance-spot":
+                return  # no kline source for this venue — not an error
+        elif self._equity_source_resolved != "live":
+            return
+        provider_interval = chart_warmup_interval(interval, crypto=crypto)
+        if provider_interval is None:
+            self._push_info(
+                f"chart: no {interval} history for [{symbol}]; filling from live ticks"
+            )
+            return
         try:
-            if ":" in symbol:
-                venue, raw = symbol.split(":", 1)
-                if venue != "binance-spot":
-                    return  # no kline source for this venue — not an error
-                bars = await warmup_klines(raw, tf_name)
-            elif self._equity_source_resolved == "live":
-                bars = await warmup_equity_bars(symbol, tf_name)
+            if crypto:
+                bars = await warmup_klines(raw, provider_interval)
             else:
-                return
+                bars = await warmup_equity_bars(symbol, provider_interval)
         except Exception as exc:  # network/REST hiccup — warmup is best-effort.
             self._error_text = f"focus warmup failed: {exc}"
             self._push_info(
                 f"focus warmup failed ({exc}); chart fills from live ticks", "yellow"
             )
             return
-        if not bars or self.focus_symbol != symbol or self._tf.name != tf_name:
-            return  # stale fetch: focus or timeframe moved on mid-flight
-        # Per bar, close→high→low→close fills o/h/l/c in its bucket (same
-        # seeding pattern as the SPY chart in _warmup_equity).
-        agg = CandleAggregator(self._tf.bar_ns)
-        for b in bars:
-            agg.add(b.ts_ns, b.close, 0.0)
-            if b.high is not None:
-                agg.add(b.ts_ns, b.high, 0.0)
-            if b.low is not None:
-                agg.add(b.ts_ns, b.low, 0.0)
-            agg.add(b.ts_ns, b.close, 0.0)
-        self._focus_candles = agg
+        if not bars or self.focus_symbol != symbol or self._chart_interval_name != interval:
+            return  # stale fetch: focus or candle interval moved on mid-flight
+        self._focus_candles = self._seed_aggregator(bars)
 
     def _feed_status(self, text: str, color: str = "white") -> None:
         """Surface transport connect/disconnect noise as console INFO lines."""
@@ -846,6 +937,14 @@ class EntropyApp(App[None]):
     def action_settings(self) -> None:
         self.push_screen(SettingsScreen(id="settings"))
 
+    def action_bot(self) -> None:
+        """`b`: the same settings modal, opened straight onto the Bot tab."""
+        self.push_screen(SettingsScreen(id="settings", initial_tab="tab-bot"))
+
+    def action_watchlist(self) -> None:
+        """`ctrl+w`: the settings modal's watchlist manager (add/remove rows)."""
+        self.push_screen(SettingsScreen(id="settings", initial_tab="tab-watchlist"))
+
     def action_errors(self) -> None:
         self.push_screen(ErrorScreen(self._error_text, id="errors"))
 
@@ -925,6 +1024,8 @@ class EntropyApp(App[None]):
             "strategy_symbol": cfg.strategy_symbol,
             "crypto_strategy_symbol": cfg.crypto_strategy_symbol,
             "spike_pct": cfg.engine.spike_pct, "snapdrop_pct": cfg.engine.snapdrop_pct,
+            "chart_interval": cfg.chart_interval, "chart_bars": cfg.chart_bars,
+            "show_depth": cfg.show_depth, "bot": self.bot_cfg,
         }
         kwargs.update(overrides)
         self._apply_settings(**kwargs)
@@ -934,24 +1035,27 @@ class EntropyApp(App[None]):
         self.toggle_watch(self._resolve_symbol(self.focus_symbol))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Any board/watchlist row (keyed by symbol) focuses that symbol."""
+        """A main-screen board/watchlist row (keyed by symbol) focuses that symbol.
+
+        Modal tables bubble the same message, so the id check keeps picking a
+        row in the settings watchlist manager from also moving the chart."""
+        if event.data_table.id not in _FOCUSING_TABLES:
+            return
         symbol = event.row_key.value
         if symbol:
             self.focus_symbol = symbol
 
     def _resolve_symbol(self, symbol: str) -> SymbolInfo:
-        """SymbolInfo via exact universe match, else a bare fallback whose
-        asset class comes from the ':' venue-prefix heuristic."""
+        """SymbolInfo via exact universe match, else a derived fallback.
+
+        The fallback still fills ticker/exchange/base/quote from the canonical
+        symbol, so a name the universe has never heard of still renders with a
+        proper ticker column and venue badge rather than a raw ``venue:PAIR``.
+        """
         for info in self._universe.search(symbol, limit=5):
             if info.symbol == symbol:
                 return info
-        has_venue = ":" in symbol
-        return SymbolInfo(
-            symbol=symbol,
-            name=symbol,
-            asset_class="crypto" if has_venue else "equity",
-            venue=symbol.split(":", 1)[0] if has_venue else "us",
-        )
+        return make_symbol_info(symbol)
 
     def toggle_watch(self, info: SymbolInfo) -> bool:
         """Toggle ``info`` in the watchlist (persisted); returns presence after.
@@ -973,12 +1077,35 @@ class EntropyApp(App[None]):
         enable_equities: bool, enable_crypto: bool, equity_source: str, equity_tps: int,
         strategy_symbol: str, crypto_strategy_symbol: str,
         spike_pct: float, snapdrop_pct: float,
+        chart_interval: str | None = None, chart_bars: int | None = None,
+        show_depth: bool | None = None, bot: BotConfig | None = None,
     ) -> None:
+        """Single hot-apply path for every settings surface (modal + command bar).
+
+        The trailing four are ``None``-defaulted rather than required so callers
+        that predate the chart/bot split keep their existing meaning: None reads
+        "leave this alone", never "reset it to the struct default".
+        """
+        if chart_interval is None:
+            chart_interval = self.cfg.chart_interval
+        if chart_bars is None:
+            chart_bars = self.cfg.chart_bars
+        if show_depth is None:
+            show_depth = self.cfg.show_depth
         tf_changed = timeframe != self.cfg.timeframe
         equity_source_changed = equity_source != self.cfg.equity_source
         equities_toggled = enable_equities != self.cfg.enable_equities
         crypto_toggled = enable_crypto != self.cfg.enable_crypto
         spec = get_timeframe(timeframe)
+        # The chart's candle width rides on its own axis: a timeframe change only
+        # moves it while the chart is in follow mode, and an explicit interval
+        # survives a timeframe change untouched.
+        chart_name, chart_bar_ns = resolve_chart_interval(chart_interval, timeframe)
+        chart_changed = (
+            chart_name != self._chart_interval_name
+            or chart_bar_ns != self._chart_bar_ns
+            or chart_bars != self.cfg.chart_bars
+        )
         # Overlay timeframe-derived windows/scalars + form spike/snapdrop onto the existing
         # engine config so non-form fields (upmove/downmove/leaderboard_k/accel_eps) are preserved.
         new_engine_cfg = msgspec.structs.replace(
@@ -996,12 +1123,17 @@ class EntropyApp(App[None]):
             timeframe=timeframe, enable_equities=enable_equities, enable_crypto=enable_crypto,
             equity_source=equity_source, equity_tps=equity_tps, strategy_symbol=strategy_symbol,
             crypto_strategy_symbol=crypto_strategy_symbol, engine=new_engine_cfg,
+            chart_interval=chart_interval, chart_bars=chart_bars, show_depth=show_depth,
         )
+        if bot is not None:
+            self.bot_cfg = bot
         self.theme = theme
         self.query_default("#price", PriceChart).chart_type = chart_type
         self.query_default("#price2", PriceChart).chart_type = chart_type
         self.query_default("#volume", VolumeChart).display = show_volume
         self.query_default("#volume2", VolumeChart).display = show_volume
+        with suppress(NoMatches):
+            self.query_default("#depth", DepthPanel).display = show_depth
         if self._equity is not None:
             self._equity.tps = equity_tps
 
@@ -1021,12 +1153,8 @@ class EntropyApp(App[None]):
         if tf_changed:
             self._tf = spec
             self.engine = Engine(new_engine_cfg)
-            self._candle_interval_ns = spec.bar_ns
             self._warmup_bars = spec.warmup_bars
             self._warmup_dt_ns = spec.bar_ns
-            self._price_candles = CandleAggregator(spec.bar_ns)
-            self._focus_candles = CandleAggregator(spec.bar_ns)
-            self._set_chart_bar_ns(spec.bar_ns)
             self.query_default("#hist", HighLowGauges).window_labels = spec.window_labels
             self._warmup_strategies()  # warms equity + (if enabled) crypto once, with new symbols
         else:
@@ -1035,7 +1163,21 @@ class EntropyApp(App[None]):
                 self._warmup_spy()   # real bars when live, synth otherwise
             if crypto_symbol_changed:
                 self._warmup_crypto()
-        # Chart #2's title tracks strategy_symbol; both titles track the timeframe.
+
+        if chart_changed:
+            # Candle width/depth changed: rebuild both aggregators (old-width bars
+            # cannot be re-bucketed) and re-seed them. The engine and strategies
+            # are untouched — this is a rendering decision, not a trading one.
+            self._chart_interval_name, self._chart_bar_ns = chart_name, chart_bar_ns
+            self._price_candles = self._new_aggregator()
+            self._focus_candles = self._new_aggregator()
+            self._set_chart_bar_ns(chart_bar_ns)
+            self._warmup_focus()
+            if not tf_changed:
+                # A timeframe change already re-warms the equity strategy, and
+                # that path seeds/schedules chart #2 itself — don't double-fetch.
+                self._warmup_price_chart()
+        # Chart #2's title tracks strategy_symbol; both titles track the candles.
         self._set_chart_titles()
 
         # Feed enable/disable transitions (the mount-time launch only ever ran once;
@@ -1063,3 +1205,19 @@ class EntropyApp(App[None]):
                 with suppress(NoMatches):
                     self.query_default("#header", HeaderBar).sources = "equities only"
                 self._push_info("crypto: feed disabled")
+
+        self._persist_settings()
+
+    def _persist_settings(self) -> None:
+        """Write the applied config to the shared settings file.
+
+        A disk failure is reported, not raised: the change is already live in
+        this session, and refusing to apply it because ``~/.entropy`` is
+        read-only would be the worse outcome.
+        """
+        try:
+            settings_store.save_app(self.cfg)
+            settings_store.save_bot(self.bot_cfg)
+        except OSError as exc:
+            self._error_text = f"settings save failed: {exc}"
+            self._push_info(f"settings save failed ({exc})", "red")

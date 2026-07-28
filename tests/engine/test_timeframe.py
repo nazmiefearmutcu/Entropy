@@ -1,10 +1,14 @@
 import pytest
 
 from entropy.engine.timeframe import (
+    CHART_INTERVALS,
     DEFAULT_TIMEFRAME,
+    FOLLOW_TIMEFRAME,
     TIMEFRAMES,
     TimeframeSpec,
+    chart_warmup_interval,
     get_timeframe,
+    resolve_chart_interval,
 )
 
 _S = 1_000_000_000
@@ -103,3 +107,50 @@ def test_all_specs_exact_values(name):
     assert spec.breadth_window_s == breadth
     assert spec.momentum_cooldown_ns == cooldown
     assert spec.warmup_bars == 24
+
+
+# ---- chart intervals (independent of the engine timeframe) ------------------
+
+
+def test_chart_intervals_are_ordered_and_positive():
+    values = list(CHART_INTERVALS.values())
+    assert values == sorted(values)
+    assert all(v > 0 for v in values)
+    assert CHART_INTERVALS["1m"] == _MIN
+    assert CHART_INTERVALS["1d"] == _DAY
+
+
+@pytest.mark.parametrize("name", list(TIMEFRAMES))
+def test_follow_timeframe_mirrors_the_timeframe_bar(name):
+    """The empty sentinel reproduces the old coupled behaviour exactly."""
+    spec = get_timeframe(name)
+    assert resolve_chart_interval(FOLLOW_TIMEFRAME, name) == (spec.name, spec.bar_ns)
+
+
+def test_chart_interval_is_independent_of_the_timeframe():
+    """The whole point: 1m candles while the scanner runs on a 15m cadence."""
+    chart_name, chart_ns = resolve_chart_interval("1m", "15m")
+    assert (chart_name, chart_ns) == ("1m", _MIN)
+    assert get_timeframe("15m").bar_ns == 15 * _MIN  # scanner untouched
+
+
+def test_unknown_chart_interval_degrades_instead_of_raising():
+    """This runs on the settings hot-apply path; a typo must not brick the app."""
+    assert resolve_chart_interval("banana", "5m") == ("5m", 5 * _MIN)
+
+
+@pytest.mark.parametrize("interval", list(CHART_INTERVALS))
+def test_chart_warmup_interval_never_invents_a_provider(interval):
+    crypto = chart_warmup_interval(interval, crypto=True)
+    equity = chart_warmup_interval(interval, crypto=False)
+    assert crypto in (None, interval)
+    assert equity in (None, interval)
+
+
+def test_sub_minute_equity_candles_have_no_history_source():
+    """Yahoo starts at 1m; asking it for 5s bars would 400 or return garbage, so
+    the caller is told to fill from the live tape instead."""
+    for interval in ("1s", "5s", "15s", "30s"):
+        assert chart_warmup_interval(interval, crypto=False) is None
+    assert chart_warmup_interval("1s", crypto=True) == "1s"   # Binance serves 1s klines
+    assert chart_warmup_interval("1m", crypto=False) == "1m"

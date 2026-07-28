@@ -3,11 +3,11 @@ import asyncio
 import contextlib
 
 import pytest
-from crypcodile.schema.enums import Side
-from crypcodile.schema.records import Trade
+from crocodile.core.schema.enums import Side
+from crocodile.core.schema.records import Trade
 
 from entropy.feeds.bus import QueueSink
-from entropy.feeds.equities.feed import EXCHANGE, EquitySimFeed
+from entropy.feeds.equities.feed import SOURCE, EquitySimFeed
 
 
 @pytest.mark.asyncio
@@ -52,6 +52,6 @@ async def test_feed_emits_trades_into_sink():
     assert recs, "expected some trades"
     r = recs[0]
     assert isinstance(r, Trade)
-    assert r.exchange == EXCHANGE
+    assert r.source == SOURCE
     assert r.side in (Side.BUY, Side.SELL)
-    assert r.price > 0 and r.local_ts == r.exchange_ts
+    assert r.price > 0 and r.local_ts == r.source_ts

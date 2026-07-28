@@ -155,18 +155,29 @@ async def test_coinbase_focus_skips_warmup_silently(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_tf_change_mid_fetch_discards_stale_seed(tmp_path, monkeypatch):
     """A timeframe change while the focus warmup fetch is in flight must not
-    seed old-timeframe bars into the new-timeframe aggregator."""
+    seed old-interval bars into the new-interval aggregator.
+
+    In follow mode the candle interval moves with the timeframe, so the change
+    re-runs the focus warmup: the chart must end up holding the RE-fetched
+    bars, never the ones the superseded 15m request finally returned."""
     gate = asyncio.Event()
+    calls: list[str] = []
+
+    def _tagged(interval: str) -> list[Bar]:
+        base = 100.0 if interval == "15m" else 200.0
+        return [Bar(ts_ns=i * BAR_NS, close=base + i, high=base + i, low=base + i)
+                for i in range(1, 25)]
 
     async def slow_klines(symbol, interval="1m", limit=200):
+        calls.append(interval)
         await gate.wait()
-        return _bars()
+        return _tagged(interval)
 
     monkeypatch.setattr("entropy.ui.app.warmup_klines", slow_klines)
     app = _app(tmp_path)
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        app.focus_symbol = "binance-spot:ETHUSDT"   # worker captures tf=15m
+        app.focus_symbol = "binance-spot:ETHUSDT"   # worker captures interval=15m
         await pilot.pause()                          # let it start + block on gate
         cfg = app.cfg
         app._apply_settings(
@@ -178,20 +189,27 @@ async def test_tf_change_mid_fetch_discards_stale_seed(tmp_path, monkeypatch):
             spike_pct=cfg.engine.spike_pct, snapdrop_pct=cfg.engine.snapdrop_pct,
         )
         assert app._tf.name == "5m"
-        gate.set()                                   # fetch returns AFTER the change
+        assert app._chart_interval_name == "5m"      # follow mode tracked the change
+        gate.set()                                   # fetches return AFTER the change
         for _ in range(20):
             await pilot.pause()
         _5m_ns = 5 * 60 * 1_000_000_000
         assert app._focus_candles.interval_ns == _5m_ns
-        assert len(app._focus_candles.bars()) == 0   # stale 15m seed discarded
+        assert calls == ["15m", "5m"]
+        # Every candle came from the 5m re-fetch; the stale 15m payload (closes
+        # in the 100s) never reached the aggregator.
+        closes = [c.c for c in app._focus_candles.bars()]
+        assert closes and all(c >= 200.0 for c in closes)
         await pilot.press("q")
 
 
 def _trade(symbol: str, price: float):
-    from crypcodile.schema.records import Side, Trade
+    from crocodile.core.schema.enums import AssetClass
+    from crocodile.core.schema.records import Side, Trade
 
-    return Trade(exchange="test", symbol=symbol, symbol_raw=symbol, exchange_ts=None,
-                 local_ts=1_000_000, id="t1", price=price, amount=1.0, side=Side.BUY)
+    return Trade(source="test", symbol=symbol, symbol_raw=symbol,
+                 local_ts=1_000_000, asset_class=AssetClass.EQUITY, source_ts=None,
+                 id="t1", price=price, amount=1.0, side=Side.BUY)
 
 
 @pytest.mark.asyncio

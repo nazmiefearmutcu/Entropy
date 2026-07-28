@@ -20,3 +20,19 @@ class Strategy(Protocol):
                 events: Sequence[Event]) -> list[Signal]: ...
 
     def warmup(self, bars: Sequence[Bar]) -> None: ...
+
+    def on_position_closed(self, symbol: str, reason: str) -> None:
+        """Tell the strategy a position it believes in no longer exists.
+
+        Strategies track what THEY have signalled; the portfolio tracks what is
+        actually open. Those two drift apart whenever the position ends for a
+        reason the strategy did not ask for — a mechanical stop or take-profit,
+        the circuit breaker, or a risk rejection that stopped the entry from
+        happening at all.
+
+        Left unreported, the drift is silent and lasting: a strategy that thinks
+        it is long will not open again until its own exit condition fires, so a
+        single take-profit could mute it for the rest of a trend. The runner
+        calls this on every such close.
+        """
+        ...

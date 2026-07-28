@@ -7,17 +7,17 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from crypcodile.schema.enums import Side
-from crypcodile.schema.records import Trade
+from crocodile.core.schema.enums import AssetClass, Side
+from crocodile.core.schema.records import Trade
 
 from entropy.app import AppConfig
 from entropy.ui.app import EntropyApp
 
 
 def _trade(i: int) -> Trade:
-    return Trade(exchange="sim-equity", symbol="ZZZ", symbol_raw="ZZZ",
-                 exchange_ts=i, local_ts=i, id=f"t{i}", price=100.0, amount=1.0,
-                 side=Side.BUY)
+    return Trade(source="sim-equity", symbol="ZZZ", symbol_raw="ZZZ",
+                 local_ts=i, asset_class=AssetClass.EQUITY, source_ts=i,
+                 id=f"t{i}", price=100.0, amount=1.0, side=Side.BUY)
 
 
 @pytest.mark.asyncio

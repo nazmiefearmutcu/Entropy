@@ -23,6 +23,11 @@ Tauri 2 (Rust shell)  ──spawns──►  Python sidecar (FastAPI + uvicorn)
 - `frontend/` — React cockpit; consumes the WS stream, posts commands.
 - `tauri/`    — Rust shell; spawns/supervises the sidecar, opens the native window.
 
+The frontend also runs against a synthetic feed with `?mock=1`, which is how the layout can
+be worked on without a backend. `src/mock.ts` mirrors `GET /api/meta` **exactly** — an
+invented vocabulary there is worse than no mock at all, since it hides contract drift instead
+of catching it.
+
 ## Develop
 
 ```bash
@@ -64,5 +69,37 @@ from Finder with no `uv`/Python installed. In dev the shell falls back to `uv ru
 
 ## Scope
 
-MVP: scanner boards + breadth + activity ticker + focus chart + depth ladder + watchlist
-+ `:` command bar. Deferred: bot/algo console, walk-forward calibration UI, full settings.
+Scanner boards, breadth, activity ticker, focus chart, depth ladder, watchlist, the `:`
+command bar, a symbol picker, independent cadence controls, a full settings drawer and the
+bot console. Still deferred: the walk-forward calibration UI, and editing live-exchange
+credentials from the GUI (they stay in the config file on purpose).
+
+## Contract
+
+The sidecar speaks `schema_version: 2`. Snapshots stream over `/ws/live` at ~10 Hz and carry
+`settings`, `feeds` and `bot` alongside the market data, so the frontend never has to guess
+what the engine is currently configured to do.
+
+REST surface:
+
+| Route | Purpose |
+|---|---|
+| `GET /api/meta` | every vocabulary the UI offers (timeframes, chart intervals, themes, strategies, risk profiles, vote/normalize/exit modes) plus the settings path |
+| `GET`/`PUT /api/settings` | full app+bot config; PUT deep-merges, validates both halves as one unit, and applies nothing if anything is invalid |
+| `GET /api/symbols?q=` | universe search, with a `watched` flag per row |
+| `GET`/`POST /api/watchlist`, `DELETE /api/watchlist/{symbol}` | the persistent watchlist |
+| `POST /api/focus` | move the chart |
+| `POST /api/bot/{start,stop,pause,resume,halt}` | bot lifecycle |
+| `POST /api/command` | the `:` grammar |
+
+Two rules the sidecar holds to, because breaking either is what made the earlier version feel
+hollow: **a mutating endpoint never reports success for something it did not do** (an
+unsupported verb returns `ok=false`, it does not "acknowledge"), and **settings that fail
+validation change nothing** rather than applying the half that parsed.
+
+### Three cadences, deliberately separate
+
+`app.timeframe` is the scanner's rolling-window cadence. `app.chart_interval` is the candle
+width (`""` follows the timeframe). `bot.timeframe` / `bot.bar_s` is the bot's own clock.
+These were previously one knob or hardcoded; the UI names all three side by side so the
+distinction is visible rather than folklore.

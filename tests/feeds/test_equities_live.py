@@ -1,13 +1,10 @@
-"""Tests for the stockodile-backed live equity feed (no network)."""
+"""Tests for the crocodile-backed live equity feed (no network)."""
 import asyncio
 
 import pytest
-from crypcodile.schema.enums import Side
-from crypcodile.schema.records import Trade as CTrade
-from crypcodile.sink.base import Sink
-from stockodile.schema.records import Bar as SBar
-from stockodile.schema.records import Quote as SQuote
-from stockodile.schema.records import Trade as STrade
+from crocodile.core.schema.enums import AssetClass, Side
+from crocodile.core.schema.records import OHLCV, Quote, Trade
+from crocodile.core.sink.base import Sink
 
 from entropy.feeds.equities import live
 from entropy.feeds.equities.live import (
@@ -39,47 +36,72 @@ class ExplodingSink(Sink):
         pass
 
 
-def _stk_trade(**kw) -> STrade:
-    base = dict(provider="google_finance", symbol="aapl", symbol_raw="aapl",
-                local_ts=2_000, id="t1", price=213.5, size=100.0, source_ts=1_000)
+def _stk_trade(**kw) -> Trade:
+    # Equity prints carry no aggressor side; providers emit UNKNOWN and the
+    # adapter is what replaces it with a tick-rule side.
+    base = dict(source="google_finance", symbol="aapl", symbol_raw="aapl",
+                local_ts=2_000, asset_class=AssetClass.EQUITY, source_ts=1_000,
+                id="t1", price=213.5, amount=100.0, side=Side.UNKNOWN)
     base.update(kw)
-    return STrade(**base)
+    return Trade(**base)
 
 
-def _stk_bar(close: float, **kw) -> SBar:
-    base = dict(provider="stooq", symbol="spy", symbol_raw="spy", local_ts=5_000,
+def _stk_bar(close: float, **kw) -> OHLCV:
+    base = dict(source="stooq", symbol="spy", symbol_raw="spy", local_ts=5_000,
+                asset_class=AssetClass.EQUITY, source_ts=4_000,
                 interval="1d", open=1.0, high=2.0, low=0.5, close=close,
-                volume=42.0, source_ts=4_000)
+                volume=42.0)
     base.update(kw)
-    return SBar(**base)
+    return OHLCV(**base)
 
 
 # ---------------------------------------------------------------- adapter map
 
-async def test_adapter_maps_stockodile_trade():
+async def test_adapter_side_stamps_equity_trade():
     out = CaptureSink()
     adapter = RecordAdapterSink(out)
     await adapter.put(_stk_trade())
     assert adapter.errors == 0
     assert len(out.records) == 1
     tr = out.records[0]
-    assert isinstance(tr, CTrade)
-    assert tr.exchange == "stk-google_finance"   # provider prefixed
+    assert isinstance(tr, Trade)
+    assert tr.source == "google_finance"         # no "stk-" prefix any more
+    assert tr.asset_class is AssetClass.EQUITY   # the prefix's job, done properly
     assert tr.symbol == "AAPL"                   # bare upper ticker
     assert tr.symbol_raw == "aapl"
-    assert tr.exchange_ts == 1_000               # source_ts preferred
+    assert tr.source_ts == 1_000
     assert tr.local_ts == 2_000
     assert tr.id == "t1"
     assert tr.price == 213.5
-    assert tr.amount == 100.0                    # size -> amount
+    assert tr.amount == 100.0
     assert tr.side is Side.BUY                   # documented first-tick default
 
 
-async def test_adapter_trade_ts_falls_back_to_local_ts():
+async def test_adapter_preserves_unstamped_source_ts():
+    """A source that stamped nothing keeps reading as nothing.
+
+    The pre-merge adapter substituted local_ts here, because the crypto Trade it
+    built had no way to say "unstamped". The merged record does, and only
+    local_ts is ever read downstream, so the substitution would now destroy the
+    distinction while buying nothing.
+    """
     out = CaptureSink()
     adapter = RecordAdapterSink(out)
     await adapter.put(_stk_trade(source_ts=None))
-    assert out.records[0].exchange_ts == 2_000
+    assert out.records[0].source_ts is None
+    assert out.records[0].local_ts == 2_000
+
+
+async def test_adapter_preserves_provenance_on_passthrough():
+    """Side-stamping must not strip the fields the merge added."""
+    out = CaptureSink()
+    adapter = RecordAdapterSink(out)
+    await adapter.put(_stk_trade(prov_basis="alpaca_l1", prov_confidence=1.0,
+                                 venue="XNAS"))
+    tr = out.records[0]
+    assert tr.prov_basis == "alpaca_l1"
+    assert tr.prov_confidence == 1.0
+    assert tr.venue == "XNAS"
 
 
 async def test_adapter_maps_bar_to_trade():
@@ -87,12 +109,13 @@ async def test_adapter_maps_bar_to_trade():
     adapter = RecordAdapterSink(out)
     await adapter.put(_stk_bar(close=1.5))
     tr = out.records[0]
-    assert isinstance(tr, CTrade)
-    assert tr.exchange == "stk-stooq"
+    assert isinstance(tr, Trade)
+    assert tr.source == "stooq"
+    assert tr.asset_class is AssetClass.EQUITY
     assert tr.symbol == "SPY"
     assert tr.price == 1.5                       # close
     assert tr.amount == 42.0                     # volume
-    assert tr.exchange_ts == 4_000
+    assert tr.source_ts == 4_000
     assert tr.id == ""
 
 
@@ -106,8 +129,9 @@ async def test_adapter_bar_zero_volume_maps_to_zero_amount():
 async def test_adapter_ignores_other_record_types_silently():
     out = CaptureSink()
     adapter = RecordAdapterSink(out)
-    quote = SQuote(provider="finnhub", symbol="AAPL", symbol_raw="AAPL", local_ts=1,
-                   bid_px=1.0, bid_sz=1.0, ask_px=1.1, ask_sz=1.0)
+    quote = Quote(source="finnhub", symbol="AAPL", symbol_raw="AAPL", local_ts=1,
+                  asset_class=AssetClass.EQUITY, source_ts=None,
+                  bid_px=1.0, bid_sz=1.0, ask_px=1.1, ask_sz=1.0)
     await adapter.put(quote)
     assert out.records == []
     assert adapter.errors == 0

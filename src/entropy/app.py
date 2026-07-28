@@ -16,6 +16,12 @@ class AppConfig(msgspec.Struct, frozen=True):
     theme: str = "entropy"
     chart_type: str = "candlestick"
     show_volume: bool = True
+    # Candle width for the charts, INDEPENDENT of `timeframe` (which drives the
+    # scanner's rolling windows). "" = follow the timeframe, i.e. the legacy
+    # coupled behaviour; any key of engine.timeframe.CHART_INTERVALS overrides it.
+    chart_interval: str = ""
+    # How many candles each chart retains (the aggregator's ring size).
+    chart_bars: int = 120
     # Market-depth (DOM) ladder for the focus symbol. Hidden by default (the
     # `:depth` command toggles it); bins/top_n tune the synthetic VAP ladder.
     show_depth: bool = False

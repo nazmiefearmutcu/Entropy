@@ -1,15 +1,20 @@
 """Market-depth panel: a compact DOM-style bid/ask ladder for the focus symbol,
-backed by stockodile's ``depth`` capability (new in stockodile 0.2.0).
+backed by crocodile's equity ``depth`` capability.
 
 Two data regimes share ONE render path — only the badge differs:
 
-* **Synthetic** (keyless default): stockodile synthesizes a volume-at-price
-  ladder from free Yahoo 1-minute bars (``basis="yahoo_1m_vap"``,
-  ``is_synthetic=True``). This is *relative* liquidity — where volume
+* **Synthetic** (keyless default): crocodile synthesizes a volume-at-price
+  ladder from free Yahoo 1-minute bars (``prov_basis="yahoo_1m_vap"``,
+  ``prov=SYNTHETIC``). This is *relative* liquidity — where volume
   historically concentrated — NOT real resting orders. Badged ``SYNTH``.
 * **Real L1** (when ``ALPACA_API_KEY``/``ALPACA_API_SECRET`` are set):
-  stockodile upgrades the same surface to Alpaca top-of-book with no code
-  change (``basis="alpaca_l1"``, ``is_synthetic=False``). Badged ``L1``.
+  crocodile upgrades the same surface to Alpaca top-of-book with no code
+  change (``prov_basis="alpaca_l1"``, ``prov=DERIVED``). Badged ``L1``.
+
+Crocodile 0.3 replaced the old ``is_synthetic`` boolean with a three-level
+``prov`` scale plus a ``prov_confidence`` score, so the badge asks ``prov is
+SYNTHETIC`` rather than reading a flag. Testing the basis string instead would
+go quietly wrong the day a third basis is registered.
 
 Hidden by default (``AppConfig.show_depth``); the ``:depth`` command toggles it
 and force-refreshes. The app fetches it exactly like the fundamentals line: a
@@ -41,11 +46,11 @@ _Level = tuple[float, float]  # (price, size)
 
 
 class DepthView(msgspec.Struct, frozen=True):
-    """Everything the panel renders, decoupled from stockodile's DepthProfile.
+    """Everything the panel renders, decoupled from crocodile's DepthProfile.
 
     Frozen so the reactive's equality check skips repaints while nothing
     changed (this panel is repainted from the 10 Hz snapshot). ``bids``/``asks``
-    are ``(price, size)`` pairs in stockodile's native order (bids price-
+    are ``(price, size)`` pairs in crocodile's native order (bids price-
     descending, asks price-ascending); the render sorts defensively regardless.
     """
 
@@ -73,14 +78,15 @@ async def fetch_depth(
 
     ``select_depth_source`` transparently returns the Alpaca L1 source when both
     Alpaca env keys are present, else the keyless synthetic source — the same
-    "upgrade without code change" switch stockodile exposes. Lazy-imported so
-    the sim path never pays for stockodile/aiohttp.
+    "upgrade without code change" switch crocodile exposes. Lazy-imported so
+    the sim path never pays for crocodile's equity/aiohttp stack.
 
     Returns ``None`` when the snapshot carries no levels; PROPAGATES exceptions
     (no bars, auth failure, network error) so the app's worker can downgrade
     them to a debug log + cached ``None`` exactly like the fundamentals fetch.
     """
-    from stockodile.depth import select_depth_source
+    from crocodile.core.schema.provenance import Provenance
+    from crocodile.equity.depth.select import select_depth_source
 
     source = select_depth_source(bins=bins, top_n=top_n, method=method)
     profile = await source.snapshot(symbol)
@@ -88,8 +94,8 @@ async def fetch_depth(
         return None
     return DepthView(
         symbol=symbol.upper(),
-        basis=profile.basis,
-        is_synthetic=profile.is_synthetic,
+        basis=profile.prov_basis,
+        is_synthetic=profile.prov is Provenance.SYNTHETIC,
         reference_price=profile.reference_price,
         bids=tuple((float(p), float(s)) for p, s in profile.bids),
         asks=tuple((float(p), float(s)) for p, s in profile.asks),

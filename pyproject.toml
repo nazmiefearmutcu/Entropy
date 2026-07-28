@@ -1,7 +1,7 @@
 [project]
 name = "entropy"
 version = "0.0.1"
-description = "Real-time terminal market scanner + algo console (Crypcodile feed)."
+description = "Real-time terminal market scanner + algo console (Crocodile feed)."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
@@ -9,8 +9,12 @@ dependencies = [
     "textual>=0.79",
     "textual-plotext>=0.7",
     "msgspec>=0.18",
-    "crypcodile",
-    "stockodile",
+    # One engine for both asset classes. Crocodile 0.3 merged the crypcodile and
+    # stockodile forks into a single distribution; the old names survive only as
+    # deprecation shims that do not carry submodules, so there is nothing to pin
+    # them for. `market` pulls ccxt, which is what turns "the venues we hand-wrote
+    # connectors for" into "every venue ccxt speaks" — see feeds/crypto.py.
+    "crocodile[market]",
 ]
 
 [project.scripts]
@@ -21,8 +25,7 @@ entropy-bot = "entropy.bot.__main__:main"
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-timeout>=2", "ruff>=0.6", "mypy>=1.11"]
 
 [tool.uv.sources]
-crypcodile = { git = "https://github.com/nazmiefearmutcu/Crypcodile.git" }
-stockodile = { git = "https://github.com/nazmiefearmutcu/stockodile.git" }
+crocodile = { git = "https://github.com/nazmiefearmutcu/Crocodile.git" }
 
 [build-system]
 requires = ["hatchling"]

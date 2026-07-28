@@ -2,7 +2,7 @@
 """Resolve the configured equity source ("sim" | "live" | "auto") to a feed kind.
 
 "auto" picks "live" while the US market is open (Eastern time) and "sim"
-otherwise. stockodile is imported LAZILY so the sim path never touches it.
+otherwise. crocodile is imported LAZILY so the sim path never touches it.
 """
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ EASTERN = ZoneInfo("America/New_York")
 
 def _market_is_open(*, calendar: Any | None = None, now: datetime | None = None) -> bool:
     if calendar is None:
-        # Lazy: only the "auto"/status paths need stockodile; "sim" never imports it.
-        from stockodile.scheduler.calendar import USMarketCalendar
+        # Lazy: only the "auto"/status paths need crocodile; "sim" never imports it.
+        from crocodile.core.scheduler.calendar import USMarketCalendar
         calendar = USMarketCalendar()
     if now is None:
         now = datetime.now(EASTERN)
@@ -32,7 +32,7 @@ def resolve_equity_source(
     """Map an AppConfig.equity_source value to a concrete "sim" or "live".
 
     ``calendar`` (needs ``.is_market_open(dt)``) and ``now`` (tz-aware) are
-    injectable for tests; defaults are stockodile's USMarketCalendar and the
+    injectable for tests; defaults are crocodile's USMarketCalendar and the
     current Eastern wall clock.
     """
     if cfg_value in ("sim", "live"):
@@ -48,7 +48,7 @@ def market_status(*, calendar: Any | None = None, now: datetime | None = None) -
     """"open"/"closed" per the US market calendar; "" if the answer is unavailable.
 
     Used by the header's NYSE chip from the app's periodic refresh timer, where
-    Textual treats any uncaught exception as fatal — so a missing stockodile OR
+    Textual treats any uncaught exception as fatal — so a missing crocodile OR
     a calendar bug (external git dep) must degrade to a blank chip, not crash
     the TUI.
     """

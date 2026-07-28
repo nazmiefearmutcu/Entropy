@@ -5,11 +5,11 @@ import sys
 from collections.abc import Sequence
 from typing import TypedDict
 
+import msgspec
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from entropy.app import AppConfig
 from entropy.ui.app import EntropyApp
 
 console = Console()
@@ -26,8 +26,17 @@ def run_ui(
     trade_csv: str | None = None,
     equity_source: str | None = None,
 ) -> None:
-    """Launch the main Entropy live scanner UI."""
+    """Launch the main Entropy live scanner UI.
+
+    Starts from the PERSISTED settings rather than bare defaults, so the
+    timeframe/theme/chart interval you picked last session (in either frontend)
+    is what you get back. Explicit CLI flags override for this run only — they
+    are not written back, because a one-off `--equity-source sim` should not
+    silently redefine your saved preference.
+    """
     console.print("[bold yellow]Starting Entropy Live Scanner UI...[/]")
+    from entropy import settings
+
     kwargs: _UIConfigKwargs = {}
     if console_log is not None:
         kwargs["console_log_path"] = console_log
@@ -35,7 +44,10 @@ def run_ui(
         kwargs["trade_csv_path"] = trade_csv
     if equity_source is not None:
         kwargs["equity_source"] = equity_source
-    EntropyApp(AppConfig(**kwargs)).run()
+    cfg = settings.load().app
+    if kwargs:
+        cfg = msgspec.structs.replace(cfg, **kwargs)
+    EntropyApp(cfg).run()
 
 def run_bot(argv: list[str]) -> None:
     """Launch the trading bot runner."""

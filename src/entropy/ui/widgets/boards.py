@@ -5,6 +5,7 @@ from typing import Any
 from rich.text import Text
 from textual.widgets import DataTable
 
+from entropy.data.universe import display_ticker
 from entropy.engine.leaderboard import LeaderRow
 
 
@@ -19,7 +20,7 @@ def board_colors(app: Any | None = None) -> tuple[str, str]:
 def row_text(r: LeaderRow, app: Any | None = None) -> tuple[Text, Text, Text, Text]:
     success, error = board_colors(app)
     col = success if r.pct_chg >= 0 else error
-    return (Text(r.symbol, style="bold"),
+    return (Text(display_ticker(r.symbol), style="bold"),
             Text(str(r.count), justify="right"),
             Text(f"{r.price:.2f}", justify="right"),
             Text(f"{r.pct_chg:+.2f}%", style=col, justify="right"))

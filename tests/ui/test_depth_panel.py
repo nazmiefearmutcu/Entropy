@@ -90,18 +90,22 @@ def test_bar_scales_against_max_and_never_zero_for_positive():
 
 @pytest.mark.asyncio
 async def test_fetch_depth_maps_profile(monkeypatch):
-    from stockodile.schema.records import DepthProfile
+    from crocodile.core.schema.enums import AssetClass
+    from crocodile.core.schema.provenance import Provenance
+    from crocodile.core.schema.records import DepthProfile
 
     class FakeSource:
         async def snapshot(self, symbol: str) -> DepthProfile:
             return DepthProfile(
-                provider="synth", symbol=f"synth:{symbol}", symbol_raw=symbol,
-                local_ts=1, bids=[(99.0, 5.0)], asks=[(101.0, 4.0)],
-                reference_price=100.0, basis="yahoo_1m_vap", is_synthetic=True, depth=2,
+                source="synth", symbol=f"synth:{symbol}", symbol_raw=symbol,
+                local_ts=1, asset_class=AssetClass.EQUITY, source_ts=None,
+                prov=Provenance.SYNTHETIC, prov_basis="yahoo_1m_vap",
+                bids=[(99.0, 5.0)], asks=[(101.0, 4.0)],
+                reference_price=100.0, depth=2,
             )
 
     monkeypatch.setattr(
-        "stockodile.depth.select_depth_source", lambda **kw: FakeSource()
+        "crocodile.equity.depth.select.select_depth_source", lambda **kw: FakeSource()
     )
     view = await fetch_depth("aapl")
     assert view == DepthView(
@@ -112,18 +116,21 @@ async def test_fetch_depth_maps_profile(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_depth_empty_levels_returns_none(monkeypatch):
-    from stockodile.schema.records import DepthProfile
+    from crocodile.core.schema.enums import AssetClass
+    from crocodile.core.schema.provenance import Provenance
+    from crocodile.core.schema.records import DepthProfile
 
     class EmptySource:
         async def snapshot(self, symbol: str) -> DepthProfile:
             return DepthProfile(
-                provider="synth", symbol="synth:X", symbol_raw="X", local_ts=1,
-                bids=[], asks=[], reference_price=0.0, basis="yahoo_1m_vap",
-                is_synthetic=True, depth=0,
+                source="synth", symbol="synth:X", symbol_raw="X", local_ts=1,
+                asset_class=AssetClass.EQUITY, source_ts=None,
+                prov=Provenance.SYNTHETIC, prov_basis="yahoo_1m_vap",
+                bids=[], asks=[], reference_price=0.0, depth=0,
             )
 
     monkeypatch.setattr(
-        "stockodile.depth.select_depth_source", lambda **kw: EmptySource()
+        "crocodile.equity.depth.select.select_depth_source", lambda **kw: EmptySource()
     )
     assert await fetch_depth("X") is None
 

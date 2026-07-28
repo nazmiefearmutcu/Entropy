@@ -5,15 +5,17 @@ import asyncio
 import random
 from collections.abc import Callable, Iterable
 
-from crypcodile.schema.enums import Side
-from crypcodile.schema.records import Trade
-from crypcodile.sink.base import Sink
-from crypcodile.util.time import now_ns
+from crocodile.core.schema.enums import AssetClass, Side
+from crocodile.core.schema.records import Trade
+from crocodile.core.sink.base import Sink
+from crocodile.core.util.time import now_ns
 
 from .sim import EquitySimulator
 from .universe import UNIVERSE
 
-EXCHANGE = "sim-equity"
+# Records name their origin in `source` — the venue for crypto, the data
+# provider for equities. The simulator is neither, and says so.
+SOURCE = "sim-equity"
 _SIDE = {"buy": Side.BUY, "sell": Side.SELL}
 
 class EquitySimFeed:
@@ -39,8 +41,11 @@ class EquitySimFeed:
         for _ in range(n):
             sym = self.rng.choice(UNIVERSE)
             s, px, size, side = self.sim.step_symbol(sym)
-            yield Trade(exchange=EXCHANGE, symbol=s, symbol_raw=s,
-                        exchange_ts=ts, local_ts=ts, id=self._next_id(),
+            # The simulator stamps its own clock, so source_ts is a real
+            # timestamp here rather than the None a silent source would earn.
+            yield Trade(source=SOURCE, symbol=s, symbol_raw=s, local_ts=ts,
+                        asset_class=AssetClass.EQUITY, source_ts=ts,
+                        id=self._next_id(),
                         price=px, amount=float(size), side=_SIDE[side])
 
     async def run(self) -> None:
