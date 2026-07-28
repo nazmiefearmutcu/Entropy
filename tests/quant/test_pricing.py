@@ -38,12 +38,34 @@ def test_put_call_parity(k, t):
 
 
 @pytest.mark.parametrize("k", [80.0, 100.0, 125.0])
-@pytest.mark.parametrize("carry", [-0.05, 0.0, 0.04, 0.30])
-def test_bsm_and_black76_agree(k, carry):
-    """One arithmetic, two spellings: BSM on the spot == Black-76 on the forward."""
+@pytest.mark.parametrize(
+    "r,q", [(0.04, 0.0), (0.04, 0.02), (0.0, 0.03), (0.06, -0.01), (-0.02, 0.015)]
+)
+def test_bsm_and_black76_agree(k, r, q):
+    """One arithmetic, two spellings: BSM on the spot == Black-76 on the carry forward.
+
+    The forward carries at the cost of carry b = r - q; the discounting stays at
+    r. With q = 0 the two collapse, which is the crypto case; q != 0 is the
+    normal equity case and is what makes this an equivalence rather than a
+    coincidence.
+    """
     s, t, sigma = 100.0, 0.5, 0.30
-    spot_side = bsm_price(s, k, t, carry, sigma, 0.0, "call")
-    fwd_side = bs_price(forward(s, carry, t), k, t, sigma, OptType.CALL, rate=carry)
+    b = r - q
+    spot_side = bsm_price(s, k, t, r, sigma, q, "call")
+    fwd_side = bs_price(forward(s, b, t), k, t, sigma, OptType.CALL, rate=r)
+    assert spot_side == pytest.approx(fwd_side, abs=1e-10)
+
+
+@pytest.mark.parametrize("k", [80.0, 100.0, 125.0])
+@pytest.mark.parametrize(
+    "r,q", [(0.04, 0.0), (0.04, 0.02), (0.0, 0.03), (0.06, -0.01), (-0.02, 0.015)]
+)
+def test_bsm_and_black76_agree_for_puts(k, r, q):
+    """The same equivalence on the put leg — a call-only proof pins half the model."""
+    s, t, sigma = 100.0, 0.5, 0.30
+    b = r - q
+    spot_side = bsm_price(s, k, t, r, sigma, q, "put")
+    fwd_side = bs_price(forward(s, b, t), k, t, sigma, OptType.PUT, rate=r)
     assert spot_side == pytest.approx(fwd_side, abs=1e-10)
 
 
