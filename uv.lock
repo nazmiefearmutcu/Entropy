@@ -432,7 +432,7 @@ wheels = [
 [[package]]
 name = "crocodile"
 version = "0.3.0"
-source = { git = "https://github.com/nazmiefearmutcu/Crocodile.git#8ff6a75dcd61b673ccfc39465c746359c8444bce" }
+source = { git = "https://github.com/nazmiefearmutcu/Crocodile.git#a0ac27a71e9a6dc4a536553baa0739b8f852b2e0" }
 dependencies = [
     { name = "aiohttp" },
     { name = "beautifulsoup4" },
