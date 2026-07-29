@@ -584,7 +584,8 @@ class SnapshotSource:
             ],
             strategies=[
                 BotStrategy(name=s.name, warm=s.warm, regimes=dict(s.regimes),
-                            directions=dict(s.directions))
+                            directions=dict(s.directions), sigmas=dict(s.sigmas),
+                            scores=dict(s.scores))
                 for s in snap.strategies
             ],
             last_signals=list(snap.last_signals), last_rejects=list(snap.last_rejects),

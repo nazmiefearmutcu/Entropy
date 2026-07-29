@@ -222,7 +222,7 @@ export const MOCK_META: MetaResponse = {
   timeframes: ['1m', '5m', '15m', '1h', '4h'],
   chart_intervals: ['1s', '5s', '15s', '30s', '1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'],
   themes: ['entropy', 'dracula', 'cyberpunk', 'nord', 'forest', 'monochrome', 'sweet'],
-  strategies: ['consensus', 'ema_cross', 'momentum_scalper'],
+  strategies: ['consensus', 'ema_cross', 'momentum_scalper', 'black_scholes'],
   risk_profiles: [
     {
       name: 'Frosty',
@@ -408,6 +408,18 @@ export function makeSnapshot(tick = 0, overrides: Partial<SnapshotMessage> = {})
           warm: true,
           regimes: { AAPL: 'trend', 'BTC/USDT': 'range' },
           directions: { AAPL: 1, 'BTC/USDT': -1 },
+          sigmas: {},
+          scores: {},
+        },
+        {
+          name: 'black_scholes',
+          warm: true,
+          regimes: { 'BTC/USDT': 'crypto σ58%' },
+          // Short, so the sign agrees with the negative score below — and so the
+          // '+1' the BotDock test matches on stays unique to the consensus row.
+          directions: { 'BTC/USDT': -1 },
+          sigmas: { 'BTC/USDT': 0.5814 },
+          scores: { 'BTC/USDT': -0.2137 },
         },
       ],
       last_signals: [

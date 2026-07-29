@@ -70,6 +70,7 @@ _STRATEGY_LABELS = {
     "consensus": "Consensus (multi-indicator)",
     "ema_cross": "EMA cross",
     "momentum_scalper": "Momentum scalper",
+    "black_scholes": "Black-Scholes (distribution)",
 }
 
 # The chart-interval Select leads with the follow-the-timeframe sentinel so the
