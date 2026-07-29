@@ -106,12 +106,65 @@ def test_zero_shrinkage_silences_the_strategy():
     assert strat.last_score[CRYPTO] == pytest.approx(0.0, abs=1e-12)
 
 
+VIOLENT = chop(120) + [100.0 * 10.0] + chop(40)
+
+
+def peak_abs_score(strat, symbol, closes):
+    """The largest |score| the strategy reaches anywhere along `closes`.
+
+    The final score is the wrong observable on a path that ends in chop — it
+    decays back to 0.0 and hides everything the spike did. The peak is what the
+    spike actually produced.
+    """
+    peak = 0.0
+    for i, px in enumerate(closes):
+        strat.on_tick(symbol, px, i * _BAR_NS, ())
+        peak = max(peak, abs(strat.last_score.get(symbol, 0.0)))
+    return peak
+
+
 def test_one_violent_bar_cannot_saturate_the_score():
-    closes = chop(120) + [100.0 * 10.0] + chop(40)
+    """A 10x bar moves the score to 0.128 — nowhere near its ceiling.
+
+    The bounds this test used to carry, `<= 1.0` and `< 0.999`, were unreachable:
+    the score's supremum is ~0.5, so no implementation could fail them. Measured
+    here the peak |score| is 0.1278 and the final is 0.0.
+
+    The reason it cannot saturate is worth recording, because it is also why
+    `drift_cap_sigmas` does nothing on this path (see the test below): the spike
+    inflates sigma from 1.16 to 409 just as hard as it inflates the drift, and
+    the score divides the one by the other, so the normalization absorbs it.
+    Pinning the peak fails if a single bar is ever allowed to dominate.
+    """
     strat = make()
-    feed(strat, CRYPTO, closes)
-    assert abs(strat.last_score[CRYPTO]) <= 1.0
-    assert abs(strat.last_score[CRYPTO]) < 0.999
+    peak = peak_abs_score(strat, CRYPTO, VIOLENT)
+    assert peak == pytest.approx(0.1278, abs=5e-4)
+    assert strat.last_score[CRYPTO] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_drift_cap_sigmas_reaches_the_shrinkage():
+    """Two strategies differing ONLY in `drift_cap_sigmas` must score differently.
+
+    What this guards is narrow and worth naming: that the strategy actually
+    threads `drift_cap_sigmas` into `shrink_drift`. The cap's arithmetic is
+    already pinned at unit level by `test_cap_bounds_a_violent_drift` in
+    `tests/quant/test_distribution.py`; a wiring bug here — stored but never
+    passed, or passed in the wrong slot — would otherwise be invisible to the
+    whole suite.
+
+    It is invisible at the DEFAULT cap because the cap never binds on any fixture
+    in this file. `shrink_drift` limits |mu - carry| to `cap_sigmas * sigma/sqrt(T)`,
+    which scales with sigma, and the 10x bar inflates sigma alongside the drift:
+    at the spike |mu| is 30245 against a limit of 162434, so the cap is 5x away
+    from binding and `drift_cap_sigmas=1e12` reproduces the default byte for byte.
+    Binding needs cap_sigmas below 0.5586, measured. Hence 0.25 here, where the
+    cap does bind and the peak score drops from 0.1278 to 0.0507.
+    """
+    loose = peak_abs_score(make(drift_cap_sigmas=3.0), CRYPTO, VIOLENT)
+    tight = peak_abs_score(make(drift_cap_sigmas=0.25), CRYPTO, VIOLENT)
+    assert loose == pytest.approx(0.1278, abs=5e-4)
+    assert tight == pytest.approx(0.0507, abs=5e-4)
+    assert tight < loose
 
 
 def test_no_signal_before_min_bars():
