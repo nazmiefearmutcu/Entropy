@@ -3,7 +3,9 @@
 `test_annualized_sigma_is_sampling_invariant` is the one that matters: the same
 price process sampled at two bar lengths must report the same annual sigma. The
 path is deterministic (alternating +-h log returns) so the assertion is exact
-rather than statistical.
+rather than statistical. It runs with the floor disabled on purpose — at the
+default floor both sides clamp to it and the test cannot see a missing
+annualization at all.
 """
 
 from __future__ import annotations
@@ -13,8 +15,12 @@ import random
 
 import pytest
 
-from entropy.quant.conventions import Market, for_symbol
+from entropy.quant.conventions import for_symbol
 from entropy.quant.vol import RealizedVolSource, ewma_variance, log_returns
+
+#: Every way a close can be unusable. `nan` leads because it is the one that
+#: slips past a `<= 0.0` guard instead of being caught by it.
+CORRUPT_IDS = ["nan", "inf", "-inf", "negative", "zero"]
 
 
 def closes_from_returns(start: float, returns: list[float]) -> list[float]:
@@ -33,6 +39,36 @@ def test_log_returns_length_and_value():
 
 def test_log_returns_ignores_non_positive_prices():
     assert log_returns([100.0, 0.0, 100.0]) == []
+
+
+@pytest.mark.parametrize(
+    "bad", [float("nan"), float("inf"), float("-inf"), -1.0, 0.0], ids=CORRUPT_IDS
+)
+def test_log_returns_voids_the_series_on_any_corrupt_close(bad: float):
+    """nan is the dangerous case: it fails `<= 0.0`, so a bare sign check waves it through."""
+    closes = [100.0] * 30
+    closes[7] = bad
+    assert log_returns(closes) == []
+
+
+@pytest.mark.parametrize(
+    "bad", [float("nan"), float("inf"), float("-inf"), -1.0, 0.0], ids=CORRUPT_IDS
+)
+def test_corrupt_close_refuses_with_a_reason_naming_the_tape(bad: float):
+    """No silent downgrade: a bad print must be None + a reason, never a nan sigma.
+
+    Before this guard a nan close produced sigma=nan with last_reason=='', which
+    Tasks 4 and 6 would have turned into a nan stop distance and a nan position
+    size. The reason must name the tape, not the window length, or an operator
+    is sent to look at the warmup budget instead of at the bad bar.
+    """
+    src = RealizedVolSource(floor=1e-9)
+    closes = [100.0] * 30
+    closes[7] = bad
+
+    assert src.sigma("SPY", closes, for_symbol("SPY", 60.0)) is None
+    assert "close" in src.last_reason
+    assert "usable returns" not in src.last_reason
 
 
 def test_ewma_variance_of_constant_magnitude_returns_is_exact():
@@ -57,7 +93,10 @@ def test_annualized_sigma_is_sampling_invariant():
     fine = [h if i % 2 == 0 else -h for i in range(400)]
     coarse = [h * math.sqrt(15.0) * (1 if i % 2 == 0 else -1) for i in range(400)]
 
-    src = RealizedVolSource()
+    # floor disabled deliberately: with the default 0.05 floor both sides clamp
+    # to it and the test passes even with annualization removed entirely. Do not
+    # "tidy" this back to RealizedVolSource().
+    src = RealizedVolSource(floor=1e-9)
     sigma_fine = src.sigma(
         "binance-spot:BTCUSDT", closes_from_returns(100.0, fine),
         for_symbol("binance-spot:BTCUSDT", 60.0),
@@ -112,7 +151,9 @@ def test_constructor_rejects_bad_parameters():
         RealizedVolSource(min_returns=0)
 
 
-def test_market_is_read_from_the_convention_not_the_symbol():
-    # The source never parses the symbol itself; the convention already decided.
+def test_sigma_ignores_the_symbol_and_reads_the_convention():
+    """The source never parses the symbol; the convention already decided the market."""
     conv = for_symbol("SPY", 60.0)
-    assert conv.market is Market.EQUITY
+    src = RealizedVolSource(floor=1e-9)
+    closes = closes_from_returns(100.0, [0.001 if i % 2 == 0 else -0.001 for i in range(50)])
+    assert src.sigma("SPY", closes, conv) == src.sigma("binance-spot:BTCUSDT", closes, conv)

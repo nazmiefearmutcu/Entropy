@@ -18,15 +18,20 @@ __all__ = ["RealizedVolSource", "VolSource", "ewma_variance", "log_returns"]
 
 
 def log_returns(closes: Sequence[float]) -> list[float]:
-    """Per-bar log returns. Any non-positive price voids the whole series.
+    """Per-bar log returns. Any non-positive OR non-finite price voids the series.
 
-    A zero or negative close means the tape lied, not that the return was large;
-    ``log`` would raise and a silent skip would splice two disjoint stretches of
+    A zero, negative, ``nan`` or ``inf`` close means the tape lied, not that the
+    return was large, and a silent skip would splice two disjoint stretches of
     price into one return.
+
+    ``nan`` is the dangerous one: it fails every ordering comparison, so a
+    ``c <= 0.0`` guard waves it through and it propagates to an all-``nan``
+    sigma. ``inf`` is merely loud — ``100.0 / inf`` is ``0.0`` and ``log`` then
+    raises. Both are refused here rather than returned as a number.
     """
     if len(closes) < 2:
         return []
-    if any(c <= 0.0 for c in closes):
+    if any(not (math.isfinite(c) and c > 0.0) for c in closes):
         return []
     return [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
 
@@ -85,6 +90,12 @@ class RealizedVolSource:
     def sigma(
         self, symbol: str, closes: Sequence[float], conv: MarketConvention
     ) -> float | None:
+        # A corrupt print gets its own reason. Otherwise one bad bar in a 500-bar
+        # window empties `returns` and reports a history-length problem, pointing
+        # the operator at the warmup budget instead of at the tape.
+        if len(closes) >= 2 and any(not (math.isfinite(c) and c > 0.0) for c in closes):
+            self.last_reason = "non-finite or non-positive close in the window"
+            return None
         returns = log_returns(closes)
         if len(returns) < self.min_returns:
             self.last_reason = (
