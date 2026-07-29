@@ -3,15 +3,17 @@ from __future__ import annotations
 import msgspec
 
 from entropy.engine.timeframe import TIMEFRAMES, get_timeframe
+from entropy.quant.vol import RealizedVolSource, VolSource
 
 from .risk.profiles import RiskProfile, get_profile, make_custom
 from .strategies.base import Strategy
+from .strategies.black_scholes import BlackScholesStrategy
 from .strategies.consensus import ConsensusStrategy
 from .strategies.ema_cross import EmaCrossStrategy
 from .strategies.momentum_scalper import MomentumScalper
 
 #: Strategy names ``build_strategies`` understands (also the UI's checkbox list).
-STRATEGY_NAMES = ("consensus", "ema_cross", "momentum_scalper")
+STRATEGY_NAMES = ("consensus", "ema_cross", "momentum_scalper", "black_scholes")
 
 
 class LiveConfig(msgspec.Struct, frozen=True):
@@ -76,6 +78,45 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
         }
 
 
+class BlackScholesConfig(msgspec.Struct, frozen=True):
+    """Every knob of :class:`~entropy.bot.strategies.black_scholes.BlackScholesStrategy`.
+
+    Carry is a configured constant in both markets. Live funding would need a
+    crocodile ``Catalog`` — ``funding_apr`` reads a stored ``funding`` channel —
+    and the bot ingests none, so ``crypto_carry_source="funding"`` is reserved
+    for a future catalog-backed run rather than pretending to data that is not
+    there.
+    """
+
+    # --- signal ----------------------------------------------------------
+    horizon_bars: int = 30
+    barrier_k: float = 1.0
+    threshold: float = 0.15
+    min_bars: int = 40
+    # --- volatility ------------------------------------------------------
+    vol_lambda: float = 0.94
+    vol_floor: float = 0.05
+    vol_source: str = "realized"          # realized | chain
+    # --- drift -----------------------------------------------------------
+    drift_window: int = 20
+    drift_shrinkage: float = 0.5
+    drift_cap_sigmas: float = 3.0
+    # --- risk translation ------------------------------------------------
+    z_stop: float = 1.0
+    z_tp: float = 2.0
+    stop_floor_pct: float = 0.05
+    risk_budget_pct: float = 1.0
+    # --- carry -----------------------------------------------------------
+    risk_free_rate: float = 0.04
+    dividend_yield: float = 0.0
+    crypto_carry_apr: float = 0.0
+    crypto_carry_source: str = "constant"  # constant | funding
+    # --- position lifecycle ----------------------------------------------
+    min_hold_bars: int = 3
+    cooldown_bars: int = 2
+    exit_mode: str = "score"               # score | flip | either
+
+
 class RiskOverrides(msgspec.Struct, frozen=True):
     """Optional per-field overrides applied on top of the named risk preset.
 
@@ -135,6 +176,7 @@ class BotConfig(msgspec.Struct, frozen=True):
     warmup: bool = True
 
     consensus: ConsensusConfig = msgspec.field(default_factory=ConsensusConfig)
+    black_scholes: BlackScholesConfig = msgspec.field(default_factory=BlackScholesConfig)
 
     def profile(self) -> RiskProfile:
         base = get_profile(self.risk_profile)
@@ -189,9 +231,61 @@ def validate(cfg: BotConfig) -> list[str]:
         problems.append("consensus weights cannot all be zero")
     if not 0.0 <= c.min_participation <= 1.0:
         problems.append("consensus min participation must be a fraction in [0, 1]")
+    b = cfg.black_scholes
+    if b.horizon_bars < 1:
+        problems.append("black-scholes horizon must be at least 1 bar")
+    if not 0.0 < b.threshold <= 1.0:
+        problems.append("black-scholes threshold must be in (0, 1]")
+    if not 0.0 < b.vol_lambda < 1.0:
+        problems.append("black-scholes vol lambda must be in (0, 1)")
+    if b.vol_floor <= 0.0:
+        problems.append("black-scholes vol floor must be positive")
+    if b.barrier_k <= 0.0:
+        problems.append("black-scholes barrier width must be positive")
+    if b.drift_window < 2:
+        problems.append("black-scholes drift window must be at least 2 bars")
+    if b.min_bars < b.drift_window + 1:
+        problems.append(
+            "black-scholes min bars must exceed the drift window by at least 1"
+        )
+    if not 0.0 <= b.drift_shrinkage <= 1.0:
+        problems.append("black-scholes drift shrinkage must be a fraction in [0, 1]")
+    if b.drift_cap_sigmas <= 0.0:
+        problems.append("black-scholes drift cap must be positive")
+    if b.z_stop <= 0.0:
+        problems.append("black-scholes z_stop must be positive")
+    if b.z_tp <= 0.0:
+        problems.append("black-scholes z_tp must be positive")
+    if not 0.0 < b.stop_floor_pct < 50.0:
+        problems.append("black-scholes stop floor must be in (0, 50) percent")
+    if not 0.0 < b.risk_budget_pct <= 100.0:
+        problems.append("black-scholes risk budget must be in (0, 100] percent")
+    if b.vol_source not in ("realized", "chain"):
+        problems.append(f"unknown black-scholes vol source {b.vol_source!r}")
+    if b.crypto_carry_source not in ("constant", "funding"):
+        problems.append(
+            f"unknown black-scholes carry source {b.crypto_carry_source!r}"
+        )
+    if b.exit_mode not in ("score", "flip", "either"):
+        problems.append(f"unknown black-scholes exit mode {b.exit_mode!r}")
     if cfg.mode == "live" and not cfg.live.acknowledged_risk:
         problems.append("live mode requires the risk acknowledgement")
     return problems
+
+
+def _build_vol_source(cfg: BlackScholesConfig) -> VolSource:
+    """Realized vol by default; the chain source is opt-in and crypto-only.
+
+    ``ChainVolSource`` needs a crocodile ``Catalog`` the bot does not build, so
+    it will refuse — visibly, per symbol — rather than quietly becoming realized
+    vol. That refusal is the point: a run whose ledger says "chain" must not have
+    traded on something else.
+    """
+    if cfg.vol_source == "chain":
+        from entropy.quant.vol import ChainVolSource
+
+        return ChainVolSource()
+    return RealizedVolSource(lam=cfg.vol_lambda, floor=cfg.vol_floor)
 
 
 def build_strategies(cfg: BotConfig) -> list[Strategy]:
@@ -224,6 +318,24 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
             out.append(
                 EmaCrossStrategy(symbol=cfg.ema_symbol, fast=cfg.ema_fast, slow=cfg.ema_slow)
             )
+        elif name == "black_scholes":
+            b = cfg.black_scholes
+            out.append(BlackScholesStrategy(
+                symbols=syms, bar_s=bar_s,
+                horizon_bars=b.horizon_bars, barrier_k=b.barrier_k,
+                threshold=b.threshold, min_bars=b.min_bars,
+                drift_window=b.drift_window, drift_shrinkage=b.drift_shrinkage,
+                drift_cap_sigmas=b.drift_cap_sigmas,
+                z_stop=b.z_stop, z_tp=b.z_tp, stop_floor_pct=b.stop_floor_pct,
+                risk_budget_pct=b.risk_budget_pct,
+                max_size_pct=cfg.profile().per_trade_pct,
+                risk_free_rate=b.risk_free_rate, dividend_yield=b.dividend_yield,
+                crypto_carry_apr=b.crypto_carry_apr,
+                min_hold_bars=b.min_hold_bars, cooldown_bars=b.cooldown_bars,
+                exit_mode=b.exit_mode,
+                vol_source=_build_vol_source(b),
+                warmup_symbol=cfg.ema_symbol,
+            ))
         else:
             raise KeyError(f"Unknown strategy {name!r}")
     return out
