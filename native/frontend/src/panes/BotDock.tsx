@@ -273,7 +273,7 @@ function Strategies({ rows }: { rows: BotStrategy[] }) {
   return (
     <div className="min-h-0 flex-1 overflow-auto px-2 py-1.5">
       {rows.map((s) => {
-        const symbols = Object.keys({ ...s.regimes, ...s.directions }).sort()
+        const symbols = Object.keys({ ...s.regimes, ...s.directions, ...s.scores }).sort()
         return (
           <div key={s.name} className="border-b border-line py-1.5 last:border-0">
             <div className="flex items-center gap-2">
@@ -291,6 +291,10 @@ function Strategies({ rows }: { rows: BotStrategy[] }) {
               {symbols.map((sym) => {
                 const regime = s.regimes[sym] ?? 'unknown'
                 const d = s.directions[sym] ?? 0
+                // Only black_scholes publishes these; the others send {} and the
+                // row renders exactly as it did before.
+                const score = s.scores?.[sym]
+                const sigma = s.sigmas?.[sym]
                 return (
                   <span key={sym} className="inline-flex items-baseline gap-1.5 font-mono text-xs">
                     <span className="text-ink-dim">{sym}</span>
@@ -303,6 +307,20 @@ function Strategies({ rows }: { rows: BotStrategy[] }) {
                     >
                       {d > 0 ? '+1' : d < 0 ? '-1' : '0'}
                     </span>
+                    {sigma !== undefined && (
+                      <span className="text-ink-faint" title="Annualized sigma the score was priced from">
+                        σ{(sigma * 100).toFixed(1)}%
+                      </span>
+                    )}
+                    {score !== undefined && (
+                      <span
+                        className={score > 0 ? 'text-up' : score < 0 ? 'text-down' : 'text-ink-faint'}
+                        title="Divergence score — reachable range is about ±0.5, not ±1"
+                      >
+                        {score >= 0 ? '+' : ''}
+                        {score.toFixed(3)}
+                      </span>
+                    )}
                   </span>
                 )
               })}

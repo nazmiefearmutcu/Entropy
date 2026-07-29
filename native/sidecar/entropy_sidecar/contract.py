@@ -116,6 +116,9 @@ class BotStrategy(msgspec.Struct, frozen=True):
     warm: bool
     regimes: dict[str, str] = msgspec.field(default_factory=dict)
     directions: dict[str, int] = msgspec.field(default_factory=dict)
+    #: Black-Scholes telemetry; empty for strategies that publish neither.
+    sigmas: dict[str, float] = msgspec.field(default_factory=dict)
+    scores: dict[str, float] = msgspec.field(default_factory=dict)
 
 
 class BotView(msgspec.Struct, frozen=True):

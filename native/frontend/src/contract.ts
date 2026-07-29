@@ -102,6 +102,10 @@ export interface BotStrategy {
   regimes: Record<string, string>
   /** symbol -> directional vote in {-1, 0, +1} */
   directions: Record<string, number>
+  /** symbol -> annualized sigma the score was priced from (black_scholes only) */
+  sigmas: Record<string, number>
+  /** symbol -> last divergence score; reachable range is about ±0.5, not ±1 */
+  scores: Record<string, number>
 }
 
 export interface BotView {

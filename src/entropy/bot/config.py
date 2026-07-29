@@ -3,6 +3,7 @@ from __future__ import annotations
 import msgspec
 
 from entropy.engine.timeframe import TIMEFRAMES, get_timeframe
+from entropy.quant.distribution import MAX_REACHABLE_SCORE
 from entropy.quant.vol import RealizedVolSource, VolSource
 
 from .risk.profiles import RiskProfile, get_profile, make_custom
@@ -85,7 +86,9 @@ class BlackScholesConfig(msgspec.Struct, frozen=True):
     crocodile ``Catalog`` — ``funding_apr`` reads a stored ``funding`` channel —
     and the bot ingests none, so ``crypto_carry_source="funding"`` is reserved
     for a future catalog-backed run rather than pretending to data that is not
-    there.
+    there. Reserved means REFUSED, not accepted-and-ignored: :func:`validate`
+    rejects the value outright, so a config naming funding carry cannot start a
+    run that would silently trade a constant.
     """
 
     # --- signal ----------------------------------------------------------
@@ -100,11 +103,25 @@ class BlackScholesConfig(msgspec.Struct, frozen=True):
     # --- drift -----------------------------------------------------------
     drift_window: int = 20
     drift_shrinkage: float = 0.5
+    #: INERT at the default triple (shrinkage 0.5, horizon 30, cap 3.0): the cap
+    #: binds only when |mean_W - carry/B| / rms exceeds cap/(shrinkage*sqrt(H)) =
+    #: 1.0954, and that ratio is ~1 at most on an ordinary tape (exactly 1.0 on a
+    #: perfectly steady trend). Shrinkage is therefore the only live drift guard
+    #: at defaults. The threshold falls to 0.60 at horizon_bars=100, where the cap
+    #: DOES bind — see the long comment in BlackScholesStrategy.__init__ before
+    #: changing any of the three.
     drift_cap_sigmas: float = 3.0
     # --- risk translation ------------------------------------------------
     z_stop: float = 1.0
     z_tp: float = 2.0
     stop_floor_pct: float = 0.05
+    #: Equity risked if the stop is hit — a CEILING that at short horizons never
+    #: binds. `risk_hints` takes min(max_size_pct, risk_budget_pct/stop_frac), so
+    #: the budget wins only when stop_frac > risk_budget_pct/max_size_pct = 0.40
+    #: at defaults, i.e. a stop wider than 40%. sigma*sqrt(T) over 30 one-minute
+    #: bars is 0.4533% at sigma=0.60, so the profile's per-trade cap governs every
+    #: real entry and actual risk-at-stop is 0.0113% of equity, 88x under the 1%
+    #: this field names. Raising it will not change sizing, only that crossover.
     risk_budget_pct: float = 1.0
     # --- carry -----------------------------------------------------------
     risk_free_rate: float = 0.04
@@ -234,8 +251,20 @@ def validate(cfg: BotConfig) -> list[str]:
     b = cfg.black_scholes
     if b.horizon_bars < 1:
         problems.append("black-scholes horizon must be at least 1 bar")
-    if not 0.0 < b.threshold <= 1.0:
-        problems.append("black-scholes threshold must be in (0, 1]")
+    if not 0.0 < b.threshold <= MAX_REACHABLE_SCORE:
+        # Tightened from the score's structural (0, 1] to what the score can
+        # actually REACH. `divergence_score` tends to (1 - N(-k+y) + N(-k-y))/2 as
+        # the drift runs away — 1/2 at carry == sigma^2/2, measured 0.481-0.511
+        # over ordinary parameters — so a threshold of 0.7 validates clean today
+        # and produces a strategy that can never enter and (before this wave) said
+        # nothing about it. The strategy constructor keeps the looser (0, 1]
+        # because that IS the score's mathematical range; this bound is about what
+        # THIS bot's configuration space can attain.
+        problems.append(
+            f"black-scholes threshold must be in (0, {MAX_REACHABLE_SCORE}]: the "
+            "divergence score's supremum is ~0.5, not 1.0, so a higher threshold "
+            "can never be crossed and the strategy would never enter"
+        )
     if not 0.0 < b.vol_lambda < 1.0:
         problems.append("black-scholes vol lambda must be in (0, 1)")
     if b.vol_floor <= 0.0:

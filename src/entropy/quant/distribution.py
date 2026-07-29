@@ -23,7 +23,16 @@ from .pricing import prob_above, prob_below
 #: exceeded the risk manager's ceiling would be silently truncated there anyway.
 MAX_STOP_TP_FRAC = 0.50
 
+#: Practical supremum of ``divergence_score``'s magnitude — see its docstring.
+#: The score's own clamp is 1.0, but the limit as the drift runs to infinity is
+#: ``(1 - N(-k+y) + N(-k-y)) / 2``, which is 1/2 at ``carry == sigma**2/2`` and
+#: measured 0.481-0.511 over ordinary parameters. A ``threshold`` above this can
+#: never be crossed, so the bot's config validator refuses one rather than
+#: shipping a strategy that is silently incapable of entering.
+MAX_REACHABLE_SCORE = 0.5
+
 __all__ = [
+    "MAX_REACHABLE_SCORE",
     "MAX_STOP_TP_FRAC",
     "RiskHints",
     "barrier",
@@ -102,7 +111,7 @@ def divergence_score(
     That [-1, 1] clamp is defensive and never binds. As ``drift`` runs to +infinity
     the up leg gains at most ``1 - N(-k+y)`` while the down leg gives up ``N(-k-y)``,
     where ``y = (carry - sigma**2/2) * sqrt(T) / sigma``, so the score tends to
-    ``(1 - N(-k+y) + N(-k-y)) / 2`` — **exactly 1/2 when carry == sigma**2/2**, which
+    ``(1 - N(-k+y) + N(-k-y)) / 2`` — exactly 1/2 when ``carry == sigma**2/2``, which
     is where symmetric barriers make the two carry-neutral probabilities cancel. Away
     from that carry the bound is only near a half (measured 0.481 to 0.511 over
     ``barrier_k`` in [0.5, 2] and carry in [0, 0.5] at sigma=0.6, T=0.01); it climbs
@@ -140,6 +149,19 @@ def risk_hints(
 
     ``max_size_pct`` is the profile's per-trade allowance and is a ceiling only —
     this function can ask for less risk, never more.
+
+    Read the budget as a CEILING, not as the governing term. The ``min`` picks it
+    only when ``stop_frac > risk_budget_pct / max_size_pct``; at the bot's
+    shipped numbers (1.0% budget, MEDIUM's 2.5% per trade) that crossover is a
+    stop wider than 40%, which ``sigma * sqrt(T)`` does not reach at short
+    horizons — 30 one-minute crypto bars at sigma=0.60 give a 0.4533% stop, so
+    ``max_size_pct`` wins and ``size_pct`` is *exactly* the profile's per-trade
+    percentage on every ordinary entry. Actual risk-at-stop is then
+    ``2.5% * 0.4533% = 0.0113%`` of equity against a stated 1% budget, 88x
+    smaller (117x at sigma=0.45). The budget starts governing only on genuinely
+    wide stops — sigma above ~52.9 annualized on that horizon, or a much longer
+    ``t_years``. This is the safe direction of the two, but it means raising
+    ``risk_budget_pct`` moves the crossover rather than the size.
     """
     root = sigma * math.sqrt(t_years)
     floor = stop_floor_pct / 100.0

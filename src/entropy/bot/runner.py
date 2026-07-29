@@ -45,6 +45,14 @@ class StrategyView(msgspec.Struct, frozen=True):
     regimes: dict[str, str] = msgspec.field(default_factory=dict)
     #: symbol -> +1 long / -1 short / 0 flat, as tracked by the strategy itself
     directions: dict[str, int] = msgspec.field(default_factory=dict)
+    #: symbol -> annualized sigma the strategy last priced with (BS only; empty
+    #: otherwise). The regime label rounds sigma to a whole percent for display;
+    #: this is the number the score was actually computed from.
+    sigmas: dict[str, float] = msgspec.field(default_factory=dict)
+    #: symbol -> the strategy's own last score (BS only; empty otherwise). Below
+    #: the entry threshold no signal is emitted, so without this the difference
+    #: between "nearly triggering" and "flat nothing" is invisible.
+    scores: dict[str, float] = msgspec.field(default_factory=dict)
 
 
 class BotSnapshot(msgspec.Struct, frozen=True):
@@ -102,6 +110,12 @@ class BotRunner:
         self.paused = False
         self._recent_signals: deque[str] = deque(maxlen=_RECENT_MAX)
         self._recent_rejects: deque[str] = deque(maxlen=_RECENT_MAX)
+        # (strategy name, symbol) -> the refusal already reported, so only the
+        # TRANSITION into one reaches the ring. Keyed by NAME rather than by
+        # position because `self.strategies` is a plain list that callers append
+        # to (`calibration.py` adds a challenger to a live runner), so anything
+        # index-parallel goes out of range the moment one does.
+        self._seen_rejects: dict[tuple[str, str], str] = {}
 
     # ---- synchronous hot path -------------------------------------------------
     def on_trade(self, symbol: str, price: float, amount: float, side: str, ts_ns: int) -> None:
@@ -135,6 +149,41 @@ class BotRunner:
                         # The entry never happened, so the strategy must not go on
                         # believing it holds the position it just asked for.
                         self._notify_closed(sig.symbol, f"rejected: {decision.reason}")
+            self._note_rejects(strat)
+
+    def _note_rejects(self, strat: object) -> None:
+        """Surface a refusal the strategy made BEFORE any signal existed.
+
+        Everything above only reaches ``_recent_rejects`` when a ``Signal`` was
+        produced and then turned down. A strategy that declines to signal at all
+        — a ``VolSource`` answering "no options catalog configured" on every bar,
+        say — writes its reason to its own ``last_rejects`` and would otherwise
+        never be seen: the bot looks warm, emits nothing, forever, with no
+        diagnostic anywhere. That is precisely the silent downgrade the vol
+        sources refuse to perform, reappearing as a silent *runner*.
+
+        Duck-typed like ``_strategy_views``: any strategy exposing a
+        ``{symbol: reason}`` mapping opts in, the rest cost one ``getattr``.
+
+        Only the TRANSITION into a refusal is recorded. Appending every bar
+        would flush the 40-entry ring within a minute of 1m bars and bury every
+        other reject the operator needs to read.
+        """
+        current: dict[str, str] = getattr(strat, "last_rejects", None) or {}
+        seen = self._seen_rejects
+        if not current and not seen:
+            return          # the overwhelming majority of ticks; keep them free
+        name: str = getattr(strat, "name", "?")
+        for sym, reason in current.items():
+            if seen.get((name, sym)) == reason:
+                continue
+            seen[name, sym] = reason
+            self._recent_rejects.append(f"{sym}: {reason}")
+            self.ledger.record_reject(sym, reason)
+        # Recovered symbols are forgotten, so a LATER refusal is reported again
+        # rather than being swallowed as a duplicate of the resolved one.
+        for key in [k for k in seen if k[0] == name and k[1] not in current]:
+            del seen[key]
 
     def _execute(self, order: Order) -> None:
         try:
@@ -223,34 +272,54 @@ class BotRunner:
 
         tf_changed = cfg.timeframe != self.config.timeframe
         bar_changed = cfg.bar_seconds() != self.config.bar_seconds()
+        profile = cfg.profile()
+        # `build_strategies` FREEZES `profile().per_trade_pct` into
+        # `BlackScholesStrategy.max_size_pct` at construction, so a profile
+        # change that skips the rebuild leaves the old ceiling in the running
+        # strategy. It fails safe — the strategy asks for less than the new
+        # profile allows, and RiskManager's own min() is the second lock — but a
+        # run whose ledger says Extreme must not be sized by Medium.
+        profile_changed = profile != self.risk.profile
         strat_changed = (
             cfg.strategies != self.config.strategies
             or cfg.consensus != self.config.consensus
+            # Without this every Black-Scholes knob was hot-appliable in name
+            # only: `self.config` took the new value, the running strategy kept
+            # the old one, and `apply_bot` then PERSISTED the new config to
+            # ~/.entropy/settings.json. A stored `vol_source="chain"` against a
+            # bot still trading realized vol is the exact ledger lie
+            # `_build_vol_source` refuses to commit.
+            or cfg.black_scholes != self.config.black_scholes
             or cfg.symbols != self.config.symbols
             or (cfg.ema_symbol, cfg.ema_fast, cfg.ema_slow)
             != (self.config.ema_symbol, self.config.ema_fast, self.config.ema_slow)
             or cfg.momentum_min_pct != self.config.momentum_min_pct
+            or profile_changed
         )
         old_profile = self.risk.profile.name
 
         self.config = cfg
-        profile = cfg.profile()
-        if profile != self.risk.profile:
+        if profile_changed:
             self.risk.set_profile(profile)
             self.ledger.record_risk_change(old_profile, profile.name)
         self.executor = _make_executor(cfg)
 
         if tf_changed:
             self.engine = Engine(EngineConfig.from_timeframe(get_timeframe(cfg.timeframe)))
-        if strat_changed or bar_changed:
+        rebuilt = strat_changed or bar_changed
+        if rebuilt:
             # Rebuilt cold: mutating periods under a warm indicator series would
             # mix values computed with the old parameters into the new ones.
             self.strategies = build_strategies(cfg)
+            self._seen_rejects.clear()
             self.warm = False
         self.ledger.record_event("config_applied", {
             "timeframe": cfg.timeframe, "bar_s": cfg.bar_seconds(),
             "strategies": list(cfg.strategies), "risk": profile.name,
             "vote_mode": cfg.consensus.vote_mode,
+            # Recorded because it is the difference between a setting that took
+            # effect and one that only changed what the config claims.
+            "strategies_rebuilt": rebuilt,
         })
         return []
 
@@ -279,7 +348,9 @@ class BotRunner:
                 or (core is not None and getattr(core, "is_warm", False))
             )
             out.append(StrategyView(
-                name=strat.name, warm=warm, regimes=regimes, directions=directions
+                name=strat.name, warm=warm, regimes=regimes, directions=directions,
+                sigmas=dict(getattr(strat, "last_sigma", {})),
+                scores=dict(getattr(strat, "last_score", {})),
             ))
         return tuple(out)
 
