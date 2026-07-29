@@ -24,6 +24,18 @@ __all__ = [
 ]
 
 
+def _is_usable_close(c: float) -> bool:
+    """A price this module is willing to compute a return from.
+
+    One spelling, deliberately. This predicate was written out twice — in
+    ``log_returns`` and again in ``RealizedVolSource.sigma`` — for two callers
+    that MUST agree: if the guard drifts, one of them accepts a price the other
+    voids and the disagreement shows up as a sigma computed from a shorter
+    series rather than as an error. A safety predicate gets one definition.
+    """
+    return math.isfinite(c) and c > 0.0
+
+
 def log_returns(closes: Sequence[float]) -> list[float]:
     """Per-bar log returns. Any non-positive OR non-finite price voids the series.
 
@@ -38,7 +50,7 @@ def log_returns(closes: Sequence[float]) -> list[float]:
     """
     if len(closes) < 2:
         return []
-    if any(not (math.isfinite(c) and c > 0.0) for c in closes):
+    if any(not _is_usable_close(c) for c in closes):
         return []
     return [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
 
@@ -100,7 +112,7 @@ class RealizedVolSource:
         # A corrupt print gets its own reason. Otherwise one bad bar in a 500-bar
         # window empties `returns` and reports a history-length problem, pointing
         # the operator at the warmup budget instead of at the tape.
-        if len(closes) >= 2 and any(not (math.isfinite(c) and c > 0.0) for c in closes):
+        if len(closes) >= 2 and any(not _is_usable_close(c) for c in closes):
             self.last_reason = "non-finite or non-positive close in the window"
             return None
         returns = log_returns(closes)
@@ -117,7 +129,7 @@ class RealizedVolSource:
 class ChainVolSource:
     """ATM implied volatility from a live option chain, via crocodile's surface.
 
-    Gated on purpose, and it refuses in three cases:
+    Gated on purpose, and it refuses in five distinct cases:
 
     * **Equities.** This bot's equity tape is ``EquitySimFeed``. Splicing real
       option-implied volatility onto synthetic ~$100 ticks describes a market
@@ -126,7 +138,12 @@ class ChainVolSource:
     * **No catalog.** ``term_structure`` reads an ``options_chain`` channel out of
       a crocodile ``Catalog`` (duckdb) and the bot ingests none, so without one
       configured there is nothing to read.
-    * **Empty or nonsensical chain.** No rows, or a non-positive ATM vol.
+    * **No usable chain.** An empty frame, or one with no ``atm_iv`` column.
+    * **Every expiry already passed.** Expired rows are present, not filtered
+      out, so "nearest" has to mean nearest AHEAD.
+    * **Unusable ATM vol.** Null, non-finite or non-positive. ``nan`` is included
+      because it is the dangerous one: it fails every ordering comparison, so a
+      bare ``<= 0.0`` test would wave it through to a maximum-conviction entry.
 
     In every case it returns ``None`` and sets ``last_reason``. It never falls
     back to realized volatility: a run configured for implied vol that quietly
