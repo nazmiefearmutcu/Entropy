@@ -175,19 +175,44 @@ class ChainVolSource:
         if self.catalog is None:
             self.last_reason = "no options catalog configured"
             return None
+        # Lazy, like the crocodile import in `_term_structure`: importing this
+        # module must stay free, and `entropy.quant`'s default path pure.
+        import polars as pl
+
         now = self._now_ns() if self._now_ns is not None else time.time_ns()
+        # Everything that touches the frame lives inside the `try`. A class whose
+        # whole contract is "return None and say why" must not have a path that
+        # raises instead — a frame missing `days_to_expiry`, or a seam handing back
+        # something that is not a DataFrame at all, becomes a reason like any
+        # other failure rather than an exception escaping into the strategy.
         try:
             frame = self._term_structure(self.catalog, symbol, now)
+            if frame is None or frame.is_empty() or "atm_iv" not in frame.columns:
+                self.last_reason = "no chain rows for this underlying"
+                return None
+            # Expired expiries are in the frame, not filtered out of it. Crocodile
+            # solves an IV per expiry it can see; `_black76_iv` requires
+            # `t_years > 0.0` and returns `None` for one that has passed, and
+            # `iv_surface` appends that row regardless. It arrives with a NEGATIVE
+            # `days_to_expiry` and a null `atm_iv` — so an unfiltered sort takes the
+            # MOST expired contract, and the source refuses permanently with a live
+            # quote sitting one row below. "Nearest" has to mean nearest ahead.
+            live = frame.filter(pl.col("days_to_expiry") > 0.0)
+            if live.is_empty():
+                self.last_reason = "every expiry in the chain has already passed"
+                return None
+            iv = live.sort("days_to_expiry").row(0, named=True).get("atm_iv")
+            # `nan` fails every ordering comparison, so a bare `<= 0.0` waves it
+            # through. Downstream it does not merely propagate: `divergence_score`
+            # ends in `max(-1.0, min(1.0, x))` and `min(1.0, nan)` is `1.0`, so a
+            # `nan` implied vol clamps to a maximum-conviction entry — the exact
+            # inverse of this class's contract. `RealizedVolSource` above already
+            # refuses non-finite values for the same reason.
+            if iv is None or not math.isfinite(float(iv)) or float(iv) <= 0.0:
+                self.last_reason = f"unusable atm iv {iv!r} at the nearest expiry"
+                return None
         except Exception as exc:  # surfaced, never swallowed
             self.last_reason = f"term structure failed: {exc}"
-            return None
-        if frame is None or frame.is_empty() or "atm_iv" not in frame.columns:
-            self.last_reason = "no chain rows for this underlying"
-            return None
-        nearest = frame.sort("days_to_expiry").row(0, named=True)
-        iv = nearest.get("atm_iv")
-        if iv is None or float(iv) <= 0.0:
-            self.last_reason = f"non-positive atm iv {iv!r} at the nearest expiry"
             return None
         self.last_reason = ""
         return float(iv)
