@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from entropy.engine.events import Event
-from entropy.strategy.engine import Bar, EventKind, StrategyConfig
+from entropy.strategy.engine import Bar, EventKind, Position, StrategyConfig
 from entropy.strategy.engine import Strategy as _EmaCore
 
 from ..signals import Signal, SignalAction
@@ -25,6 +25,16 @@ class EmaCrossStrategy:
 
     def warmup(self, bars: Sequence[Bar]) -> None:
         self._core.warmup(bars)
+
+    def on_position_closed(self, symbol: str, reason: str) -> None:
+        """Drop the core's position when something else closed it.
+
+        Without this the core stays convinced it is long after a stop or
+        take-profit and emits a phantom CLOSE on the next cross — which the risk
+        layer rejects as "no open position to exit" — before it can open again.
+        """
+        if symbol == self.symbol:
+            self._core.position = Position()
 
     def on_tick(self, symbol: str, price: float, ts_ns: int,
                 events: Sequence[Event]) -> list[Signal]:

@@ -1,10 +1,10 @@
 # tests/feeds/test_warmup.py
 import pytest
-from stockodile.schema.records import Bar as StkBar
+from crocodile.core.schema.enums import AssetClass
+from crocodile.core.schema.records import OHLCV
 
 from entropy.feeds.warmup import (
     bars_from_ohlcv,
-    bars_from_stockodile,
     warmup_equity_bars,
     warmup_klines,
 )
@@ -13,7 +13,7 @@ from entropy.strategy.engine import Bar
 
 class _O:   # duck-typed OHLCV
     def __init__(self, t: int, o: float, h: float, lo: float, c: float) -> None:
-        self.exchange_ts = t
+        self.source_ts = t
         self.local_ts = t
         self.open = o
         self.high = h
@@ -52,7 +52,7 @@ async def test_warmup_klines_window_spans_limit_times_interval(
             yield  # pragma: no cover — makes this an (empty) async generator
 
     monkeypatch.setattr(
-        "crypcodile.exchanges.binance.backfill.make_live_backfill",
+        "crocodile.crypto.exchanges.binance.backfill.make_live_backfill",
         lambda: FakeBackfill(),
     )
     bars = await warmup_klines("BTCUSDT", interval=interval, limit=200)
@@ -72,7 +72,7 @@ async def test_warmup_klines_unknown_interval_falls_back_to_1m(monkeypatch):
             yield  # pragma: no cover
 
     monkeypatch.setattr(
-        "crypcodile.exchanges.binance.backfill.make_live_backfill",
+        "crocodile.crypto.exchanges.binance.backfill.make_live_backfill",
         lambda: FakeBackfill(),
     )
     await warmup_klines("BTCUSDT", interval="bogus", limit=200)
@@ -80,15 +80,20 @@ async def test_warmup_klines_unknown_interval_falls_back_to_1m(monkeypatch):
     assert end_ns - start_ns == 200 * _MIN_NS  # legacy 1m assumption, no raise
 
 
-# --- stockodile Bar conversion + warmup_equity_bars (no network) --------------
+# --- equity OHLCV conversion + warmup_equity_bars (no network) ----------------
 
 def _stk(ts: int | None, close: float, *, local_ts: int = 7777,
-         interval: str = "15m") -> StkBar:
-    """Fabricated stockodile Bar (source_ts=ts, ns)."""
-    return StkBar(provider="yahoo", symbol="AAPL", symbol_raw="AAPL",
-                  local_ts=local_ts, interval=interval, open=close - 0.5,
-                  high=close + 1.0, low=close - 1.0, close=close, volume=100.0,
-                  source_ts=ts)
+         interval: str = "15m") -> OHLCV:
+    """Fabricated equity OHLCV row (source_ts=ts, ns).
+
+    Both asset classes emit this one record type since the merge, so the same
+    conversion is exercised here against a real equity-shaped record and above
+    against a duck-typed crypto one.
+    """
+    return OHLCV(source="yahoo", symbol="AAPL", symbol_raw="AAPL",
+                 local_ts=local_ts, asset_class=AssetClass.EQUITY, source_ts=ts,
+                 interval=interval, open=close - 0.5,
+                 high=close + 1.0, low=close - 1.0, close=close, volume=100.0)
 
 
 def _patch_fetch(monkeypatch, rows):
@@ -103,15 +108,15 @@ def _patch_fetch(monkeypatch, rows):
     return calls
 
 
-def test_bars_from_stockodile_maps_ohlc_fields():
-    bars = bars_from_stockodile([_stk(10, 2.0), _stk(20, 3.0)])
+def test_bars_from_ohlcv_maps_equity_record_fields():
+    bars = bars_from_ohlcv([_stk(10, 2.0), _stk(20, 3.0)])
     assert bars == [Bar(ts_ns=10, close=2.0, high=3.0, low=1.0),
                     Bar(ts_ns=20, close=3.0, high=4.0, low=2.0)]
 
 
-def test_bars_from_stockodile_prefers_source_ts_falls_back_to_local_ts():
-    bars = bars_from_stockodile([_stk(5, 1.0, local_ts=99),
-                                 _stk(None, 2.0, local_ts=99)])
+def test_bars_from_ohlcv_prefers_source_ts_falls_back_to_local_ts():
+    bars = bars_from_ohlcv([_stk(5, 1.0, local_ts=99),
+                            _stk(None, 2.0, local_ts=99)])
     assert [b.ts_ns for b in bars] == [5, 99]
 
 
@@ -151,8 +156,8 @@ async def test_warmup_equity_bars_wrong_interval_only_raises(monkeypatch):
 
 async def test_warmup_equity_bars_patches_via_lazy_yahoo_client(monkeypatch):
     """The unpatched fetch path instantiates YahooClient lazily — patching the
-    class inside stockodile's module must be enough to avoid the network."""
-    import stockodile.providers.yahoo.client as yclient
+    class inside crocodile's module must be enough to avoid the network."""
+    import crocodile.equity.providers.yahoo.client as yclient
 
     class FakeClient:
         async def fetch_intraday_bars(self, symbol, interval, start=None, end=None):
@@ -186,7 +191,7 @@ class _LifecycleClient:
 
 
 def _patch_client(monkeypatch, behavior):
-    import stockodile.providers.yahoo.client as yclient
+    import crocodile.equity.providers.yahoo.client as yclient
 
     _LifecycleClient.instances = []
     _LifecycleClient._behavior = staticmethod(behavior)  # type: ignore[attr-defined]
@@ -244,7 +249,8 @@ async def test_warmup_equity_bars_4h_fetches_1h_and_aggregates(monkeypatch):
     # 8 consecutive 1h bars = exactly two 4h buckets. Aggregate: h=max, l=min,
     # c=last close, ts=4h bucket boundary.
     rows = [
-        StkBar(provider="yahoo", symbol="SPY", symbol_raw="SPY", local_ts=1,
+        OHLCV(source="yahoo", symbol="SPY", symbol_raw="SPY", local_ts=1,
+              asset_class=AssetClass.EQUITY,
                interval="1h", open=100.0 + i, high=110.0 + i, low=90.0 - i,
                close=101.0 + i, volume=10.0, source_ts=i * _H)
         for i in range(8)
@@ -260,7 +266,8 @@ async def test_warmup_equity_bars_4h_fetches_1h_and_aggregates(monkeypatch):
 async def test_warmup_equity_bars_4h_partial_bucket_and_limit(monkeypatch):
     # 6 bars -> full bucket [0..3] + partial [4,5]; limit keeps the newest.
     rows = [
-        StkBar(provider="yahoo", symbol="SPY", symbol_raw="SPY", local_ts=1,
+        OHLCV(source="yahoo", symbol="SPY", symbol_raw="SPY", local_ts=1,
+              asset_class=AssetClass.EQUITY,
                interval="1h", open=1.0, high=10.0 + i, low=5.0, close=float(i),
                volume=1.0, source_ts=i * _H)
         for i in range(6)
@@ -274,10 +281,12 @@ async def test_warmup_equity_bars_4h_partial_bucket_and_limit(monkeypatch):
 async def test_warmup_equity_bars_4h_filters_on_fetched_interval(monkeypatch):
     # Rows are filtered against the FETCHED interval (1h), not "4h".
     rows = [
-        StkBar(provider="yahoo", symbol="SPY", symbol_raw="SPY", local_ts=1,
+        OHLCV(source="yahoo", symbol="SPY", symbol_raw="SPY", local_ts=1,
+              asset_class=AssetClass.EQUITY,
                interval="1h", open=1.0, high=2.0, low=0.5, close=1.5,
                volume=1.0, source_ts=0),
-        StkBar(provider="yahoo", symbol="SPY", symbol_raw="SPY", local_ts=1,
+        OHLCV(source="yahoo", symbol="SPY", symbol_raw="SPY", local_ts=1,
+              asset_class=AssetClass.EQUITY,
                interval="1d", open=1.0, high=9.0, low=0.1, close=5.0,
                volume=1.0, source_ts=_H),
     ]

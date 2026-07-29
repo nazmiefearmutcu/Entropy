@@ -56,7 +56,7 @@ _FUND_TAGS = {
 async def fetch_fundamentals_google(symbol: str) -> Fundamentals | None:
     """One-shot Google Finance fundamentals fetch (the app's default fetcher).
 
-    Design choice: stockodile's GoogleFinanceProvider only *emits*
+    Design choice: crocodile's GoogleFinanceProvider only *emits*
     fundamentals through its endless polling ``run()`` loop, but
     ``_scrape_symbol()`` is a self-contained single fetch that RETURNS the
     parsed records (``run()`` merely loops over it), so we drive it directly
@@ -68,12 +68,12 @@ async def fetch_fundamentals_google(symbol: str) -> Fundamentals | None:
     Returns None when the page yields no mapped fundamentals; raises on
     network errors (the app's worker downgrades those to a debug log).
     """
-    # Lazy imports: the sim path must never pay for stockodile/aiohttp.
+    # Lazy imports: the sim path must never pay for crocodile's equity stack.
     import aiohttp
-    from stockodile.providers.google_finance.connector import GoogleFinanceProvider
-    from stockodile.reference.registry import InstrumentRegistry
-    from stockodile.schema.records import Fundamental as StkFundamental
-    from stockodile.sink.base import MemorySink
+    from crocodile.core.schema.records import Fundamental
+    from crocodile.core.sink.memory import MemorySink
+    from crocodile.equity.providers.google_finance.connector import GoogleFinanceProvider
+    from crocodile.equity.reference.registry import InstrumentRegistry
 
     provider = GoogleFinanceProvider(
         [symbol], ["fundamental"], MemorySink(), InstrumentRegistry()
@@ -83,7 +83,7 @@ async def fetch_fundamentals_google(symbol: str) -> Fundamentals | None:
         records = await provider._scrape_symbol(symbol)  # noqa: SLF001
     values: dict[str, float] = {}
     for rec in records:
-        if not isinstance(rec, StkFundamental):
+        if not isinstance(rec, Fundamental):
             continue
         field = _FUND_TAGS.get(rec.tag)
         if field is not None and field not in values:

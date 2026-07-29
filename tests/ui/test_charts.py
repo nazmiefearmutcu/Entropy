@@ -205,3 +205,21 @@ async def test_charts_replot_with_hourly_and_daily_bar_ns():
                 Candle(t=_BASE + i * bar_ns, o=10, h=11, l=9, c=10.5) for i in range(30)
             ]
             volume.bars = [(_BASE + i * bar_ns, float(i)) for i in range(30)]
+
+
+def test_axis_format_tier_keys_on_the_whole_span_not_the_bar():
+    """chart_bars is a setting now, so the tier cannot assume 120 bars.
+
+    400 five-minute bars span 33 hours and cross a midnight, which "H:M" labels
+    cannot disambiguate — the same trap 120 fifteen-minute bars already had.
+    """
+    from entropy.ui.widgets.charts import _axis_formats
+
+    five_min = 5 * 60 * 1_000_000_000
+    assert _axis_formats(five_min, 120) == ("H:M", "%H:%M")
+    assert _axis_formats(five_min, 400) == ("d/m H:M", "%d/%m %H:%M")
+    # a day-scale bar is date-only whatever the ring size
+    day = 24 * 3_600 * 1_000_000_000
+    assert _axis_formats(day, 5) == ("d/m/Y", "%d/%m/%Y")
+    # degenerate ring sizes must not divide the span away
+    assert _axis_formats(day // 2, 0) == ("H:M", "%H:%M")

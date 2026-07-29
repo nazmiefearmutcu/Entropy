@@ -28,12 +28,22 @@ def format_telemetry(
 class StatusBar(Widget):
     sell_pct = reactive(50.0)
     telemetry = reactive("")
-    hints = reactive("s:Settings  ?:Help  e:Errors  q:Quit")
+    # The chart symbol WAS changeable (/ search, `:chart SYM`, clicking a board
+    # row) but nothing on screen said so, so it read as fixed. Naming the focus
+    # next to the two keys that change it is the whole affordance.
+    #
+    # NOT named `focus`: Widget.focus is the method that moves keyboard focus,
+    # and a reactive of that name silently replaces it with a string.
+    focus_symbol = reactive("")
+    hints = reactive("s:Settings  b:Bot  ^w:Watchlist  ?:Help  e:Errors  q:Quit")
 
     def watch_sell_pct(self, *_: object) -> None:
         self.refresh()
 
     def watch_telemetry(self, *_: object) -> None:
+        self.refresh()
+
+    def watch_focus_symbol(self, *_: object) -> None:
         self.refresh()
 
     def render(self) -> Text:
@@ -43,7 +53,8 @@ class StatusBar(Widget):
         success = self.app.theme_variables.get("success", "#26d626")
         error = self.app.theme_variables.get("error", "#ff3b3b")
         foreground = self.app.theme_variables.get("foreground", "#c8c8c8")
-        
+        accent = self.app.theme_variables.get("accent", "#e6c200")
+
         # dual split bar: red sell fill grows left, green buy fill grows right
         sell_bar = fill_cells(sp / 100.0, _BAR_HALF)[::-1]
         buy_bar = fill_cells(bp / 100.0, _BAR_HALF)
@@ -53,6 +64,9 @@ class StatusBar(Widget):
         t.append("▏", style="#444444")
         t.append(buy_bar, style=success)
         t.append(f" B {bp:.0f}%   ", style=f"bold {success}")
+        if self.focus_symbol:
+            t.append(f"FOCUS {self.focus_symbol}", style=f"bold {accent}")
+            t.append(" (/ search · : cmd)   ", style="#7a7a7a")
         t.append(self.telemetry + "   ", style=foreground)
         t.append(self.hints, style="#7a7a7a")
         return t

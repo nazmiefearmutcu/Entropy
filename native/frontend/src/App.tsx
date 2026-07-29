@@ -1,77 +1,194 @@
-import { useEffect, useState } from 'react'
-import { StreamClient, postCommand } from './ws'
-import { setSnap, setConnected, useSnap, useConnected } from './store'
-import { Header } from './panes/Header'
-import { Breadth } from './panes/Breadth'
-import { Ticker } from './panes/Ticker'
-import { ScannerBoards } from './panes/ScannerBoards'
-import { Watchlist } from './panes/Watchlist'
-import { FocusChart } from './panes/FocusChart'
-import { QuotePanel } from './panes/QuotePanel'
-import { DepthLadder } from './panes/DepthLadder'
+import { useCallback, useEffect, useState } from 'react'
+import { getMeta, getSettings, postCommand, setFocus } from './api'
+import { mockEnabled, startMock } from './mock'
+import { PortContext, resolvePort } from './port'
+import { setConfig, setConnected, setSnap, useConnected, useHasSnapshot } from './store'
+import { reportAck } from './toast'
+import {
+  closePicker,
+  closeSettings,
+  openPicker,
+  openSettings,
+  setCommandOpen,
+  resizeBot,
+  resizeRailLeft,
+  resizeRailRight,
+  toggleBot,
+  useUi,
+} from './ui-state'
+import { StreamClient } from './ws'
+import { Resizer } from './ui/controls'
+import { Toasts } from './ui/Toasts'
+import { BotDock } from './panes/BotDock'
+import { BreadthPanel } from './panes/Breadth'
+import { ChartPanel } from './panes/ChartPanel'
 import { CommandBar } from './panes/CommandBar'
+import { DepthPanel } from './panes/DepthLadder'
+import { QuoteStrip } from './panes/QuotePanel'
+import { ScannerPanel } from './panes/ScannerBoards'
+import { SettingsDrawer } from './panes/SettingsDrawer'
+import { StatusBar } from './panes/StatusBar'
+import { SymbolPicker } from './panes/SymbolPicker'
+import { TickerPanel } from './panes/Ticker'
+import { TopBar } from './panes/TopBar'
+import { WatchlistPanel } from './panes/Watchlist'
 
-declare global {
-  interface Window {
-    __SIDECAR_PORT__?: number
-  }
+function isTyping(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el) return false
+  const tag = el.tagName
+  return (
+    tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true
+  )
 }
 
-function resolvePort(): number {
-  const q = new URLSearchParams(location.search).get('port')
-  if (q) return parseInt(q, 10)
-  return window.__SIDECAR_PORT__ ?? 8000
+function Booting({ port, connected }: { port: number; connected: boolean }) {
+  return (
+    <div className="flex h-screen flex-col items-center justify-center gap-3 bg-base">
+      <div className="flex items-center gap-2">
+        <span className="h-2 w-2 rounded-full bg-accent pulse-dot" />
+        <span className="text-md font-semibold uppercase tracking-mark text-ink">Entropy</span>
+      </div>
+      <p className="text-sm text-ink-dim">
+        {connected ? 'waiting for the first frame…' : `connecting to the sidecar on port ${port}…`}
+      </p>
+      <p className="max-w-[46ch] text-center text-xs leading-relaxed text-ink-mute">
+        The window stays blank until the sidecar streams a snapshot. If this persists, the sidecar
+        did not start — check the console log.
+      </p>
+    </div>
+  )
+}
+
+/** The workspace: scanner rail, chart hero, watchlist rail, bot dock, chrome. */
+function Workspace({ onFocus }: { onFocus: (symbol: string) => void }) {
+  const ui = useUi()
+  return (
+    <div className="flex min-h-0 flex-1 gap-px bg-base">
+      <aside
+        className="flex min-h-0 shrink-0 flex-col gap-px bg-base"
+        style={{ width: ui.railLeft }}
+        aria-label="Scanner"
+      >
+        <BreadthPanel />
+        <ScannerPanel onFocus={onFocus} />
+        <TickerPanel onFocus={onFocus} />
+      </aside>
+
+      <Resizer axis="x" label="Resize scanner rail" onDrag={resizeRailLeft} />
+
+      <main className="flex min-w-0 flex-1 flex-col gap-px bg-base" aria-label="Chart">
+        <ChartPanel />
+        <QuoteStrip />
+      </main>
+
+      <Resizer axis="x" label="Resize watchlist rail" onDrag={resizeRailRight} />
+
+      <aside
+        className="flex min-h-0 shrink-0 flex-col gap-px bg-base"
+        style={{ width: ui.railRight }}
+        aria-label="Watchlist and depth"
+      >
+        <WatchlistPanel onFocus={onFocus} />
+        <DepthPanel />
+      </aside>
+    </div>
+  )
 }
 
 export default function App() {
   const [port] = useState(resolvePort)
-  useEffect(() => {
-    const c = new StreamClient(port, { onSnapshot: setSnap, onStatus: setConnected })
-    c.connect()
-    return () => c.stop()
-  }, [port])
-  const s = useSnap()
+  const ui = useUi()
   const connected = useConnected()
-  const cmd = (verb: string, arg: string) => {
-    void postCommand(port, verb, arg)
-  }
+  const ready = useHasSnapshot()
 
-  if (!s) return <div className="p-4 text-neutral-500">connecting to sidecar on :{port}…</div>
-  return (
-    <div className="h-screen flex flex-col">
-      <Header
-        marketStatus={s.market_status}
-        source={s.source}
-        clock={new Date().toLocaleTimeString()}
-        indices={[]}
+  useEffect(() => {
+    if (mockEnabled()) return startMock()
+    const client = new StreamClient(port, {
+      onSnapshot: setSnap,
+      onStatus: setConnected,
+      onError: (m) => setConfig({ error: m }),
+    })
+    client.connect()
+    return () => client.stop()
+  }, [port])
+
+  useEffect(() => {
+    if (mockEnabled()) return
+    getMeta(port)
+      .then((meta) => setConfig({ meta }))
+      .catch((e: unknown) =>
+        setConfig({ error: e instanceof Error ? e.message : String(e) }),
+      )
+    getSettings(port)
+      .then((settings) => setConfig({ settings }))
+      .catch(() => undefined)
+  }, [port])
+
+  const focusSymbol = useCallback(
+    (symbol: string) => {
+      void setFocus(port, symbol).then((ack) => reportAck(ack))
+    },
+    [port],
+  )
+
+  const runCommand = useCallback(
+    (verb: string, arg: string) => {
+      void postCommand(port, verb, arg).then((ack) =>
+        reportAck(ack, ack.ok ? ack.message || `${verb} ${arg}`.trim() : undefined),
+      )
+    },
+    [port],
+  )
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const meta = e.metaKey || e.ctrlKey
+      if (meta && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        openPicker('focus')
+      } else if (meta && e.key === ',') {
+        e.preventDefault()
+        openSettings('general')
+      } else if (meta && e.key.toLowerCase() === 'b') {
+        e.preventDefault()
+        toggleBot()
+      } else if (e.key === ':' && !isTyping(e.target)) {
+        e.preventDefault()
+        setCommandOpen(true)
+      } else if (e.key === 'Escape') {
+        setCommandOpen(false)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const body = ready ? (
+    <>
+      <TopBar />
+      <Workspace onFocus={focusSymbol} />
+      <Resizer axis="y" label="Resize bot panel" onDrag={resizeBot} />
+      <BotDock />
+      <CommandBar
+        open={ui.command}
+        onClose={() => setCommandOpen(false)}
+        onSubmit={runCommand}
       />
-      <div className="flex-1 grid grid-cols-[160px_1fr_280px] gap-2 p-2 min-h-0">
-        <div className="flex flex-col gap-2 min-h-0">
-          <Breadth buyPct={s.buy_pct} sellPct={s.sell_pct} rawHz={s.raw_hz} accel={s.accel} />
-          <Ticker ticker={s.ticker} />
-        </div>
-        <ScannerBoards highs={s.new_highs} lows={s.new_lows} onFocus={(sym) => cmd('chart', sym)} />
-        <div className="flex flex-col gap-2 min-h-0">
-          <FocusChart candles={s.focus.candles} />
-          <QuotePanel
-            symbol={s.focus.symbol}
-            asset={s.focus.asset}
-            last={s.focus.last}
-            pct={s.focus.pct}
-            hi={s.focus.hi}
-            lo={s.focus.lo}
-            fundamentals={s.focus.fundamentals}
-          />
-          <DepthLadder symbol={s.focus.symbol} view={s.focus.depth} />
-          <Watchlist rows={s.watchlist} />
-        </div>
+      <StatusBar />
+    </>
+  ) : (
+    <Booting port={port} connected={connected} />
+  )
+
+  return (
+    <PortContext.Provider value={port}>
+      <div className="flex h-screen flex-col gap-px overflow-hidden bg-base">
+        {body}
+        {ui.picker && <SymbolPicker mode={ui.picker} onClose={closePicker} />}
+        {ui.settings && <SettingsDrawer tab={ui.settings} onClose={closeSettings} />}
+        <Toasts />
       </div>
-      {!connected && (
-        <div className="text-center text-amber-500 text-xs py-1 border-t border-neutral-800">
-          reconnecting…
-        </div>
-      )}
-      <CommandBar onSubmit={cmd} />
-    </div>
+    </PortContext.Provider>
   )
 }

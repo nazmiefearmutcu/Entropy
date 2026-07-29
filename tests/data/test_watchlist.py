@@ -8,17 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from entropy.data.universe import SymbolInfo
+from entropy.data.universe import make_symbol_info
 from entropy.data.watchlist import Watchlist
 
-AAPL = SymbolInfo(symbol="AAPL", name="Apple Inc.", asset_class="equity", venue="us")
-MSFT = SymbolInfo(symbol="MSFT", name="Microsoft Corp", asset_class="equity", venue="us")
-BTC = SymbolInfo(
-    symbol="binance-spot:BTCUSDT",
-    name="Bitcoin · Binance spot",
-    asset_class="crypto",
-    venue="binance-spot",
-)
+# Built through the same constructor the loader uses: only symbol/name/
+# asset_class/venue are persisted, and ticker/exchange/base/quote are derived on
+# read, so a fixture that set them by hand would not describe a real round trip.
+AAPL = make_symbol_info("AAPL", "Apple Inc.", "equity", "us")
+MSFT = make_symbol_info("MSFT", "Microsoft Corp", "equity", "us")
+BTC = make_symbol_info("binance-spot:BTCUSDT")
 
 
 def wl(tmp_path: Path) -> Watchlist:

@@ -17,12 +17,14 @@ _LEGACY_BAR_NS = 1_000_000_000
 
 
 # A chart deque holds up to this many bars (CandleAggregator's maxlen), so the
-# rendered span is bar_ns * _CHART_BARS — the tier must key on THAT, not bar_ns:
+# rendered span is bar_ns * bars — the tier must key on THAT, not bar_ns:
 # 15m bars look sub-hour but 120 of them span 30h, wrapping "H:M" past midnight.
+# The count is a setting now (AppConfig.chart_bars), so it is passed in rather
+# than assumed: 400 five-minute bars also cross a midnight.
 _CHART_BARS = 120
 
 
-def _axis_formats(bar_ns: int) -> tuple[str, str]:
+def _axis_formats(bar_ns: int, bars: int = _CHART_BARS) -> tuple[str, str]:
     """Map a bar interval to ``(plotext date_form, strftime format)`` for the x-axis.
 
     plotext's ``date_form()`` takes strftime letters WITHOUT the ``%`` — it inserts
@@ -32,7 +34,7 @@ def _axis_formats(bar_ns: int) -> tuple[str, str]:
     if bar_ns >= _NS_PER_DAY:
         # Day-scale and coarser bars: date only.
         return "d/m/Y", "%d/%m/%Y"
-    if bar_ns * _CHART_BARS > _NS_PER_DAY:
+    if bar_ns * max(1, bars) > _NS_PER_DAY:
         # The full chart span crosses a midnight (15m/1h/4h at 120 bars):
         # prefix the day so labels stay unique for the chart's lifetime.
         return "d/m H:M", "%d/%m %H:%M"
@@ -140,6 +142,8 @@ class PriceChart(PlotextPlot):
     # Bar interval driving the x-axis label format; the app keeps this in sync
     # with the active TimeframeSpec.bar_ns.
     bar_ns: int = _LEGACY_BAR_NS
+    #: How many bars the aggregator retains; only the x-axis format tier reads it.
+    chart_bars: int = _CHART_BARS
     # Chart heading ("SYMBOL · timeframe"); the app keeps this in sync with the
     # focus/strategy symbol and the active timeframe. Empty renders no title.
     title: str = ""
@@ -170,7 +174,7 @@ class PriceChart(PlotextPlot):
         self.plt.clear_data()
         if self.title:
             self.plt.title(self.title)
-        date_form, fmt = _axis_formats(self.bar_ns)
+        date_form, fmt = _axis_formats(self.bar_ns, self.chart_bars)
         self.plt.date_form(date_form)
         ds = [dt.datetime.fromtimestamp(c.t / 1e9).strftime(fmt) for c in self.candles]
         data = {"Open": [c.o for c in self.candles], "Close": [c.c for c in self.candles],
@@ -204,6 +208,8 @@ class PriceChart(PlotextPlot):
 class VolumeChart(PlotextPlot):
     bars: reactive[list[tuple[int, float]]] = reactive(list, always_update=True)
     bar_ns: int = _LEGACY_BAR_NS
+    #: How many bars the aggregator retains; only the x-axis format tier reads it.
+    chart_bars: int = _CHART_BARS
     # Per-bar up/down flags (close >= open) coloring the bars green/red; None
     # keeps the legacy single-series look (bare `bars = ...` callers, or
     # candle data without opens). Set via set_series().
@@ -225,7 +231,7 @@ class VolumeChart(PlotextPlot):
             self.replot()
     def replot(self) -> None:
         self.plt.clear_data()
-        date_form, fmt = _axis_formats(self.bar_ns)
+        date_form, fmt = _axis_formats(self.bar_ns, self.chart_bars)
         self.plt.date_form(date_form)
         ds = [dt.datetime.fromtimestamp(t / 1e9).strftime(fmt) for t, _ in self.bars]
         vols = [v for _, v in self.bars]

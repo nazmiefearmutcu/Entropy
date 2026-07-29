@@ -5,7 +5,7 @@ from entropy.feeds.crypto import _resolve_symbols, build_live
 
 
 def test_build_live_sets_transport():
-    from crypcodile.instruments.registry import InstrumentRegistry
+    from crocodile.crypto.instruments.registry import InstrumentRegistry
     sink = QueueSink()
     reg = InstrumentRegistry()
     c = build_live("coinbase", ["BTC-USD"], ["trade"], sink, reg)
@@ -17,7 +17,7 @@ def test_build_live_sets_transport():
 async def test_resolve_symbols_falls_back_when_discovery_fails():
     """A stale/unreachable list_instruments() must degrade to the whitelist,
     not crash the feed (the live WS feed does not depend on discovery)."""
-    from crypcodile.instruments.registry import InstrumentRegistry
+    from crocodile.crypto.instruments.registry import InstrumentRegistry
 
     class _Broken:
         async def list_instruments(self):
@@ -28,43 +28,60 @@ async def test_resolve_symbols_falls_back_when_discovery_fails():
     assert out == ["BTC-USD", "ETH-USD"]
 
 
-def test_binance_trade_canonical_matches_app_default_even_with_populated_registry():
+@pytest.mark.asyncio
+async def test_binance_trade_canonical_matches_app_default_even_with_populated_registry():
     """Prove the app default crypto_strategy_symbol ("binance-spot:BTCUSDT") is the
     canonical a live Binance spot trade carries — INCLUDING after discover_universe
     populates the registry.
 
-    BinanceConnector.list_instruments() registers Instruments with
-    canonical=f"binance:{sym}" / exchange="binance", which LOOKS like it would
-    diverge from the app default. But the normalizer keys its registry lookup by
-    the connector's venue tag ("binance-spot"), and InstrumentRegistry keys by
-    inst.exchange ("binance") — so the lookup always misses and Trade.symbol falls
-    back to f"{venue}:{raw}" == "binance-spot:BTCUSDT", exactly the app default.
-    If crypcodile ever aligns those keys, Trade.symbol flips to "binance:BTCUSDT"
-    and this test fails — the signal to resolve the configured symbol through the
-    registry instead of relying on the fallback.
+    BinanceConnector.list_instruments() registers Instruments keyed by the
+    connector's venue tag: canonical=f"binance-spot:{sym}" / exchange="binance-spot".
+    The normalizer looks up registry.get_raw(venue, raw) with the same venue tag,
+    so with a populated registry the lookup HITS and Trade.symbol carries the
+    registry canonical — which equals the f"{venue}:{raw}" fallback by design.
+    (Historically the connector registered under bare "binance", every lookup
+    missed, and only the fallback kept this invariant alive.)
+
+    This test drives crocodile's real discovery → registration → lookup pipeline
+    (list_instruments with a canned REST payload, exactly what _resolve_symbols
+    does at startup). If crocodile ever changes the registration keying or the
+    canonical format, this fails loudly — the signal to update
+    AppConfig.crypto_strategy_symbol in the same change.
     """
-    from crypcodile.exchanges.binance.connector import BinanceConnector
-    from crypcodile.exchanges.binance.normalize import normalize_message
-    from crypcodile.instruments.registry import Instrument, InstrumentRegistry, Kind
-    from crypcodile.schema.records import Trade
+    from unittest.mock import patch
+
+    from crocodile.core.schema.records import Trade
+    from crocodile.crypto.exchanges.binance.connector import BinanceConnector
+    from crocodile.crypto.exchanges.binance.normalize import normalize_message
+    from crocodile.crypto.instruments.registry import InstrumentRegistry
 
     from entropy.app import AppConfig
 
     registry = InstrumentRegistry()
-    # Exactly the Instrument list_instruments() builds for BTCUSDT and
-    # _resolve_symbols() then add()s (see crypcodile/exchanges/binance/connector.py:
-    # canonical=f"{EXCHANGE}:{sym}" with EXCHANGE = "binance").
-    registry.add(Instrument(
-        canonical="binance:BTCUSDT", exchange="binance", symbol_raw="BTCUSDT",
-        kind=Kind.SPOT, base="BTC", quote="USDT", tick_size=0.01,
-    ))
     bn = BinanceConnector(symbols=["BTCUSDT"], channels=["trade"], out=QueueSink(),
                           registry=registry, market="spot")
 
-    # The normalizer's registry-hit path never fires: venue tag != inst.exchange.
+    exchange_info = {
+        "symbols": [{
+            "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
+            "status": "TRADING",
+            "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.01"}],
+        }]
+    }
+
+    async def fake_http_get(url, params=None, **kwargs):
+        return exchange_info
+
+    # Same registration path _resolve_symbols() runs at startup.
+    with patch.object(bn, "http_get", new=fake_http_get):
+        for inst in await bn.list_instruments():
+            registry.add(inst)
+
+    # The normalizer's registry lookup now HITS with the venue tag.
     assert bn._venue == "binance-spot"
-    assert registry.get_raw(bn._venue, "BTCUSDT") is None
-    assert registry.by_raw("binance", "BTCUSDT").canonical == "binance:BTCUSDT"
+    hit = registry.get_raw(bn._venue, "BTCUSDT")
+    assert hit is not None
+    assert hit.canonical == "binance-spot:BTCUSDT"
 
     msg = {
         "stream": "btcusdt@aggTrade",
@@ -76,3 +93,34 @@ def test_binance_trade_canonical_matches_app_default_even_with_populated_registr
     assert isinstance(trade, Trade)
     assert trade.symbol == "binance-spot:BTCUSDT"
     assert trade.symbol == AppConfig().crypto_strategy_symbol
+
+
+# --- the ~100 ccxt venues: who owns the socket -------------------------------
+
+def test_build_live_attaches_a_transport_only_when_there_is_a_url():
+    """make_connector falls through to the universal ccxt connector for any venue
+    without a hand-written one. Those drive ccxt.pro's own socket and report an
+    empty ws_url, so handing them AiohttpWsTransport("") would build a client for
+    an address that does not exist."""
+    from crocodile.crypto.instruments.registry import InstrumentRegistry
+
+    from entropy.feeds.bus import QueueSink
+    from entropy.feeds.crypto import build_live
+
+    registry = InstrumentRegistry()
+
+    native = build_live("binance", ["BTCUSDT"], ["trade"], QueueSink(), registry,
+                        market="spot")
+    assert native.ws_url, "hand-written connector should publish a ws_url"
+    assert native.transport is not None, "and the caller must attach the socket"
+
+    ccxt_venue = build_live("kraken", ["BTC/USDT"], ["trade"], QueueSink(), registry)
+    assert ccxt_venue.ws_url == "", "ccxt connector owns its socket"
+    assert ccxt_venue.transport is None, "so no transport should be forced onto it"
+
+
+async def test_venue_symbols_swallows_an_unreachable_venue():
+    """One unreachable exchange must not cost the others their stream."""
+    from entropy.feeds.crypto import venue_symbols
+
+    assert await venue_symbols("not-a-real-exchange-xyz", 5) == []

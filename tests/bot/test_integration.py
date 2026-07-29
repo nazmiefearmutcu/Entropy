@@ -7,21 +7,32 @@ import pytest
 
 from entropy.bot.config import BotConfig
 from entropy.bot.runner import BotRunner
+from entropy.engine.timeframe import get_timeframe
 
 
-def _replay_fixed_sequence(run_dir: Path) -> BotRunner:
+def _replay_fixed_sequence(run_dir: Path, timeframe: str = "1m") -> BotRunner:
     """Drive a FIXED trade sequence through a fresh runner synchronously (no live/async
-    feed). All timestamps sit past the 5s momentum horizon so momentum events fire."""
+    feed).
+
+    Tick spacing is DERIVED from the configured timeframe rather than hardcoded: the
+    bot's engine now runs on ``BotConfig.timeframe`` instead of the old bare-``Engine()``
+    second-scale default, so momentum needs ticks at least ``momentum_horizon_s`` apart
+    (30s on 1m) before ``has_anchor()`` opens, and ``momentum_cooldown_ns`` apart before
+    the next event may fire.
+    """
     cfg = BotConfig(strategies=("momentum_scalper", "ema_cross"), ema_symbol="AAA",
-                    enable_crypto=False, enable_equities=False, risk_profile="extreme")
+                    enable_crypto=False, enable_equities=False, risk_profile="extreme",
+                    timeframe=timeframe)
+    spec = get_timeframe(timeframe)
+    step_ns = max(int(spec.momentum_horizon_s * 1_000_000_000), spec.momentum_cooldown_ns) + \
+        1_000_000_000
     bot = BotRunner(cfg, run_dir=str(run_dir))
     bot.on_trade("AAA", 100.0, 1.0, "buy", 0)   # seed window + momentum anchor
     bot.on_trade("BBB", 50.0, 1.0, "buy", 0)
     prices_a = [101, 103, 102, 105, 104, 107, 99, 95, 101, 110, 108, 112, 107, 115]
     prices_b = [50.5, 51, 49, 52, 48, 53, 47, 54, 46, 55, 45, 56, 44, 57]
-    base = 5_000_000_000
     for i, (pa, pb) in enumerate(zip(prices_a, prices_b, strict=True), start=1):
-        ts = base + i * 1_000_000_000
+        ts = i * step_ns
         bot.on_trade("AAA", float(pa), 1.0, "buy", ts)
         bot.on_trade("BBB", float(pb), 1.0, "sell", ts)
     return bot

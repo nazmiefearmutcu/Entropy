@@ -21,8 +21,14 @@ Screen { background: $background; color: $foreground; layout: vertical; }
 #status  { height: 1; background: $surface; border: none; padding: 0 1; }
 
 /* Settings Screen styling */
+/* The global `Screen { layout: vertical }` above left-aligns a modal's child,
+   which parked the whole settings dialog against the left edge of a wide
+   terminal. Centering happens on the SCREEN, not on the container. */
+SettingsScreen {
+    align: center middle;
+}
 #settings-container {
-    width: 68;
+    width: 72;
     height: 90%;
     max-height: 48;
     background: $panel;
@@ -35,8 +41,19 @@ Screen { background: $background; color: $foreground; layout: vertical; }
     content-align: center middle;
     text-style: bold;
     color: $accent;
-    height: 3;
+    height: 2;
     border-bottom: solid $primary;
+}
+#settings-tabs {
+    height: 1fr;
+}
+#settings-tabs ContentSwitcher {
+    height: 1fr;
+}
+#settings-tabs TabPane {
+    height: 1fr;
+    padding: 0 1;
+    overflow-y: auto;
 }
 #settings-form {
     height: 1fr;
@@ -49,19 +66,57 @@ Screen { background: $background; color: $foreground; layout: vertical; }
     text-style: bold;
     margin-top: 1;
 }
+.settings-note {
+    height: auto;
+    color: #7a7a7a;
+    margin-bottom: 1;
+}
+.settings-warning {
+    height: auto;
+    color: $warning;
+    margin-bottom: 1;
+}
 .settings-row {
     height: 3;
     align: left middle;
-    margin-bottom: 1;
 }
 .settings-row Label {
-    width: 32;
+    width: 30;
+    /* Match the row height so the text centres against a 3-row Switch/Select
+       instead of sitting a line above its own control. */
+    height: 3;
     color: $foreground;
     text-align: left;
     content-align: left middle;
 }
-.settings-row Select, .settings-row Switch, .settings-row Input {
-    width: 26;
+.settings-row Select, .settings-row Input {
+    width: 30;
+}
+.settings-row Switch {
+    width: auto;
+}
+/* Collapsible indents its contents; claw the columns back so the advanced
+   groups keep the same two-column shape instead of clipping their inputs. */
+#settings-tabs Collapsible Contents {
+    padding: 0 0 0 1;
+}
+#settings-tabs Collapsible .settings-row Label {
+    width: 28;
+}
+#settings-tabs Collapsible .settings-row Select,
+#settings-tabs Collapsible .settings-row Input {
+    width: 28;
+}
+#watch-table {
+    height: 10;
+    border: none;
+}
+#watch-buttons {
+    height: 3;
+    align: left middle;
+}
+#watch-buttons Button {
+    margin-right: 2;
 }
 #settings-buttons {
     layout: horizontal;
@@ -74,6 +129,9 @@ Screen { background: $background; color: $foreground; layout: vertical; }
 }
 
 /* Help Screen styling */
+HelpScreen, ErrorScreen, SearchScreen {
+    align: center middle;
+}
 #help-body {
     width: 60;
     height: 12;

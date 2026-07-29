@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from crypcodile.sink.base import Sink
+from crocodile.core.sink.base import Sink
 
 
 class QueueSink(Sink):

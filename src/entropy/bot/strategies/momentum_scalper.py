@@ -21,6 +21,9 @@ class MomentumScalper:
     def warmup(self, bars: Sequence[Bar]) -> None:
         return None
 
+    def on_position_closed(self, symbol: str, reason: str) -> None:
+        return None  # stateless: it never believes it holds anything
+
     def on_tick(self, symbol: str, price: float, ts_ns: int,
                 events: Sequence[Event]) -> list[Signal]:
         if self.symbols is not None and symbol not in self.symbols:

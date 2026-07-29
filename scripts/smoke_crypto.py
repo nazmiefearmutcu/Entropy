@@ -1,7 +1,10 @@
 import asyncio
+
+from crocodile.core.schema.records import Trade
+
 from entropy.feeds.bus import QueueSink
 from entropy.feeds.crypto import start_feed
-from crypcodile.schema.records import Trade
+
 
 async def main():
     sink = QueueSink(maxsize=10_000)

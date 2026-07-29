@@ -18,6 +18,8 @@ from rich.text import Text
 from textual.widgets import DataTable
 from textual.widgets.data_table import ColumnKey
 
+from entropy.data.universe import display_ticker
+
 from .boards import board_colors
 
 # Ring-buffer length backing each row's sparkline (one sample per snapshot).
@@ -69,7 +71,7 @@ def _cells(row: WatchRow, app: Any | None) -> tuple[Text, Text, Text, Text]:
     else:
         pct = Text(f"{row.pct:+.2f}%", style=success if row.pct >= 0 else error,
                    justify="right")
-    return (Text(row.symbol, style="bold"), last, pct, Text(row.spark))
+    return (Text(display_ticker(row.symbol), style="bold"), last, pct, Text(row.spark))
 
 
 class WatchlistBoard(DataTable[Text]):
