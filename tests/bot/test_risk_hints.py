@@ -122,6 +122,37 @@ def test_larger_size_hint_is_clamped_to_the_profile():
     assert decision.order.qty == pytest.approx(profile_pct / 100.0 * pf.equity() / 100.0)
 
 
+def test_a_zero_size_hint_is_not_silently_read_as_absent():
+    """Kills `size_pct or per_trade_pct`: `or` treats 0.0 as absent and would open
+    a full-size position where the correct code refuses to open one at all.
+
+    Reachable through config -- `distribution.risk_hints` computes
+    `size_pct = min(max_size_pct, risk_budget_pct / stop_frac)`, so a
+    `risk_budget_pct` of 0 yields a legitimate 0.0.
+    """
+    risk = make_manager()
+    ts = warm(risk, "SPY", 100.0)
+    pf = Portfolio(100_000.0)
+    decision = risk.evaluate(enter("SPY", size_pct=0.0), pf, 100.0, ts)
+    assert not decision.approved
+    assert "non-positive size" in decision.reason
+
+
+def test_a_mild_over_ask_is_clamped_without_help_from_any_cap():
+    """Kills a dropped `min()` in the band where every downstream cap still passes:
+    3.0% of $100k is $3000, well under the $15k exposure cap and the $10k
+    fat-finger cap, so only the clamp itself can reject the over-ask.
+    """
+    risk = make_manager()
+    ts = warm(risk, "SPY", 100.0)
+    pf = Portfolio(100_000.0)
+    decision = risk.evaluate(enter("SPY", size_pct=3.0), pf, 100.0, ts)
+    assert decision.approved
+    assert decision.order is not None
+    # 25.0, not 30.0 -- the profile's 2.5% wins over the strategy's 3.0% ask.
+    assert decision.order.qty == pytest.approx(2.5 / 100.0 * pf.equity() / 100.0)
+
+
 def test_hints_ride_from_the_signal_onto_the_order():
     risk = make_manager()
     ts = warm(risk, "SPY", 100.0)
