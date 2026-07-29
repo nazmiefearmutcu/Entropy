@@ -110,7 +110,7 @@ class BlackScholesConfig(msgspec.Struct, frozen=True):
     risk_free_rate: float = 0.04
     dividend_yield: float = 0.0
     crypto_carry_apr: float = 0.0
-    crypto_carry_source: str = "constant"  # constant | funding
+    crypto_carry_source: str = "constant"  # constant ("funding" reserved; validate rejects it)
     # --- position lifecycle ----------------------------------------------
     min_hold_bars: int = 3
     cooldown_bars: int = 2
@@ -262,7 +262,18 @@ def validate(cfg: BotConfig) -> list[str]:
         problems.append("black-scholes risk budget must be in (0, 100] percent")
     if b.vol_source not in ("realized", "chain"):
         problems.append(f"unknown black-scholes vol source {b.vol_source!r}")
-    if b.crypto_carry_source not in ("constant", "funding"):
+    if b.crypto_carry_source == "funding":
+        # Refused rather than accepted-and-ignored, for the same reason
+        # `_build_vol_source` refuses to downgrade "chain" to realized vol: a run
+        # whose ledger says "funding" must not have traded on a constant. Live
+        # funding needs a crocodile Catalog the bot does not ingest, so the
+        # option stays reserved until something can actually read it.
+        problems.append(
+            "black-scholes carry source 'funding' is not supported yet: live "
+            "funding needs a crocodile catalog the bot does not ingest, so "
+            "'constant' is the only carry source a run can honestly claim"
+        )
+    elif b.crypto_carry_source != "constant":
         problems.append(
             f"unknown black-scholes carry source {b.crypto_carry_source!r}"
         )

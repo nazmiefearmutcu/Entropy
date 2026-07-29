@@ -14,6 +14,7 @@ from entropy.bot.config import (
 from entropy.bot.runner import BotRunner
 from entropy.bot.strategies.black_scholes import BlackScholesStrategy
 from entropy.quant.conventions import Market
+from entropy.quant.vol import RealizedVolSource
 
 CRYPTO = "binance-spot:BTCUSDT"
 EQUITY = "SPY"
@@ -37,12 +38,22 @@ def test_build_strategies_constructs_it():
 
 
 def test_config_values_reach_the_strategy():
+    """Every value asserted here must differ from the constructor's own default.
+
+    `BlackScholesConfig`'s defaults deliberately mirror
+    `BlackScholesStrategy.__init__`'s, so any kwarg this test does not override
+    with a DIFFERENT value is invisible to mutation: delete its wire in
+    `build_strategies` and nothing goes red.
+    """
     cfg = BotConfig(
         strategies=("black_scholes",),
-        timeframe="1m",
+        # Not 1m: a 1m bar is 60.0s, which is exactly the constructor's default
+        # `bar_s`, so a never-threaded bar length would look correctly wired.
+        timeframe="5m",
         black_scholes=BlackScholesConfig(
             horizon_bars=12, threshold=0.42, barrier_k=1.5,
             risk_free_rate=0.03, dividend_yield=0.01, crypto_carry_apr=0.09,
+            exit_mode="either", vol_lambda=0.88, vol_floor=0.11,
         ),
     )
     strat = build_strategies(cfg)[0]
@@ -50,7 +61,21 @@ def test_config_values_reach_the_strategy():
     assert strat.horizon_bars == 12
     assert strat.threshold == pytest.approx(0.42)
     assert strat.barrier_k == pytest.approx(1.5)
-    assert strat.bar_s == pytest.approx(cfg.bar_seconds())
+    # A literal, not cfg.bar_seconds(): asserting against the same call
+    # build_strategies makes would be a tautology on the derivation even now
+    # that the value differs from the constructor default.
+    assert strat.bar_s == pytest.approx(300.0)
+    assert strat.exit_mode == "either"
+    # One of the two intentional risk locks; RiskManager's independent min() is
+    # the other. The constructor default is 100.0 and the medium profile allows
+    # 2.5, so a dropped max_size_pct kwarg is a 40x sizing error that only the
+    # surviving lock would contain. Belt-and-braces is worthless if either half
+    # can vanish unnoticed.
+    assert strat.max_size_pct == pytest.approx(2.5)
+    # vol_lambda/vol_floor reach the strategy only through _build_vol_source.
+    assert isinstance(strat.vol_source, RealizedVolSource)
+    assert strat.vol_source.lam == pytest.approx(0.88)
+    assert strat.vol_source.floor == pytest.approx(0.11)
     assert strat.convention_for(EQUITY).carry == pytest.approx(0.02)
     assert strat.convention_for(CRYPTO).carry == pytest.approx(0.09)
 
@@ -122,3 +147,24 @@ def test_validate_reports_bad_black_scholes_settings(kwargs, fragment):
 
 def test_a_default_config_validates_clean():
     assert validate(BotConfig(strategies=("black_scholes",))) == []
+
+
+def test_funding_carry_source_is_refused_not_silently_ignored():
+    """Nothing reads `crypto_carry_source`, so accepting "funding" would let a
+    run claim funding carry and trade on a constant. Same contract
+    `_build_vol_source` enforces for "chain": refuse loudly, never downgrade."""
+    cfg = BotConfig(
+        strategies=("black_scholes",),
+        black_scholes=BlackScholesConfig(crypto_carry_source="funding"),
+    )
+    problems = validate(cfg)
+    assert any("carry source" in p for p in problems), problems
+    assert any("not supported yet" in p for p in problems), problems
+
+
+def test_constant_carry_source_validates_clean():
+    cfg = BotConfig(
+        strategies=("black_scholes",),
+        black_scholes=BlackScholesConfig(crypto_carry_source="constant"),
+    )
+    assert validate(cfg) == []
