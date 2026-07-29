@@ -98,6 +98,11 @@ class BlackScholesStrategy:
         if horizon_bars < 1:
             raise ValueError("horizon_bars must be >= 1")
         if not 0.0 < threshold <= 1.0:
+            # The score's mathematical range, which is NOT its reachable one: the
+            # supremum is ~0.5 (see `divergence_score`). `entropy.bot.config`'s
+            # validator enforces the tighter, reachable bound for anything a user
+            # can configure; this looser check only rules out the structurally
+            # impossible so the class stays usable outside the bot's config.
             raise ValueError("threshold must be in (0, 1]")
         if barrier_k <= 0.0:
             raise ValueError("barrier_k must be positive")
@@ -117,6 +122,37 @@ class BlackScholesStrategy:
         self.threshold = threshold
         self.drift_window = drift_window
         self.drift_shrinkage = drift_shrinkage
+        # `drift_cap_sigmas` IS INERT AT THE SHIPPED TRIPLE — stated here rather
+        # than left to be discovered. `shrink_drift` binds when
+        #
+        #     |mean_W - carry/B| / rms  >  cap / (shrinkage * sqrt(H))
+        #
+        # with mean_W the plain mean of the last `drift_window` per-bar log
+        # returns, rms = sqrt(ewma_variance(...)) over the same closes, B the
+        # convention's bars_per_year and H `horizon_bars`. At (0.5, 30, 3.0) the
+        # right-hand side is 3/(0.5*sqrt(30)) = 1.0954 while the left-hand side
+        # is about 1 on any ordinary tape — a perfectly steady exponential trend,
+        # every bar the same log return, scores EXACTLY 1.0, and dispersion only
+        # lowers it. Measured: 0 binds in 40 000 random tapes (best ratio 1.057
+        # with drift at 3x sigma) and 0 bars across every fixture in
+        # tests/bot/test_black_scholes_strategy.py.
+        # SO SHRINKAGE IS THE ONLY LIVE DRIFT GUARD AT DEFAULTS.
+        #
+        # Unreached, not unreachable — and NOT for the tidy Jensen reason. rms >=
+        # |mean_W| is not an identity here: `ewma_variance` is an uncentred second
+        # moment under EXPONENTIAL weights (w_i = lam^n/n + (1-lam)lam^(n-i),
+        # summing to 1) while mean_W weights the last W UNIFORMLY, so the two are
+        # different functionals of different samples and Cauchy-Schwarz across
+        # them gives sup = sqrt(sum_{last W} (1/W^2)/w_i) = 1.264 at lam=0.94.
+        # That supremum is attained only by a flat stretch followed by returns
+        # growing 1/lam per bar; a flat 100 bars then a constant +0.1% ramp for
+        # 20 already reaches 1.187 and does bind. Hand-built paths, not tapes.
+        #
+        # The threshold moves with the horizon, so this is not a permanent
+        # property: raise `horizon_bars` to 100 and it drops to 0.60, where the
+        # cap goes LIVE (84 binds in 20 000 pure-noise tapes). Anyone changing H,
+        # the shrinkage or the cap should re-check cap/(shrinkage*sqrt(H)) against
+        # ~1 rather than assuming the cap stayed inert.
         self.drift_cap_sigmas = drift_cap_sigmas
         self.z_stop, self.z_tp = z_stop, z_tp
         self.stop_floor_pct = stop_floor_pct
@@ -140,7 +176,13 @@ class BlackScholesStrategy:
         self.last_regime: dict[str, _Label] = {}
         self.last_sigma: dict[str, float] = {}
         self.last_score: dict[str, float] = {}
-        #: Why a symbol produced no signal on its last evaluated bar.
+        #: symbol -> why the VOL SOURCE refused, for the bar that refused. Narrow
+        #: on purpose, and narrower than "why there was no signal": the cooldown,
+        #: a sub-threshold score and min_hold all suppress signals silently and
+        #: write nothing here. An entry is cleared the moment a sigma arrives, so
+        #: a reason present here always describes the last evaluated bar — but a
+        #: symbol absent from here has NOT necessarily signalled.
+        #: ``BotRunner._note_rejects`` copies transitions into the snapshot ring.
         self.last_rejects: dict[str, str] = {}
 
     # ---- market resolution ----------------------------------------------

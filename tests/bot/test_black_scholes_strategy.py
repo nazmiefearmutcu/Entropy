@@ -152,13 +152,31 @@ def test_drift_cap_sigmas_reaches_the_shrinkage():
     passed, or passed in the wrong slot — would otherwise be invisible to the
     whole suite.
 
-    It is invisible at the DEFAULT cap because the cap never binds on any fixture
-    in this file. `shrink_drift` limits |mu - carry| to `cap_sigmas * sigma/sqrt(T)`,
-    which scales with sigma, and the 10x bar inflates sigma alongside the drift:
-    at the spike |mu| is 30245 against a limit of 162434, so the cap is 5x away
-    from binding and `drift_cap_sigmas=1e12` reproduces the default byte for byte.
-    Binding needs cap_sigmas below 0.5586, measured. Hence 0.25 here, where the
-    cap does bind and the peak score drops from 0.1278 to 0.0507.
+    It is invisible at the DEFAULT cap because the cap never binds — and the
+    reason is structural, not a property of this fixture. `shrink_drift` binds when
+
+        |mean_W - carry/B| / rms  >  cap_sigmas / (shrinkage * sqrt(H))
+
+    with mean_W the plain mean of the last `drift_window` per-bar log returns,
+    rms = sqrt(ewma_variance(...)) over the same closes, B the bars_per_year and
+    H the horizon. At the shipped (0.5, 30, 3.0) the right side is 1.0954 while
+    the left side is about 1 at most on any ordinary tape: a perfectly steady
+    exponential trend scores EXACTLY 1.0 and dispersion only lowers it. Measured
+    0 binds across 40 000 random tapes and 0 bars on every fixture here — TREND
+    peaks at 1.0000, CHOP at 0.0, VIOLENT at 0.2639.
+
+    The earlier explanation on this test — that the 10x bar inflates sigma
+    alongside the drift — is true of VIOLENT but is not the reason, and it
+    misleads: it suggests the cap would bind on a tape without such a spike.
+    It would not, at this horizon. Conversely a reader raising `horizon_bars`
+    to 100 must NOT assume the cap stays inert; the threshold falls to 0.60 and
+    the cap goes live (84 binds in 20 000 pure-noise tapes).
+
+    On this fixture specifically: at the spike |mu| is 30245 against a limit of
+    162434, so the cap is 5x from binding and `drift_cap_sigmas=1e12` reproduces
+    the default byte for byte. Binding needs cap_sigmas below 0.5586, measured.
+    Hence 0.25 here, where the cap does bind and the peak score drops from
+    0.1278 to 0.0507.
     """
     loose = peak_abs_score(make(drift_cap_sigmas=3.0), CRYPTO, VIOLENT)
     tight = peak_abs_score(make(drift_cap_sigmas=0.25), CRYPTO, VIOLENT)
