@@ -98,7 +98,13 @@ def test_cap_bounds_a_violent_drift():
 def test_capped_drift_cannot_saturate_the_score():
     sigma, t = 0.6, 0.01
     mu = shrink_drift(1e9, 0.0, shrinkage=1.0, sigma=sigma, t_years=t, cap_sigmas=3.0)
-    assert divergence_score(100.0, sigma, t, carry=0.0, drift=mu, barrier_k=1.0) < 0.999
+    # Kills a shrink_drift that stops capping. This compares against the uncapped baseline
+    # rather than a constant: the old `< 0.999` could not fail, because the score is
+    # structurally bounded near +/-1/2 (0.5073 at these parameters), so capped and uncapped
+    # both sat far below the threshold and the cap could be deleted outright unnoticed.
+    assert divergence_score(100.0, sigma, t, carry=0.0, drift=mu, barrier_k=1.0) < divergence_score(
+        100.0, sigma, t, carry=0.0, drift=1e9, barrier_k=1.0
+    )  # 0.4950 capped vs 0.5073 uncapped
 
 
 def test_hints_hold_the_stop_to_target_ratio():

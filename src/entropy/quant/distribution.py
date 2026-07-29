@@ -98,6 +98,17 @@ def divergence_score(
     Returns a number in [-1, 1]. Positive means an up-move is more likely than a
     carry-neutral world would say, net of the down side; zero means the tape adds
     nothing the carry did not already imply.
+
+    That [-1, 1] clamp is defensive and never binds. As ``drift`` runs to +infinity
+    the up leg gains at most ``1 - N(-k+y)`` while the down leg gives up ``N(-k-y)``,
+    where ``y = (carry - sigma**2/2) * sqrt(T) / sigma``, so the score tends to
+    ``(1 - N(-k+y) + N(-k-y)) / 2`` — **exactly 1/2 when carry == sigma**2/2**, which
+    is where symmetric barriers make the two carry-neutral probabilities cancel. Away
+    from that carry the bound is only near a half (measured 0.481 to 0.511 over
+    ``barrier_k`` in [0.5, 2] and carry in [0, 0.5] at sigma=0.6, T=0.01); it climbs
+    toward 1 only as ``y`` runs far negative (0.998 at ``y = -3.6``) and reaches it
+    nowhere. So read a threshold against ~0.5 of reachable scale, not 1.0: a
+    ``threshold`` of 0.15 is roughly 30% of what this score can actually reach, not 15%.
     """
     k_up = barrier(spot, sigma, t_years, barrier_k, up=True)
     k_dn = barrier(spot, sigma, t_years, barrier_k, up=False)
