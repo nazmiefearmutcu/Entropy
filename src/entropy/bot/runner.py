@@ -150,7 +150,10 @@ class BotRunner:
             return
         if order.intent is OrderIntent.OPEN:
             pos_side = PositionSide.LONG if order.side is OrderSide.BUY else PositionSide.SHORT
-            stop_px, tp_px = self.risk.stop_tp_prices(pos_side, fill.price, order.symbol)
+            stop_px, tp_px = self.risk.stop_tp_prices(
+                pos_side, fill.price, order.symbol,
+                stop_pct=order.stop_pct, tp_pct=order.tp_pct,
+            )
             self.portfolio.open(order.symbol, pos_side, fill.qty, fill.price,
                                 stop_px, tp_px, fill.ts_ns, fill.fee)
             self.ledger.record_trade_open(

@@ -92,11 +92,24 @@ class RiskManager:
         return f"o{self._order_seq}"
 
     def stop_tp_prices(
-        self, side: PositionSide, entry_px: float, symbol: str | None = None
+        self,
+        side: PositionSide,
+        entry_px: float,
+        symbol: str | None = None,
+        *,
+        stop_pct: float | None = None,
+        tp_pct: float | None = None,
     ) -> tuple[float, float]:
+        """Stop and take-profit prices for a fill.
+
+        Each distance independently prefers the strategy's hint when it gave one,
+        and otherwise keeps the profile percentage scaled by the window's
+        coefficient of variation. Both paths are clamped by the same ceiling, so
+        a hint can no more produce a negative long stop than the scaling could.
+        """
         p = self.profile
         scale_factor = 1.0
-        if symbol is not None:
+        if symbol is not None and (stop_pct is None or tp_pct is None):
             history = self.ticks_history.get(symbol)
             if history:
                 # Same windowed sample the entry guards use (>= 5 in-window ticks);
@@ -109,8 +122,10 @@ class RiskManager:
                         std = variance ** 0.5
                         scale_factor = 1.0 + std / mean
 
-        stop_loss_pct = min(p.stop_loss_pct * scale_factor, _MAX_STOP_TP_PCT)
-        take_profit_pct = min(p.take_profit_pct * scale_factor, _MAX_STOP_TP_PCT)
+        raw_stop = p.stop_loss_pct * scale_factor if stop_pct is None else stop_pct
+        raw_tp = p.take_profit_pct * scale_factor if tp_pct is None else tp_pct
+        stop_loss_pct = min(raw_stop, _MAX_STOP_TP_PCT)
+        take_profit_pct = min(raw_tp, _MAX_STOP_TP_PCT)
 
         if side is PositionSide.LONG:
             return entry_px * (1 - stop_loss_pct / 100), entry_px * (1 + take_profit_pct / 100)
@@ -183,7 +198,11 @@ class RiskManager:
                 return RiskDecision(False, None, "price deviation limit exceeded")
 
         equity = portfolio.equity()
-        qty = (self.profile.per_trade_pct / 100.0) * equity / mark_px
+        # Tightening only: a strategy may ask for LESS than the profile allows.
+        per_trade_pct = self.profile.per_trade_pct
+        if signal.size_pct is not None:
+            per_trade_pct = min(per_trade_pct, signal.size_pct)
+        qty = (per_trade_pct / 100.0) * equity / mark_px
         if qty <= 0:
             return RiskDecision(False, None, "non-positive size")
 
@@ -202,7 +221,8 @@ class RiskManager:
         side = OrderSide.BUY if signal.action is SignalAction.ENTER_LONG else OrderSide.SELL
         order = Order(id=self._next_id(), symbol=signal.symbol, side=side,
                       intent=OrderIntent.OPEN, qty=qty, price=mark_px, ts_ns=ts_ns,
-                      strategy=signal.strategy)
+                      strategy=signal.strategy,
+                      stop_pct=signal.stop_pct, tp_pct=signal.tp_pct)
 
         if volatility_pct is not None and volatility_pct < 0.30:
             scale_factor = 10.0 if volatility_pct <= 0.0 else min(0.30 / volatility_pct, 10.0)

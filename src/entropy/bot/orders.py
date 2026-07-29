@@ -26,6 +26,11 @@ class Order(msgspec.Struct, frozen=True):
     price: float  # mark price at decision time (paper-fill reference)
     ts_ns: int
     strategy: str
+    #: Carried over from the originating Signal so the runner can hand them to
+    #: `RiskManager.stop_tp_prices` at fill time — the stop is priced off the
+    #: FILL, not off the mark the decision was made at.
+    stop_pct: float | None = None
+    tp_pct: float | None = None
 
 
 class Fill(msgspec.Struct, frozen=True):
