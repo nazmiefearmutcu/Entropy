@@ -91,6 +91,32 @@ def test_stop_hint_is_clamped_at_fifty_percent():
     assert tp == pytest.approx(150.0)
 
 
+def test_a_negative_stop_hint_cannot_invert_the_stop():
+    """A negative hint used to flip the stop through the entry price.
+
+    `_MAX_STOP_TP_PCT` clamped only from above, so `stop_pct=-5` on a LONG priced
+    the stop at `entry * 1.05` — ABOVE the entry, i.e. stopped out by the first
+    favourable tick — and the mirror image on a SHORT. `tp_pct=-5` took profit
+    instantly for the same reason. Latent (no shipped strategy emits a negative)
+    but `stop_pct` is a public optional Signal field, so the floor belongs in the
+    clamp rather than in every future strategy's good manners.
+
+    Asserted against the ENTRY, not against a literal: what makes an inverted
+    stop a bug is the side it lands on.
+    """
+    risk = make_manager()
+    warm(risk, "SPY", 100.0)
+    for side, ok in ((PositionSide.LONG, lambda s, t: s <= 100.0 <= t),
+                     (PositionSide.SHORT, lambda s, t: t <= 100.0 <= s)):
+        stop, tp = risk.stop_tp_prices(side, 100.0, "SPY", stop_pct=-5.0, tp_pct=-5.0)
+        assert ok(stop, tp), (side, stop, tp)
+    # Zero is the floor, so both distances collapse onto the entry rather than
+    # crossing it. Pinning the value keeps a future "clamp to the profile
+    # instead" from passing the side check above while changing the contract.
+    assert risk.stop_tp_prices(PositionSide.LONG, 100.0, "SPY",
+                               stop_pct=-5.0, tp_pct=-5.0) == (100.0, 100.0)
+
+
 def test_one_hint_may_be_given_without_the_other():
     risk = make_manager()
     warm(risk, "SPY", 100.0)

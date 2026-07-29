@@ -104,8 +104,17 @@ class RiskManager:
 
         Each distance independently prefers the strategy's hint when it gave one,
         and otherwise keeps the profile percentage scaled by the window's
-        coefficient of variation. Both paths are clamped by the same ceiling, so
-        a hint can no more produce a negative long stop than the scaling could.
+        coefficient of variation. Both paths are clamped to ``[0, ceiling]``.
+
+        The FLOOR is the half that matters for hints. ``stop_pct`` is a public
+        optional ``Signal`` field any strategy may set, and the clamp used to
+        bound it only from above — so a negative hint survived and flipped the
+        stop through the entry: a long with ``stop_pct=-5`` priced its stop at
+        ``entry * 1.05``, i.e. ABOVE the entry, stopping out on the first
+        favourable tick. ``tp_pct=-5`` did the mirror image and took profit
+        instantly. Zero is the correct floor rather than an error because a
+        strategy asking for no distance gets the stop at the entry, which is
+        merely useless instead of inverted.
         """
         p = self.profile
         scale_factor = 1.0
@@ -124,8 +133,14 @@ class RiskManager:
 
         raw_stop = p.stop_loss_pct * scale_factor if stop_pct is None else stop_pct
         raw_tp = p.take_profit_pct * scale_factor if tp_pct is None else tp_pct
-        stop_loss_pct = min(raw_stop, _MAX_STOP_TP_PCT)
-        take_profit_pct = min(raw_tp, _MAX_STOP_TP_PCT)
+        # Argument ORDER is load-bearing, not style. `max(raw, 0.0)` returns
+        # `raw` unless `0.0 > raw`, so a `nan` raw_stop (an inf tick poisons
+        # scale_factor — see tests/bot/test_adversarial.py) passes through as
+        # `nan` exactly as it did before the floor existed. `max(0.0, raw)` would
+        # instead silently turn that nan into a 0% stop, i.e. an instant stop-out,
+        # which is a behaviour change this clamp has no business making.
+        stop_loss_pct = min(max(raw_stop, 0.0), _MAX_STOP_TP_PCT)
+        take_profit_pct = min(max(raw_tp, 0.0), _MAX_STOP_TP_PCT)
 
         if side is PositionSide.LONG:
             return entry_px * (1 - stop_loss_pct / 100), entry_px * (1 + take_profit_pct / 100)
