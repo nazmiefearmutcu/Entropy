@@ -9,12 +9,19 @@ different estimator would make a run's ledger claim a model it did not use.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
-from typing import Protocol
+import time
+from collections.abc import Callable, Sequence
+from typing import Any, Protocol
 
-from .conventions import MarketConvention
+from .conventions import Market, MarketConvention
 
-__all__ = ["RealizedVolSource", "VolSource", "ewma_variance", "log_returns"]
+__all__ = [
+    "ChainVolSource",
+    "RealizedVolSource",
+    "VolSource",
+    "ewma_variance",
+    "log_returns",
+]
 
 
 def log_returns(closes: Sequence[float]) -> list[float]:
@@ -105,3 +112,82 @@ class RealizedVolSource:
         variance = ewma_variance(returns, self.lam)
         self.last_reason = ""
         return max(math.sqrt(max(variance, 0.0) * conv.bars_per_year), self.floor)
+
+
+class ChainVolSource:
+    """ATM implied volatility from a live option chain, via crocodile's surface.
+
+    Gated on purpose, and it refuses in three cases:
+
+    * **Equities.** This bot's equity tape is ``EquitySimFeed``. Splicing real
+      option-implied volatility onto synthetic ~$100 ticks describes a market
+      those prices did not come from — the same mismatch ``BotRunner.warmup``
+      already refuses for real bars.
+    * **No catalog.** ``term_structure`` reads an ``options_chain`` channel out of
+      a crocodile ``Catalog`` (duckdb) and the bot ingests none, so without one
+      configured there is nothing to read.
+    * **Empty or nonsensical chain.** No rows, or a non-positive ATM vol.
+
+    In every case it returns ``None`` and sets ``last_reason``. It never falls
+    back to realized volatility: a run configured for implied vol that quietly
+    traded on realized vol would leave a ledger naming a model it did not use.
+    """
+
+    name = "chain"
+
+    def __init__(
+        self,
+        catalog: object | None = None,
+        *,
+        now_ns: Callable[[], int] | None = None,
+    ) -> None:
+        self.catalog = catalog
+        self._now_ns = now_ns
+        self.last_reason = ""
+
+    def _term_structure(self, catalog: object, underlying: str, at_ns: int) -> Any:
+        """Seam for tests; the real call goes to crocodile.
+
+        ``model`` is required, not defaulted, and Black-76 is not a guess here:
+        ``sigma`` refuses equities before this is reached, so crypto is the only
+        market that gets this far, and ``black76`` is the model
+        ``MarketConvention.model`` names for it.
+        """
+        from crocodile.core.analytics.volsurface import term_structure
+        from crocodile.crypto.analytics.volsurface import BLACK76
+
+        return term_structure(
+            catalog,  # type: ignore[arg-type]
+            underlying,
+            at_ns,
+            model=BLACK76,
+        )
+
+    def sigma(
+        self, symbol: str, closes: Sequence[float], conv: MarketConvention
+    ) -> float | None:
+        if conv.market is Market.EQUITY:
+            self.last_reason = (
+                "equity tape is the simulator; real implied vol would describe "
+                "a different market"
+            )
+            return None
+        if self.catalog is None:
+            self.last_reason = "no options catalog configured"
+            return None
+        now = self._now_ns() if self._now_ns is not None else time.time_ns()
+        try:
+            frame = self._term_structure(self.catalog, symbol, now)
+        except Exception as exc:  # surfaced, never swallowed
+            self.last_reason = f"term structure failed: {exc}"
+            return None
+        if frame is None or frame.is_empty() or "atm_iv" not in frame.columns:
+            self.last_reason = "no chain rows for this underlying"
+            return None
+        nearest = frame.sort("days_to_expiry").row(0, named=True)
+        iv = nearest.get("atm_iv")
+        if iv is None or float(iv) <= 0.0:
+            self.last_reason = f"non-positive atm iv {iv!r} at the nearest expiry"
+            return None
+        self.last_reason = ""
+        return float(iv)
