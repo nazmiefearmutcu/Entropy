@@ -137,6 +137,37 @@ now re-arms strategies on any close they did not ask for.
 None of this is a claim of live-market edge. The numbers above are synthetic paths with no fees, and
 they measure one thing: which way the strategy points and when it stays out.
 
+### Costs are part of the model
+
+The paper executor used to charge a flat 1 bp fee + 1 bp slippage per side — about 2x (equities) to
+6.5x (crypto spot) cheaper than the largest venues actually charge. `BotConfig.market_costs` now
+carries per-market taker schedules (researched 2026-08-02):
+
+| Market | fee / slippage (bps per side) | Round trip `C` |
+|---|---|---|
+| Binance spot | 10.0 / 3.0 | 26 bps |
+| Binance USDT-M futures | 5.0 / 2.0 | 14 bps |
+| US equities (IBKR tiered) | 2.0 / 2.0 | 8 bps |
+
+The flat `fee_bps`/`slippage_bps` remain as the fallback and the whole per-market table can be reset
+with `MarketCostConfig.flat()`. To fully reproduce pre-cost runs set `cost_aware=False` in
+`BotConfig`: the cost model becomes `None`, every gate is a no-op and only the flat fees apply —
+legacy flat-fee runs then reproduce byte-for-byte.
+
+With a cost model wired in, the strategy and risk layers enforce the standard cost equations:
+round-trip cost `C = 2(fee + slippage)`; breakeven move `m* = C`; a regime floor
+`mean|bar return| ≥ k·C` plus an expected-move gate `RMS(returns) ≥ k·C/0.798` (`k` =
+`cost_edge_mult`, default 2.0) so a bar too quiet to pay its own round trip is not traded; an exit
+band tightened by a cost buffer (the score must retrace deeper before exiting) so positions are held
+through breakeven noise instead of being churned; and a churn guard in the risk layer rejecting
+entries whose round trip is more than `max_cost_to_stop` (default 0.5) of the stop distance. Position
+sizing stays risk-profile-driven; `costs.fee_adjusted_kelly()` documents the full-Kelly formula for
+anyone who wants to go further.
+
+`entropy calibrate` backtests stay flat-fee by default; pass `market_costs` to `run_backtest` (see
+`tests/bot/test_cost_aware.py`) to measure net-of-cost performance, including the new `costs_paid`
+metric.
+
 ## The native app
 
 Not a rewrite — a second frontend. A Tauri (Rust) shell spawns the Python engine headless as a bundled

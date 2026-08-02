@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from entropy.bot.config import BotConfig
+from entropy.bot.config import BotConfig, MarketCostConfig
 from entropy.bot.orders import Fill, OrderIntent, OrderSide
 from entropy.bot.portfolio import PositionSide
 from entropy.bot.risk.profiles import make_custom
@@ -107,16 +107,24 @@ def run_backtest(
     take_profit_pct: float,
     *,
     threshold: float | None = None,
-    bar_s: float | None = None
+    bar_s: float | None = None,
+    fee_bps: float = 1.0,
+    slippage_bps: float = 1.0,
+    market_costs: MarketCostConfig | None = None,
 ) -> dict[str, Any]:
     """Runs a fast in-memory backtest with specified configuration.
 
     When both ``threshold`` and ``bar_s`` are given, a ``ConsensusStrategy``
     configured with them joins the momentum/EMA pair; omitting both keeps the
-    original two-strategy behaviour byte-for-byte.
+    original two-strategy behaviour byte-for-byte. ``fee_bps``/``slippage_bps``
+    are the flat one-way costs; ``market_costs`` (optional) switches on the
+    per-market venue schedule AND the strategies' cost-aware gates. With
+    ``market_costs=None`` (default) the run is identical to the historical
+    flat-fee behaviour.
     """
     if (threshold is None) != (bar_s is None):
         raise ValueError("threshold and bar_s must be provided together")
+    cost_aware = market_costs is not None
     cfg = BotConfig(
         mode="paper",
         risk_profile="medium",
@@ -127,8 +135,9 @@ def run_backtest(
         ema_slow=slow,
         momentum_min_pct=min_pct,
         starting_cash=100_000.0,
-        fee_bps=1.0,
-        slippage_bps=1.0,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+        market_costs=market_costs or MarketCostConfig.flat(),
         enable_crypto=False,
         enable_equities=False
     )
@@ -140,7 +149,10 @@ def run_backtest(
 
     if threshold is not None and bar_s is not None:
         runner.strategies.append(
-            ConsensusStrategy(symbols=tuple(symbols), bar_s=bar_s, threshold=threshold)
+            ConsensusStrategy(
+                symbols=tuple(symbols), bar_s=bar_s, threshold=threshold,
+                costs=cfg.cost_model() if cost_aware else None,
+            )
         )
     
     # Configure custom risk profile
@@ -173,6 +185,7 @@ def run_backtest(
     # Calculate metrics
     snap = runner.portfolio.snapshot(final_ts)
     total_trades = len(dummy_ledger.fills) // 2  # open and close fill pairs
+    costs_paid = sum(fill.fee for fill, _ in dummy_ledger.fills)
     wins = 0
     losses = 0
     total_profit = 0.0
@@ -229,7 +242,8 @@ def run_backtest(
         "win_rate": win_rate,
         "profit_factor": profit_factor,
         "sharpe": sharpe,
-        "closed_pnls": closed_pnls
+        "closed_pnls": closed_pnls,
+        "costs_paid": costs_paid,
     }
 
 

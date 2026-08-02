@@ -137,7 +137,8 @@ def test_mechanical_exit_rearms_the_strategy(tmp_path: Path):
     take-profit silenced it for the whole move.
     """
     cfg = BotConfig(strategies=("consensus",), enable_crypto=False, enable_equities=False,
-                    timeframe="1m", bar_s=5.0, risk_profile="frosty", warmup=False)
+                    timeframe="1m", bar_s=5.0, risk_profile="frosty", warmup=False,
+                    cost_aware=False)  # legacy mechanics test: no cost gates
     bot = BotRunner(cfg, run_dir=str(tmp_path))
     _smooth_uptrend(bot)
 
@@ -154,7 +155,8 @@ def test_rejected_entry_does_not_leave_a_phantom_position(tmp_path: Path):
     """A risk veto means the trade never happened — the strategy must not go on
     holding an imaginary one."""
     cfg = BotConfig(strategies=("consensus",), enable_crypto=False, enable_equities=False,
-                    timeframe="1m", bar_s=5.0, warmup=False)
+                    timeframe="1m", bar_s=5.0, warmup=False,
+                    cost_aware=False)  # legacy mechanics test: no cost gates
     bot = BotRunner(cfg, run_dir=str(tmp_path))
     bot.risk.trip()  # circuit breaker: every entry is now refused
     _smooth_uptrend(bot)

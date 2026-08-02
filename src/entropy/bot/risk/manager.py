@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import msgspec
 
+from ..costs import CostModel
 from ..orders import Order, OrderIntent, OrderSide
 from ..portfolio import Portfolio, PositionSide, PositionState
 from ..signals import Signal, SignalAction
@@ -31,8 +32,15 @@ class RiskDecision(msgspec.Struct, frozen=True):
 
 
 class RiskManager:
-    def __init__(self, profile: RiskProfile) -> None:
+    def __init__(
+        self,
+        profile: RiskProfile,
+        cost_model: CostModel | None = None,
+        max_cost_to_stop: float = 0.5,
+    ) -> None:
         self.profile = profile
+        self.cost_model = cost_model
+        self.max_cost_to_stop = max_cost_to_stop
         self.halted = False
         self.circuit_tripped = False
         self._cooldown_until: dict[str, int] = {}
@@ -198,6 +206,27 @@ class RiskManager:
         order_size = qty * mark_px
         if order_size > 0.15 * equity or order_size > max(10_000.0, 0.10 * equity):
             return RiskDecision(False, None, "fat-finger limit exceeded")
+
+        # Cost-aware entry gates: once we know the actual position (side + stop
+        # distance) we can check that the trade's structure can beat its own
+        # round-trip cost. Both are no-ops without a cost model, so flat-fee
+        # paper runs behave exactly as before.
+        if self.cost_model is not None:
+            side = (
+                PositionSide.LONG
+                if signal.action is SignalAction.ENTER_LONG
+                else PositionSide.SHORT
+            )
+            stop_px, tp_px = self.stop_tp_prices(side, mark_px, signal.symbol)
+            stop_bps = abs(mark_px - stop_px) / mark_px * 10_000.0
+            tp_bps = abs(tp_px - mark_px) / mark_px * 10_000.0
+            round_trip_bps = self.cost_model.round_trip_bps(signal.symbol)
+            if tp_bps <= round_trip_bps:
+                return RiskDecision(
+                    False, None, "take-profit below round-trip cost"
+                )
+            if stop_bps <= 0.0 or round_trip_bps / stop_bps > self.max_cost_to_stop:
+                return RiskDecision(False, None, "cost-to-stop ratio too high")
 
         side = OrderSide.BUY if signal.action is SignalAction.ENTER_LONG else OrderSide.SELL
         order = Order(id=self._next_id(), symbol=signal.symbol, side=side,

@@ -4,6 +4,7 @@ import msgspec
 
 from entropy.engine.timeframe import TIMEFRAMES, get_timeframe
 
+from .costs import CostModel, MarketClass, MarketCosts
 from .risk.profiles import RiskProfile, get_profile, make_custom
 from .strategies.base import Strategy
 from .strategies.consensus import ConsensusStrategy
@@ -76,6 +77,53 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
         }
 
 
+class MarketCostConfig(msgspec.Struct, frozen=True):
+    """Per-market fee/slippage overrides (bps per side); ``None`` = flat fallback.
+
+    Defaults are the researched 2026-08-02 taker schedules of the largest
+    venues: Binance spot 10.0 bps (7.5 with the BNB discount — not assumed),
+    Binance USDT-M futures 5.0 bps (4.5 with BNB), US equities via
+    Interactive Brokers tiered ~2.0 bps. Slippage is a model input for the
+    liquid symbols the bot feeds on.
+    """
+
+    equity_fee_bps: float | None = 2.0
+    equity_slippage_bps: float | None = 2.0
+    crypto_spot_fee_bps: float | None = 10.0
+    crypto_spot_slippage_bps: float | None = 3.0
+    crypto_futures_fee_bps: float | None = 5.0
+    crypto_futures_slippage_bps: float | None = 2.0
+
+    @classmethod
+    def flat(cls) -> MarketCostConfig:
+        """Every field ``None``: all markets inherit the flat fee/slippage."""
+        return cls(
+            equity_fee_bps=None, equity_slippage_bps=None,
+            crypto_spot_fee_bps=None, crypto_spot_slippage_bps=None,
+            crypto_futures_fee_bps=None, crypto_futures_slippage_bps=None,
+        )
+
+    def as_mapping(self) -> dict[MarketClass, MarketCosts]:
+        """Non-None fields as a :class:`CostModel` market map."""
+        out: dict[MarketClass, MarketCosts] = {}
+        if self.equity_fee_bps is not None or self.equity_slippage_bps is not None:
+            out[MarketClass.EQUITY] = MarketCosts(
+                fee_bps=self.equity_fee_bps,
+                slippage_bps=self.equity_slippage_bps,
+            )
+        if self.crypto_spot_fee_bps is not None or self.crypto_spot_slippage_bps is not None:
+            out[MarketClass.CRYPTO_SPOT] = MarketCosts(
+                fee_bps=self.crypto_spot_fee_bps,
+                slippage_bps=self.crypto_spot_slippage_bps,
+            )
+        if self.crypto_futures_fee_bps is not None or self.crypto_futures_slippage_bps is not None:
+            out[MarketClass.CRYPTO_FUTURES] = MarketCosts(
+                fee_bps=self.crypto_futures_fee_bps,
+                slippage_bps=self.crypto_futures_slippage_bps,
+            )
+        return out
+
+
 class RiskOverrides(msgspec.Struct, frozen=True):
     """Optional per-field overrides applied on top of the named risk preset.
 
@@ -108,8 +156,19 @@ class BotConfig(msgspec.Struct, frozen=True):
     strategies: tuple[str, ...] = ("consensus", "ema_cross")
     symbols: tuple[str, ...] = ()  # () = all symbols from the feed
     starting_cash: float = 100_000.0
+    #: Flat fallback costs; overridden per market by `market_costs`.
     fee_bps: float = 1.0
     slippage_bps: float = 1.0
+    #: Master switch for the cost-aware layer. False = every gate is off and
+    #: only the flat fee/slippage apply — the pre-cost legacy behavior.
+    cost_aware: bool = True
+    #: Per-market fee/slippage overrides (realistic venue schedules by default).
+    market_costs: MarketCostConfig = msgspec.field(default_factory=MarketCostConfig)
+    #: ``k`` in the cost gates ``mean|r| >= k*C`` and ``0.798*sigma >= k*C``.
+    cost_edge_mult: float = 2.0
+    #: Churn red flag: reject entries whose round-trip cost is more than this
+    #: fraction of the stop distance (``C/stop > max_cost_to_stop``).
+    max_cost_to_stop: float = 0.5
     ema_symbol: str = "SPY"  # deterministic sim symbol by default; use "binance-spot:BTCUSDT" live
     ema_fast: int = 9
     ema_slow: int = 21
@@ -149,6 +208,21 @@ class BotConfig(msgspec.Struct, frozen=True):
             return self.bar_s
         return get_timeframe(self.timeframe).bar_ns / 1_000_000_000
 
+    def cost_model(self) -> CostModel | None:
+        """Cost model for the paper executor, strategies and risk layer.
+
+        ``None`` when ``cost_aware`` is off — the exact legacy wiring (gates
+        are no-ops, flat fees apply), so old flat-fee runs reproduce
+        byte-for-byte.
+        """
+        if not self.cost_aware:
+            return None
+        return CostModel(
+            flat_fee_bps=self.fee_bps,
+            flat_slippage_bps=self.slippage_bps,
+            market=self.market_costs.as_mapping(),
+        )
+
 
 def validate(cfg: BotConfig) -> list[str]:
     """Human-readable problems with ``cfg``; an empty list means usable.
@@ -165,6 +239,20 @@ def validate(cfg: BotConfig) -> list[str]:
         problems.append("starting cash must be positive")
     if cfg.fee_bps < 0.0 or cfg.slippage_bps < 0.0:
         problems.append("fee/slippage must be >= 0 bps")
+    mc = cfg.market_costs
+    for label, value in (
+        ("equity fee", mc.equity_fee_bps), ("equity slippage", mc.equity_slippage_bps),
+        ("crypto spot fee", mc.crypto_spot_fee_bps),
+        ("crypto spot slippage", mc.crypto_spot_slippage_bps),
+        ("crypto futures fee", mc.crypto_futures_fee_bps),
+        ("crypto futures slippage", mc.crypto_futures_slippage_bps),
+    ):
+        if value is not None and value < 0.0:
+            problems.append(f"{label} must be >= 0 bps")
+    if cfg.cost_edge_mult <= 0.0:
+        problems.append("cost edge multiplier must be positive")
+    if not 0.0 < cfg.max_cost_to_stop <= 1.0:
+        problems.append("max cost-to-stop must be in (0, 1]")
     if not cfg.strategies:
         problems.append("select at least one strategy")
     for name in cfg.strategies:
@@ -198,6 +286,7 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
     syms = cfg.symbols or None
     bar_s = cfg.bar_seconds()
     c = cfg.consensus
+    costs = cfg.cost_model()
     out: list[Strategy] = []
     for name in cfg.strategies:
         if name == "consensus":
@@ -217,9 +306,11 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
                 exit_mode=c.exit_mode, regime_window=c.regime_window,
                 slope_lookback=c.slope_lookback, regime_tilt=c.regime_tilt,
                 warmup_symbol=cfg.ema_symbol,
+                costs=costs, cost_edge_mult=cfg.cost_edge_mult,
             ))
         elif name == "momentum_scalper":
-            out.append(MomentumScalper(symbols=syms, min_pct=cfg.momentum_min_pct))
+            out.append(MomentumScalper(symbols=syms, min_pct=cfg.momentum_min_pct,
+                                       costs=costs, cost_edge_mult=cfg.cost_edge_mult))
         elif name == "ema_cross":
             out.append(
                 EmaCrossStrategy(symbol=cfg.ema_symbol, fast=cfg.ema_fast, slow=cfg.ema_slow)

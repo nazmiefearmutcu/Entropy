@@ -65,7 +65,10 @@ def _make_executor(cfg: BotConfig) -> ExecutionAdapter:
     if cfg.mode == "live":
         return LiveExecutor(enabled=cfg.live.enabled, acknowledged_risk=cfg.live.acknowledged_risk,
                             api_key=cfg.live.api_key, api_secret=cfg.live.api_secret)
-    return PaperExecutor(fee_bps=cfg.fee_bps, slippage_bps=cfg.slippage_bps)
+    return PaperExecutor(
+        fee_bps=cfg.fee_bps, slippage_bps=cfg.slippage_bps,
+        cost_model=cfg.cost_model(),
+    )
 
 
 #: Ring size for the "what has the bot done lately" feeds the dashboards read.
@@ -89,7 +92,11 @@ class BotRunner:
         # no matter what cadence the strategies were asked to trade on.
         self.engine = Engine(EngineConfig.from_timeframe(get_timeframe(config.timeframe)))
         self.portfolio = Portfolio(config.starting_cash)
-        self.risk = RiskManager(config.profile())
+        self.risk = RiskManager(
+            config.profile(),
+            cost_model=config.cost_model(),
+            max_cost_to_stop=config.max_cost_to_stop,
+        )
         self.executor = _make_executor(config)
         self.strategies = build_strategies(config)
         self.ledger = Ledger(run_dir, mode=config.mode, trade_csv_path=config.trade_csv_path)

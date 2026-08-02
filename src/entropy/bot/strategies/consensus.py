@@ -33,6 +33,7 @@ the original mapping bit-for-bit for reproducing old runs.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from dataclasses import dataclass, field
 from entropy.engine.events import Event
 from entropy.strategy.engine import Bar
 
+from ..costs import E_ABS_MOVE, CostModel
 from ..signals import Signal, SignalAction
 
 _NS_PER_S = 1_000_000_000
@@ -243,6 +245,8 @@ class ConsensusStrategy:
         slope_lookback: int = 5,
         regime_tilt: float = 2.0,
         warmup_symbol: str | None = None,
+        costs: CostModel | None = None,
+        cost_edge_mult: float = 2.0,
     ) -> None:
         if bar_s <= 0.0:
             raise ValueError("bar_s must be positive")
@@ -261,6 +265,8 @@ class ConsensusStrategy:
             raise ValueError("ema_fast must be shorter than ema_slow")
         if macd_fast >= macd_slow:
             raise ValueError("macd_fast must be shorter than macd_slow")
+        if cost_edge_mult <= 0.0:
+            raise ValueError("cost_edge_mult must be positive")
 
         self.symbols = symbols  # None = trade every symbol
         self.bar_s = bar_s
@@ -290,6 +296,11 @@ class ConsensusStrategy:
         self.slope_lookback = max(1, slope_lookback)
         self.regime_tilt = regime_tilt
         self.warmup_symbol = warmup_symbol
+        self.costs = costs
+        self.cost_edge_mult = cost_edge_mult
+        #: Last computed per-bar move magnitude (RMS of returns over the regime
+        #: window), per symbol; reused by the cost-adjusted exit band.
+        self._last_move_rms: dict[str, float] = {}
         # Indicators silently return None until they have enough closes; make the
         # gate honest instead of evaluating bars that can only produce abstentions.
         self.min_bars = max(
@@ -459,6 +470,17 @@ class ConsensusStrategy:
             if st.bars_since_exit < self.cooldown_bars:
                 return []
             if abs(score) >= self.threshold and regime.tradeable:
+                if self.costs is not None:
+                    floor = max(self.move_floor,
+                                self.costs.minimum_move(symbol, self.cost_edge_mult))
+                    # Effective entry floor: regime.tradeable uses the base
+                    # move_floor, so the cost-aware floor is checked explicitly.
+                    if regime.move <= floor:
+                        return []
+                    rms = self._bar_move_rms(closes)
+                    self._last_move_rms[symbol] = rms
+                    if rms < self.costs.sigma_gate(symbol, self.cost_edge_mult):
+                        return []
                 st.direction = 1 if score > 0 else -1
                 st.bars_in_trade = 0
                 action = SignalAction.ENTER_LONG if score > 0 else SignalAction.ENTER_SHORT
@@ -468,7 +490,9 @@ class ConsensusStrategy:
 
         if st.bars_in_trade < self.min_hold_bars:
             return []  # a fresh position rides out its first few bars
-        if not self._should_exit(score, votes, st.direction):
+        if self.costs is not None:
+            self._last_move_rms[symbol] = self._bar_move_rms(closes)
+        if not self._should_exit(score, votes, st.direction, symbol):
             return []
         st.direction = 0
         st.bars_in_trade = 0
@@ -476,11 +500,27 @@ class ConsensusStrategy:
         return [Signal(symbol=symbol, action=SignalAction.EXIT, strength=1.0,
                        reason=reason, ts_ns=ts_ns, strategy=self.name)]
 
-    def _should_exit(self, score: float, votes: Votes, direction: int) -> bool:
+    def _should_exit(self, score: float, votes: Votes, direction: int,
+                     symbol: str | None = None) -> bool:
         """Hysteresis: the score must fall back through ``threshold / 2`` against
         the tracked direction (a hard sign flip crosses it too), and/or the trend
-        block must flip — per ``exit_mode``."""
+        block must flip — per ``exit_mode``.
+
+        With a cost model the band is tightened by a cost buffer so a position
+        is held through breakeven noise instead of being churned: the score
+        must retrace deeper before the exit fires, and the tighter the bar
+        moves are relative to ``k*C`` the deeper the retrace required —
+        ``buffer = min(0.15, k*C / (E_ABS_MOVE*rms))`` is *subtracted* from the
+        half-threshold band.
+        """
         band = self.threshold / 2.0
+        if self.costs is not None and symbol is not None:
+            rms = self._last_move_rms.get(symbol, 0.0)
+            if rms > 0.0:
+                kc = self.costs.minimum_move(symbol, self.cost_edge_mult)
+                band -= min(0.15, kc / (E_ABS_MOVE * rms))
+            else:
+                band -= 0.15
         by_score = (direction > 0 and score < band) or (direction < 0 and score > -band)
         if self.exit_mode == "score":
             return by_score
@@ -489,6 +529,22 @@ class ConsensusStrategy:
         if self.exit_mode == "trend_flip":
             return by_trend
         return by_score or by_trend
+
+    def _bar_move_rms(self, closes: list[float]) -> float:
+        """Per-bar move magnitude (RMS of returns) over the regime window.
+
+        Population std around the mean under-measures exactly the bars this
+        strategy wants to trade — a smooth trend has near-zero dispersion but
+        large per-bar moves. RMS around zero keeps both: in a trend it reads
+        the trend size, in chop it reads the noise size.
+        """
+        n = len(closes)
+        window = min(self.regime_window, n - 1)
+        if window < 2:
+            return 0.0
+        seg = closes[n - window - 1:]
+        rets = [seg[i] / seg[i - 1] - 1.0 for i in range(1, len(seg))]
+        return math.sqrt(sum(r * r for r in rets) / len(rets))
 
     def _regime(self, closes: list[float], ema_slow: Sequence[float | None]) -> Regime:
         """Classify the bar: movement gates entries, efficiency picks the reading."""
