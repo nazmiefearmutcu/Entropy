@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from entropy.bot.config import BotConfig, MarketCostConfig
+from entropy.bot.execution.paper import PaperExecutor
 from entropy.bot.orders import Fill, OrderIntent, OrderSide
 from entropy.bot.portfolio import PositionSide
 from entropy.bot.risk.profiles import make_custom
@@ -111,6 +112,7 @@ def run_backtest(
     fee_bps: float = 1.0,
     slippage_bps: float = 1.0,
     market_costs: MarketCostConfig | None = None,
+    cost_aware: bool | None = None,
 ) -> dict[str, Any]:
     """Runs a fast in-memory backtest with specified configuration.
 
@@ -118,13 +120,16 @@ def run_backtest(
     configured with them joins the momentum/EMA pair; omitting both keeps the
     original two-strategy behaviour byte-for-byte. ``fee_bps``/``slippage_bps``
     are the flat one-way costs; ``market_costs`` (optional) switches on the
-    per-market venue schedule AND the strategies' cost-aware gates. With
-    ``market_costs=None`` (default) the run is identical to the historical
-    flat-fee behaviour.
+    per-market venue schedule. ``cost_aware`` defaults to
+    ``market_costs is not None``, so ``market_costs=None`` (the default) is the
+    historical flat-fee behaviour with every cost gate off; pass
+    ``market_costs=MarketCostConfig()`` (or an explicit ``cost_aware=True``) to
+    enable the strategies' and risk layer's cost-aware gates.
     """
     if (threshold is None) != (bar_s is None):
         raise ValueError("threshold and bar_s must be provided together")
-    cost_aware = market_costs is not None
+    if cost_aware is None:
+        cost_aware = market_costs is not None
     cfg = BotConfig(
         mode="paper",
         risk_profile="medium",
@@ -138,6 +143,7 @@ def run_backtest(
         fee_bps=fee_bps,
         slippage_bps=slippage_bps,
         market_costs=market_costs or MarketCostConfig.flat(),
+        cost_aware=cost_aware,
         enable_crypto=False,
         enable_equities=False
     )
@@ -151,7 +157,7 @@ def run_backtest(
         runner.strategies.append(
             ConsensusStrategy(
                 symbols=tuple(symbols), bar_s=bar_s, threshold=threshold,
-                costs=cfg.cost_model() if cost_aware else None,
+                costs=cfg.cost_model(),
             )
         )
     
@@ -167,25 +173,45 @@ def run_backtest(
         runner.on_trade(tick["symbol"], tick["price"], tick["amount"], tick["side"], tick["ts_ns"])
 
     # Close all remaining open positions at final prices. The close bypasses the
-    # executor, so record an equivalent synthetic CLOSE fill into the dummy ledger:
-    # otherwise these liquidations are counted in final_equity but invisible to
-    # win_rate/profit_factor/sharpe/total_trades (their OPEN fills never pair up).
+    # executor, so replicate its cost math (per-symbol cost model when present,
+    # else the flat fee/slippage) and record an equivalent synthetic CLOSE fill
+    # into the dummy ledger: otherwise these liquidations are counted in
+    # final_equity but invisible to win_rate/profit_factor/sharpe/total_trades
+    # (their OPEN fills never pair up) — and they would pay no costs at all.
     final_ts = ticks[-1]["ts_ns"] if ticks else 0
+    executor = runner.executor
+    assert isinstance(executor, PaperExecutor), "calibration runs in paper mode"
     for symbol in list(runner.portfolio.positions):
         pos = runner.portfolio.positions[symbol]
         mark_px = runner.portfolio.mark_of(symbol)
+        if executor.cost_model is not None:
+            resolved = executor.cost_model.for_symbol(symbol)
+            close_fee_bps = resolved.fee_bps
+            close_slippage_bps = resolved.slippage_bps
+            # for_symbol always resolves every field to a concrete number.
+            assert close_fee_bps is not None and close_slippage_bps is not None
+        else:
+            close_fee_bps = runner.config.fee_bps
+            close_slippage_bps = runner.config.slippage_bps
         close_side = OrderSide.SELL if pos.side is PositionSide.LONG else OrderSide.BUY
+        slip = mark_px * (close_slippage_bps / 10_000.0)
+        fill_px = mark_px - slip if close_side is OrderSide.SELL else mark_px + slip
+        fee = abs(fill_px * pos.qty) * (close_fee_bps / 10_000.0)
         dummy_ledger.record_fill(
             Fill(order_id=f"liq-{symbol}", symbol=symbol, side=close_side, qty=pos.qty,
-                 price=mark_px, fee=0.0, slippage=0.0, ts_ns=final_ts),
+                 price=fill_px, fee=fee, slippage=slip, ts_ns=final_ts),
             OrderIntent.CLOSE,
         )
-        runner.portfolio.close(symbol, mark_px, final_ts, fee=0.0)
+        runner.portfolio.close(symbol, fill_px, final_ts, fee=fee)
 
     # Calculate metrics
     snap = runner.portfolio.snapshot(final_ts)
     total_trades = len(dummy_ledger.fills) // 2  # open and close fill pairs
-    costs_paid = sum(fill.fee for fill, _ in dummy_ledger.fills)
+    # Slippage is charged in price units, so its $ cost is slip * qty; fees are
+    # already in $. Together they are the true execution cost of every fill.
+    costs_paid = sum(
+        fill.fee + fill.slippage * fill.qty for fill, _ in dummy_ledger.fills
+    )
     wins = 0
     losses = 0
     total_profit = 0.0

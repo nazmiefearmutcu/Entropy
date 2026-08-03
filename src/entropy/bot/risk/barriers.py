@@ -95,8 +95,8 @@ def sigma_from_returns(closes: list[float], *, halflife: float | None = None) ->
     lam = 0.5 ** (1.0 / halflife)
     weights = [lam ** (len(rets) - 1 - i) for i in range(len(rets))]
     wsum = sum(weights)
-    mean = sum(w * r for w, r in zip(weights, rets)) / wsum
-    var = sum(w * (r - mean) ** 2 for w, r in zip(weights, rets)) / wsum
+    mean = sum(w * r for w, r in zip(weights, rets, strict=True)) / wsum
+    var = sum(w * (r - mean) ** 2 for w, r in zip(weights, rets, strict=True)) / wsum
     return math.sqrt(var)
 
 

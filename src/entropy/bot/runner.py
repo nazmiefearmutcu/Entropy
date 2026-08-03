@@ -234,6 +234,18 @@ class BotRunner:
             or (cfg.ema_symbol, cfg.ema_fast, cfg.ema_slow)
             != (self.config.ema_symbol, self.config.ema_fast, self.config.ema_slow)
             or cfg.momentum_min_pct != self.config.momentum_min_pct
+            or cfg.cost_aware != self.config.cost_aware
+            or cfg.market_costs != self.config.market_costs
+            or cfg.cost_edge_mult != self.config.cost_edge_mult
+            or cfg.fee_bps != self.config.fee_bps
+            or cfg.slippage_bps != self.config.slippage_bps
+        )
+        risk_cost_changed = (
+            cfg.cost_aware != self.config.cost_aware
+            or cfg.market_costs != self.config.market_costs
+            or cfg.fee_bps != self.config.fee_bps
+            or cfg.slippage_bps != self.config.slippage_bps
+            or cfg.max_cost_to_stop != self.config.max_cost_to_stop
         )
         old_profile = self.risk.profile.name
 
@@ -243,6 +255,11 @@ class BotRunner:
             self.risk.set_profile(profile)
             self.ledger.record_risk_change(old_profile, profile.name)
         self.executor = _make_executor(cfg)
+        if risk_cost_changed:
+            # Swap the risk layer's cost model in place. A full rebuild would
+            # drop cooldown timers, tick history and halt flags; this only
+            # replaces the cost fields so live state survives the hot-apply.
+            self.risk.update_cost_model(cfg.cost_model(), cfg.max_cost_to_stop)
 
         if tf_changed:
             self.engine = Engine(EngineConfig.from_timeframe(get_timeframe(cfg.timeframe)))
@@ -255,6 +272,7 @@ class BotRunner:
             "timeframe": cfg.timeframe, "bar_s": cfg.bar_seconds(),
             "strategies": list(cfg.strategies), "risk": profile.name,
             "vote_mode": cfg.consensus.vote_mode,
+            "cost_aware": cfg.cost_aware, "cost_edge_mult": cfg.cost_edge_mult,
         })
         return []
 

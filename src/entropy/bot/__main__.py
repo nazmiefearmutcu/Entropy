@@ -16,6 +16,18 @@ from .execution.live import LIVE_WARNING
 from .runner import BotRunner
 from .strategies.consensus import VOTE_MODES
 
+#: ``--<dest>`` CLI flags that override a single ``MarketCostConfig`` field.
+#: The dest is the argparse name (dashes -> underscores), the value is the
+#: struct field it feeds.
+MARKET_COST_FLAGS: tuple[tuple[str, str], ...] = (
+    ("spot_fee_bps", "crypto_spot_fee_bps"),
+    ("spot_slippage_bps", "crypto_spot_slippage_bps"),
+    ("futures_fee_bps", "crypto_futures_fee_bps"),
+    ("futures_slippage_bps", "crypto_futures_slippage_bps"),
+    ("equity_fee_bps", "equity_fee_bps"),
+    ("equity_slippage_bps", "equity_slippage_bps"),
+)
+
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="entropy.bot", description="Entropy automatic trading bot")
@@ -45,6 +57,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="consensus vote mapping; 'legacy' is the old trend-blind one")
     ap.add_argument("--no-warmup", action="store_true",
                     help="skip the startup history fetch")
+    ap.add_argument("--cost-aware", dest="cost_aware",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="enable/disable the cost-aware gate layer (default: persisted setting)")
+    ap.add_argument("--cost-edge-mult", type=float, default=None,
+                    help="cost gate multiplier k (default: persisted setting)")
+    ap.add_argument("--max-cost-to-stop", type=float, default=None,
+                    help="max round-trip cost as a fraction of stop distance "
+                         "(default: persisted setting)")
+    for dest, field in MARKET_COST_FLAGS:
+        label = field.replace("_", " ").removesuffix(" bps")
+        ap.add_argument(f"--{dest.replace('_', '-')}", type=float, default=None,
+                        help=f"{label} override in bps (default: persisted setting)")
     ap.add_argument("--ignore-saved", action="store_true",
                     help="start from built-in defaults instead of ~/.entropy/settings.json")
     return ap.parse_args(argv)
@@ -82,6 +106,21 @@ def build_config(ns: argparse.Namespace) -> BotConfig:
         kwargs["consensus"] = msgspec.structs.replace(base.consensus, vote_mode=ns.vote_mode)
     if ns.no_warmup:
         kwargs["warmup"] = False
+    if ns.cost_aware is not None:
+        kwargs["cost_aware"] = ns.cost_aware
+    if ns.cost_edge_mult is not None:
+        kwargs["cost_edge_mult"] = ns.cost_edge_mult
+    if ns.max_cost_to_stop is not None:
+        kwargs["max_cost_to_stop"] = ns.max_cost_to_stop
+    market_cost_changes: dict[str, object] = {}
+    for dest, field in MARKET_COST_FLAGS:
+        value = getattr(ns, dest)
+        if value is not None:
+            market_cost_changes[field] = value
+    if market_cost_changes:
+        kwargs["market_costs"] = msgspec.structs.replace(
+            base.market_costs, **market_cost_changes
+        )
     return msgspec.structs.replace(base, **kwargs)
 
 

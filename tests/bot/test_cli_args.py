@@ -64,3 +64,74 @@ def test_cash_zero_forwarded_to_bot_and_reaches_botconfig(monkeypatch):
     # ...and through the bot's own parser into BotConfig.
     cfg = build_config(bot_parse_args(received))
     assert cfg.starting_cash == 0.0
+
+
+def test_bot_cli_cost_flags_parse_and_apply():
+    """Cost flags parse and override the base config field-by-field."""
+    from entropy.bot.__main__ import build_config
+
+    ns = bot_parse_args([
+        "--no-cost-aware",
+        "--cost-edge-mult", "3",
+        "--max-cost-to-stop", "0.25",
+        "--spot-fee-bps", "7.5",
+        "--spot-slippage-bps", "2.5",
+        "--futures-fee-bps", "4",
+        "--futures-slippage-bps", "1.5",
+        "--equity-fee-bps", "1",
+        "--equity-slippage-bps", "0.5",
+        "--ignore-saved",
+    ])
+    assert ns.cost_aware is False
+    assert ns.cost_edge_mult == 3.0
+    assert ns.max_cost_to_stop == 0.25
+    assert ns.spot_fee_bps == 7.5
+    assert ns.spot_slippage_bps == 2.5
+    assert ns.futures_fee_bps == 4.0
+    assert ns.futures_slippage_bps == 1.5
+    assert ns.equity_fee_bps == 1.0
+    assert ns.equity_slippage_bps == 0.5
+
+    cfg = build_config(ns)
+    assert cfg.cost_aware is False
+    assert cfg.cost_edge_mult == 3.0
+    assert cfg.max_cost_to_stop == 0.25
+    assert cfg.market_costs.crypto_spot_fee_bps == 7.5
+    assert cfg.market_costs.crypto_spot_slippage_bps == 2.5
+    assert cfg.market_costs.crypto_futures_fee_bps == 4.0
+    assert cfg.market_costs.crypto_futures_slippage_bps == 1.5
+    assert cfg.market_costs.equity_fee_bps == 1.0
+    assert cfg.market_costs.equity_slippage_bps == 0.5
+
+
+def test_bot_cli_cost_aware_flag_positive_and_negative():
+    ns = bot_parse_args(["--cost-aware", "--ignore-saved"])
+    assert ns.cost_aware is True
+    ns = bot_parse_args(["--no-cost-aware", "--ignore-saved"])
+    assert ns.cost_aware is False
+
+
+def test_bot_cli_cost_defaults_leave_base_config_untouched():
+    """No cost flags = argparse defaults stay None = base config wins."""
+    from entropy.bot.__main__ import build_config
+    from entropy.bot.config import MarketCostConfig
+
+    ns = bot_parse_args(["--ignore-saved"])
+    assert ns.cost_aware is None
+    assert ns.cost_edge_mult is None
+    assert ns.max_cost_to_stop is None
+    for dest, _field in (
+        ("spot_fee_bps", "crypto_spot_fee_bps"),
+        ("spot_slippage_bps", "crypto_spot_slippage_bps"),
+        ("futures_fee_bps", "crypto_futures_fee_bps"),
+        ("futures_slippage_bps", "crypto_futures_slippage_bps"),
+        ("equity_fee_bps", "equity_fee_bps"),
+        ("equity_slippage_bps", "equity_slippage_bps"),
+    ):
+        assert getattr(ns, dest) is None
+
+    cfg = build_config(ns)
+    assert cfg.cost_aware is True
+    assert cfg.cost_edge_mult == 2.0
+    assert cfg.max_cost_to_stop == 0.5
+    assert cfg.market_costs == MarketCostConfig()

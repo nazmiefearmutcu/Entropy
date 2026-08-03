@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import msgspec
 
 from entropy.engine.timeframe import TIMEFRAMES, get_timeframe
@@ -237,7 +239,9 @@ def validate(cfg: BotConfig) -> list[str]:
         problems.append("bar length must be >= 0 (0 = follow the timeframe)")
     if cfg.starting_cash <= 0.0:
         problems.append("starting cash must be positive")
-    if cfg.fee_bps < 0.0 or cfg.slippage_bps < 0.0:
+    if not math.isfinite(cfg.fee_bps) or not math.isfinite(cfg.slippage_bps):
+        problems.append("fee/slippage must be finite numbers")
+    elif cfg.fee_bps < 0.0 or cfg.slippage_bps < 0.0:
         problems.append("fee/slippage must be >= 0 bps")
     mc = cfg.market_costs
     for label, value in (
@@ -247,11 +251,17 @@ def validate(cfg: BotConfig) -> list[str]:
         ("crypto futures fee", mc.crypto_futures_fee_bps),
         ("crypto futures slippage", mc.crypto_futures_slippage_bps),
     ):
-        if value is not None and value < 0.0:
+        if value is not None and not math.isfinite(value):
+            problems.append(f"{label} must be a finite number")
+        elif value is not None and value < 0.0:
             problems.append(f"{label} must be >= 0 bps")
-    if cfg.cost_edge_mult <= 0.0:
+    if not math.isfinite(cfg.cost_edge_mult):
+        problems.append("cost edge multiplier must be a finite number")
+    elif cfg.cost_edge_mult <= 0.0:
         problems.append("cost edge multiplier must be positive")
-    if not 0.0 < cfg.max_cost_to_stop <= 1.0:
+    if not math.isfinite(cfg.max_cost_to_stop):
+        problems.append("max cost-to-stop must be a finite number")
+    elif not 0.0 < cfg.max_cost_to_stop <= 1.0:
         problems.append("max cost-to-stop must be in (0, 1]")
     if not cfg.strategies:
         problems.append("select at least one strategy")
@@ -261,9 +271,44 @@ def validate(cfg: BotConfig) -> list[str]:
     if not cfg.ema_symbol:
         problems.append("EMA-cross symbol must not be empty")
     try:
-        cfg.profile()
+        profile = cfg.profile()
     except (KeyError, TypeError) as exc:
         problems.append(f"risk profile: {exc}")
+        profile = None
+    if profile is not None:
+        model = cfg.cost_model()
+        if model is not None:
+            # Cost-aware silent death: a stop so tight that the most expensive
+            # active market's round trip exceeds max_cost_to_stop makes the
+            # risk layer reject every entry (e.g. Frosty 0.5% + crypto spot
+            # 26 bps -> 0.52 > 0.5). Surface it before the bot goes quiet.
+            stop_bps = profile.stop_loss_pct * 100.0
+            if stop_bps > 0.0:
+                active: list[tuple[str, MarketClass]] = []
+                if cfg.enable_equities:
+                    active.append(("equities", MarketClass.EQUITY))
+                if cfg.enable_crypto:
+                    active.append(("crypto spot", MarketClass.CRYPTO_SPOT))
+                    active.append(("crypto futures", MarketClass.CRYPTO_FUTURES))
+                for label, cls in active:
+                    costs = model.market.get(cls)
+                    if costs is None:
+                        costs = MarketCosts(
+                            model.flat_fee_bps, model.flat_slippage_bps
+                        )
+                    else:
+                        costs = costs.resolved(
+                            model.flat_fee_bps, model.flat_slippage_bps
+                        )
+                    ratio = costs.round_trip_bps / stop_bps
+                    if ratio > cfg.max_cost_to_stop:
+                        problems.append(
+                            f"{profile.name} stop {profile.stop_loss_pct:g}%: "
+                            f"{label} round trip {costs.round_trip_bps:g} bps is "
+                            f"{ratio:.2f}x the stop distance, above "
+                            f"max_cost_to_stop={cfg.max_cost_to_stop:g} - cost-aware "
+                            "entries would all be rejected"
+                        )
     c = cfg.consensus
     if not 0.0 < c.threshold <= 1.0:
         problems.append("consensus threshold must be in (0, 1]")

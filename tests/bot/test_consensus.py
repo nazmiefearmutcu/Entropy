@@ -19,6 +19,7 @@ import random
 import pytest
 
 from entropy.bot.config import BotConfig, build_strategies
+from entropy.bot.costs import CostModel
 from entropy.bot.signals import SignalAction
 from entropy.bot.strategies.consensus import (
     DEFAULT_WEIGHTS,
@@ -134,6 +135,18 @@ def test_regime_filter_blocks_scaled_down_trend(seed):
     strat = ConsensusStrategy(symbols=("SPY",))
     closes = path_trend(seed, direction=1, drift=0.00015, scale=0.1)
     assert feed_bars(strat, "SPY", closes) == []
+
+
+def test_consensus_sigma_gate_blocks_marginal_volatility():
+    """Red side of the cost sigma gate: per-bar movement clears the k*C move
+    floor but the RMS bar move stays under k*C / E_ABS_MOVE, so the cost-aware
+    strategy must NOT enter while the plain strategy does."""
+    cm = CostModel(flat_fee_bps=10.0, flat_slippage_bps=3.0)  # C=26bps, k*C=52bps
+    closes = path_trend(3, direction=1, drift=0.006)  # ~60 bps/bar
+    plain = ConsensusStrategy(symbols=("SPY",))
+    gated = ConsensusStrategy(symbols=("SPY",), costs=cm)
+    assert [a for _, a in feed_bars(plain, "SPY", closes)] == [SignalAction.ENTER_LONG]
+    assert feed_bars(gated, "SPY", closes) == []
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 7, 11, 42])

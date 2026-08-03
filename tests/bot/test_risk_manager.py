@@ -1,3 +1,4 @@
+from entropy.bot.costs import CostModel
 from entropy.bot.orders import OrderIntent, OrderSide
 from entropy.bot.portfolio import Portfolio, PositionSide
 from entropy.bot.risk.manager import RiskManager
@@ -7,6 +8,10 @@ from entropy.bot.signals import Signal, SignalAction
 
 def _sig(action: SignalAction, symbol: str = "SPY") -> Signal:
     return Signal(symbol=symbol, action=action, strength=1.0, reason="t", ts_ns=1, strategy="s")
+
+
+def _spot_costs() -> CostModel:
+    return CostModel(flat_fee_bps=10.0, flat_slippage_bps=3.0)  # C = 26 bps
 
 
 def test_enter_long_sizes_from_per_trade_pct():
@@ -104,6 +109,80 @@ def test_kill_switch_halts_after_daily_loss():
     assert not d.approved
     assert "halt" in d.reason.lower()
     assert rm.halted
+
+
+def test_take_profit_equal_to_round_trip_is_rejected():
+    """tp_bps <= round_trip_bps is inclusive: a TP exactly at the round-trip
+    cost cannot cover the trade and must be rejected."""
+    rm = RiskManager(make_custom(take_profit_pct=0.26), cost_model=_spot_costs())
+    p = Portfolio(100_000.0)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1)
+    assert not d.approved
+    assert "take-profit below round-trip cost" in d.reason
+
+
+def test_take_profit_just_above_round_trip_is_accepted():
+    """The TP gate boundary is strict: 27 bps > 26 bps round trip passes
+    (the stop still clears max_cost_to_stop)."""
+    rm = RiskManager(make_custom(take_profit_pct=0.27), cost_model=_spot_costs())
+    p = Portfolio(100_000.0)
+    d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1)
+    assert d.approved
+
+
+def test_short_entry_passes_cost_gates():
+    """A sane SHORT structure (1% stop / 2% TP vs 26 bps round trip) is
+    approved through the same cost gates as LONG."""
+    rm = RiskManager(
+        make_custom(stop_loss_pct=1.0, take_profit_pct=2.0), cost_model=_spot_costs()
+    )
+    p = Portfolio(100_000.0)
+    d = rm.evaluate(_sig(SignalAction.ENTER_SHORT), p, mark_px=100.0, ts_ns=1)
+    assert d.approved
+    assert d.order is not None
+    assert d.order.side is OrderSide.SELL
+
+
+def test_short_entry_rejected_by_cost_gates():
+    """A churn SHORT structure (5 bps stop) must be rejected by the
+    cost-to-stop gate, exactly like the LONG path."""
+    rm = RiskManager(
+        make_custom(stop_loss_pct=0.05, take_profit_pct=0.5), cost_model=_spot_costs()
+    )
+    p = Portfolio(100_000.0)
+    d = rm.evaluate(_sig(SignalAction.ENTER_SHORT), p, mark_px=100.0, ts_ns=1)
+    assert not d.approved
+    assert "cost-to-stop ratio too high" in d.reason
+
+
+def test_update_cost_model_swaps_model_and_preserves_state():
+    rm = RiskManager(MEDIUM)
+    rm.update_tick("SPY", 99.5, 1000)
+    rm.update_tick("SPY", 100.5, 1001)
+    rm.halted = True
+    rm._cooldown_until["SPY"] = 9_999_999_999
+    new_model = _spot_costs()
+    rm.update_cost_model(new_model, max_cost_to_stop=0.8)
+    assert rm.cost_model is new_model
+    assert rm.max_cost_to_stop == 0.8
+    assert rm.halted  # kill-switch state survives
+    assert rm.ticks_history["SPY"] == [(1000, 99.5), (1001, 100.5)]
+    assert rm._cooldown_until["SPY"] == 9_999_999_999
+
+
+def test_update_cost_model_applies_new_gates():
+    rm = RiskManager(
+        make_custom(stop_loss_pct=0.05, take_profit_pct=0.5), cost_model=None
+    )
+    p = Portfolio(100_000.0)
+    before = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1)
+    assert before.approved  # no model: cost gates are no-ops
+    rm.update_cost_model(_spot_costs(), max_cost_to_stop=0.5)
+    after = rm.evaluate(
+        _sig(SignalAction.ENTER_LONG), p, mark_px=100.0, ts_ns=1 + 30 * _NS
+    )
+    assert not after.approved
+    assert "cost-to-stop ratio too high" in after.reason
 
 
 def test_exit_allowed_even_when_halted():
@@ -284,4 +363,3 @@ def test_insufficient_window_ticks_skip_deviation_guard():
     p = Portfolio(100_000.0)
     d = rm.evaluate(_sig(SignalAction.ENTER_LONG), p, mark_px=110.0, ts_ns=1004)
     assert d.approved
-

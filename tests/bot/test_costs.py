@@ -27,6 +27,15 @@ def test_classify_symbol():
     assert classify_symbol("binance-spot:BTCUSDT") is MarketClass.CRYPTO_SPOT
     assert classify_symbol("binance-futures:BTCUSDT") is MarketClass.CRYPTO_FUTURES
     assert classify_symbol("futures:ETHUSDT") is MarketClass.CRYPTO_FUTURES
+    assert classify_symbol("coinbase:BTC-USD") is MarketClass.CRYPTO_SPOT
+    assert classify_symbol("coinbase-spot:ETH-USD") is MarketClass.CRYPTO_SPOT
+    assert classify_symbol("crypto:SOL-USD") is MarketClass.CRYPTO_SPOT
+    assert classify_symbol("BTC-USD") is MarketClass.CRYPTO_SPOT
+    assert classify_symbol("ETH-USDT") is MarketClass.CRYPTO_SPOT
+    assert classify_symbol("BTC-USDC") is MarketClass.CRYPTO_SPOT
+    assert classify_symbol("BTC-PERP") is MarketClass.CRYPTO_FUTURES
+    assert classify_symbol("ETH-SWAP") is MarketClass.CRYPTO_FUTURES
+    assert classify_symbol("BTCUSDT_250926") is MarketClass.CRYPTO_FUTURES
     assert classify_symbol("UNKNOWNX") is MarketClass.EQUITY  # cheapest fallback
 
 
@@ -89,6 +98,9 @@ def test_fee_adjusted_kelly():
     assert fee_adjusted_kelly(0.55, 1.5, 0.0014) == pytest.approx(expected)
     # Costs larger than the gross win make the net payoff ratio negative -> 0.
     assert fee_adjusted_kelly(0.8, 1.0, 1.2) == 0.0
+    # Zero/negative net edge clamps to 0 (never a negative fraction).
+    assert fee_adjusted_kelly(0.5, 1.0, 0.0001) == 0.0
+    assert fee_adjusted_kelly(0.4, 1.5, 0.001) == 0.0
     with pytest.raises(ValueError):
         fee_adjusted_kelly(0.0, 1.5, 0.001)
     with pytest.raises(ValueError):

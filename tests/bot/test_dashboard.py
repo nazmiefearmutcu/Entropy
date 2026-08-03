@@ -1,11 +1,11 @@
 import pytest
-from textual.widgets import Select, Static
+from textual.widgets import Input, Label, Select, Static
 
 from entropy.bot.config import BotConfig
 from entropy.bot.runner import BotRunner
 from entropy.bot.ui.app import BotDashboard
 from entropy.bot.ui.confirm import BotSettingsScreen, ConfirmRiskScreen
-from entropy.bot.ui.widgets import ModeBanner, RiskBanner
+from entropy.bot.ui.widgets import ModeBanner, RiskBanner, TradeLog
 
 
 def test_mode_banner_labels_paper_and_live():
@@ -67,6 +67,46 @@ async def test_changing_profile_updates_runner_and_banner(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_apply_risk_change_blocked_by_cost_guard(tmp_path):
+    cfg = BotConfig(risk_profile="medium")
+    bot = BotRunner(cfg, run_dir=str(tmp_path))
+    app = BotDashboard(cfg, runner=bot)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.apply_risk_change("frosty")  # 0.52 > 0.5 with default costs
+        await pilot.pause()
+        assert bot.risk.profile.name == "Medium"
+        rendered = "\n".join(
+            str(line) for line in app.query_one(TradeLog).lines
+        )
+        assert "risk profile not changed" in rendered
+
+
+@pytest.mark.asyncio
+async def test_settings_modal_frosty_change_blocked_by_cost_guard(tmp_path):
+    cfg = BotConfig(risk_profile="medium")
+    bot = BotRunner(cfg, run_dir=str(tmp_path))
+    app = BotDashboard(cfg, runner=bot)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("s")
+        await pilot.pause()
+        select = app.screen.query_one("#risk-select", Select)
+        select.value = "frosty"
+        await pilot.pause()
+        await pilot.click("#btn-save")
+        await pilot.pause()
+        # The full config (profile + cost fields) is validated before the
+        # confirmation prompt, so Frosty with the default cost model is
+        # rejected right here instead of going silent after the switch.
+        assert not isinstance(app.screen, ConfirmRiskScreen)
+        assert isinstance(app.screen, BotSettingsScreen)
+        assert bot.risk.profile.name == "Medium"
+        error = app.screen.query_one("#settings-error", Label)
+        assert "Frosty" in str(error.render())
+
+
+@pytest.mark.asyncio
 async def test_dashboard_settings_modal_flow_no_change(tmp_path):
     cfg = BotConfig(enable_crypto=False, enable_equities=False, risk_profile="frosty")
     bot = BotRunner(cfg, run_dir=str(tmp_path))
@@ -79,7 +119,7 @@ async def test_dashboard_settings_modal_flow_no_change(tmp_path):
         await pilot.pause()
         assert isinstance(app.screen, BotSettingsScreen)
         
-        select = app.screen.query_one(Select)
+        select = app.screen.query_one("#risk-select", Select)
         assert select.value == "frosty"
         
         options = select._options
@@ -108,7 +148,7 @@ async def test_dashboard_settings_modal_flow_with_change_and_confirm(tmp_path):
         await pilot.pause()
         assert isinstance(app.screen, BotSettingsScreen)
         
-        select = app.screen.query_one(Select)
+        select = app.screen.query_one("#risk-select", Select)
         select.value = "extreme"
         await pilot.pause()
         
@@ -140,7 +180,7 @@ async def test_dashboard_settings_modal_flow_with_change_and_cancel(tmp_path):
         await pilot.pause()
         assert isinstance(app.screen, BotSettingsScreen)
         
-        select = app.screen.query_one(Select)
+        select = app.screen.query_one("#risk-select", Select)
         select.value = "extreme"
         await pilot.pause()
         
@@ -175,10 +215,105 @@ async def test_dashboard_keys_1_2_3_removed(tmp_path):
         
         assert bot.risk.profile.name == "Frosty"
         assert not isinstance(app.screen, ConfirmRiskScreen)
-        
+
         await pilot.press("3")
         await pilot.pause()
-        
+
         assert bot.risk.profile.name == "Frosty"
         assert not isinstance(app.screen, ConfirmRiskScreen)
 
+
+@pytest.mark.asyncio
+async def test_dashboard_settings_modal_cost_aware_toggle_applies(tmp_path):
+    cfg = BotConfig(enable_crypto=False, enable_equities=False)
+    bot = BotRunner(cfg, run_dir=str(tmp_path))
+    app = BotDashboard(cfg, runner=bot)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await pilot.press("s")
+        await pilot.pause()
+        assert isinstance(app.screen, BotSettingsScreen)
+
+        cost_select = app.screen.query_one("#cost-aware-select", Select)
+        assert cost_select.value == "on"
+        cost_select.value = "off"
+        await pilot.pause()
+
+        await pilot.click("#btn-save")
+        await pilot.pause()
+
+        assert bot.config.cost_aware is False
+        assert not isinstance(app.screen, BotSettingsScreen)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_settings_modal_cost_numbers_apply(tmp_path):
+    cfg = BotConfig(enable_crypto=False, enable_equities=False)
+    bot = BotRunner(cfg, run_dir=str(tmp_path))
+    app = BotDashboard(cfg, runner=bot)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await pilot.press("s")
+        await pilot.pause()
+        assert isinstance(app.screen, BotSettingsScreen)
+
+        app.screen.query_one("#cost-edge-mult", Input).value = "3.5"
+        app.screen.query_one("#max-cost-to-stop", Input).value = "0.4"
+        await pilot.pause()
+
+        await pilot.click("#btn-save")
+        await pilot.pause()
+
+        assert bot.config.cost_edge_mult == 3.5
+        assert bot.config.max_cost_to_stop == 0.4
+        assert not isinstance(app.screen, BotSettingsScreen)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_settings_modal_invalid_cost_number_not_applied(tmp_path):
+    cfg = BotConfig(enable_crypto=False, enable_equities=False)
+    bot = BotRunner(cfg, run_dir=str(tmp_path))
+    app = BotDashboard(cfg, runner=bot)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await pilot.press("s")
+        await pilot.pause()
+        assert isinstance(app.screen, BotSettingsScreen)
+
+        app.screen.query_one("#cost-edge-mult", Input).value = "not-a-number"
+        await pilot.pause()
+
+        await pilot.click("#btn-save")
+        await pilot.pause()
+
+        assert isinstance(app.screen, BotSettingsScreen)
+        assert bot.config.cost_edge_mult == 2.0
+        error = app.screen.query_one("#settings-error", Label)
+        assert "must be numbers" in str(error.render())
+
+
+@pytest.mark.asyncio
+async def test_dashboard_settings_modal_invalid_cost_value_shows_problem(tmp_path):
+    cfg = BotConfig(enable_crypto=False, enable_equities=False)
+    bot = BotRunner(cfg, run_dir=str(tmp_path))
+    app = BotDashboard(cfg, runner=bot)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await pilot.press("s")
+        await pilot.pause()
+        assert isinstance(app.screen, BotSettingsScreen)
+
+        app.screen.query_one("#max-cost-to-stop", Input).value = "0"
+        await pilot.pause()
+
+        await pilot.click("#btn-save")
+        await pilot.pause()
+
+        assert isinstance(app.screen, BotSettingsScreen)
+        assert bot.config.max_cost_to_stop == 0.5
+        error = app.screen.query_one("#settings-error", Label)
+        assert "max cost-to-stop" in str(error.render())

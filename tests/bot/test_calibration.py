@@ -158,6 +158,52 @@ def test_end_of_run_liquidations_counted_in_trade_stats(monkeypatch) -> None:
     assert res["final_equity"] == pytest.approx(100_000.0 + res["closed_pnls"][0], abs=1.0)
 
 
+def test_end_of_run_liquidation_pays_costs(monkeypatch) -> None:
+    """Synthetic closes of still-open positions must pay real costs: the close
+    fill carries fee + slippage, and costs_paid includes the slippage leg
+    (slip * qty) on top of the fees."""
+    from entropy.bot.orders import Order
+    from entropy.bot.runner import BotRunner
+
+    ledgers: list[DummyLedger] = []
+
+    class RecordingLedger(DummyLedger):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            ledgers.append(self)
+
+    class SeededRunner(BotRunner):
+        def on_trade(self, symbol, price, amount, side, ts_ns):  # type: ignore[override]
+            self.portfolio.mark(symbol, price)
+            if not self.portfolio.positions and not self.ticks:
+                order = Order(id="t1", symbol=symbol, side=OrderSide.BUY,
+                              intent=OrderIntent.OPEN, qty=10.0, price=price,
+                              ts_ns=ts_ns, strategy="test")
+                self._execute(order)
+            self.ticks += 1
+
+    monkeypatch.setattr("entropy.bot.calibration.BotRunner", SeededRunner)
+    monkeypatch.setattr("entropy.bot.calibration.DummyLedger", RecordingLedger)
+    ticks = [
+        {"symbol": "SPY", "price": 100.0, "amount": 1.0, "side": "buy", "ts_ns": 1000},
+        {"symbol": "SPY", "price": 110.0, "amount": 1.0, "side": "buy", "ts_ns": 2000},
+    ]
+    res = run_backtest(ticks, ["SPY"], fast=9, slow=21, min_pct=0.15,
+                       stop_loss_pct=1.0, take_profit_pct=2.0)
+
+    fills = ledgers[0].fills
+    closes = [f for f, intent in fills if intent is OrderIntent.CLOSE]
+    assert len(closes) == 1
+    close = closes[0]
+    assert close.fee > 0.0  # the liquidation pays the venue fee
+    assert close.slippage > 0.0  # ... and adverse slippage (price units)
+    # costs_paid counts fees in $ plus slippage * qty.
+    assert res["costs_paid"] == pytest.approx(
+        sum(f.fee + f.slippage * f.qty for f, _ in fills)
+    )
+    assert res["costs_paid"] > sum(f.fee for f, _ in fills)  # slippage included
+
+
 def test_calibration_overtrading_penalty(monkeypatch) -> None:
     # We mock run_backtest to return specific performance metrics based on the parameters passed
     def mock_run_backtest(ticks, symbols, fast, slow, min_pct, stop_loss_pct, take_profit_pct):
@@ -394,5 +440,4 @@ def test_cli_walk_forward_rejects_invalid(monkeypatch: pytest.MonkeyPatch) -> No
     for bad in ("1", "0", "-1"):
         with pytest.raises(SystemExit):
             main(["calibrate", "--walk-forward", bad])
-
 

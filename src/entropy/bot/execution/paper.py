@@ -27,8 +27,18 @@ class PaperExecutor:
             if self.cost_model is not None
             else None
         )
-        fee_bps = costs.fee_bps if costs is not None else self.fee_bps
-        slippage_bps = costs.slippage_bps if costs is not None else self.slippage_bps
+        # resolved() collapses the model's None fields onto the flat fallback,
+        # so the per-symbol costs are concrete; the extra guard keeps mypy
+        # strict happy without changing the effective values.
+        costs = costs.resolved(self.fee_bps, self.slippage_bps) if costs is not None else None
+        fee_bps = (
+            costs.fee_bps if costs is not None and costs.fee_bps is not None else self.fee_bps
+        )
+        slippage_bps = (
+            costs.slippage_bps
+            if costs is not None and costs.slippage_bps is not None
+            else self.slippage_bps
+        )
         slip = order.price * (slippage_bps / 10_000.0)
         fill_px = order.price + slip if order.side is OrderSide.BUY else order.price - slip
         fee = abs(fill_px * order.qty) * (fee_bps / 10_000.0)

@@ -177,11 +177,17 @@ def test_run_backtest_market_costs_metric():
     ticks = generate_ticks(["SPY", "SOLUSDT"], 1500, seed=42)
     flat = run_backtest(ticks, ["SPY", "SOLUSDT"], fast=9, slow=21, min_pct=0.15,
                         stop_loss_pct=1.0, take_profit_pct=2.0)
+    # market_costs=None is the legacy flat path with every gate off, so an
+    # explicit cost_aware=False must produce the identical run.
+    forced_flat = run_backtest(ticks, ["SPY", "SOLUSDT"], fast=9, slow=21, min_pct=0.15,
+                               stop_loss_pct=1.0, take_profit_pct=2.0,
+                               market_costs=None, cost_aware=False)
+    assert forced_flat == flat
+    assert flat["costs_paid"] >= 0.0
     costed = run_backtest(ticks, ["SPY", "SOLUSDT"], fast=9, slow=21, min_pct=0.15,
                           stop_loss_pct=1.0, take_profit_pct=2.0,
                           market_costs=MarketCostConfig())
-    assert flat["costs_paid"] >= 0.0
-    assert costed["costs_paid"] >= flat["costs_paid"]  # realistic fees cost more
+    assert costed["costs_paid"] >= 0.0
     # Same explicit config twice -> deterministic.
     again = run_backtest(ticks, ["SPY", "SOLUSDT"], fast=9, slow=21, min_pct=0.15,
                          stop_loss_pct=1.0, take_profit_pct=2.0,

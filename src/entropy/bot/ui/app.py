@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import msgspec
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 
-from ..config import BotConfig
+from ..config import BotConfig, validate
 from ..runner import BotRunner
 from .confirm import BotSettingsScreen
 from .widgets import ModeBanner, PnLPanel, PositionsTable, RiskBanner, TradeLog
@@ -59,6 +60,13 @@ class BotDashboard(App[None]):
         self.push_screen(BotSettingsScreen())
 
     def apply_risk_change(self, name: str) -> None:
+        prospective = msgspec.structs.replace(self.runner.config, risk_profile=name)
+        problems = validate(prospective)
+        if problems:
+            self.query_one(TradeLog).log_line(
+                f"risk profile not changed -> {name}: {problems[0]}"
+            )
+            return
         profile = self.runner.set_risk_profile(name)
         self.query_one(RiskBanner).set_profile(profile)
         self.query_one(TradeLog).log_line(f"risk profile changed -> {profile.name}")

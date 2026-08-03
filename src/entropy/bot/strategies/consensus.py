@@ -510,17 +510,21 @@ class ConsensusStrategy:
         is held through breakeven noise instead of being churned: the score
         must retrace deeper before the exit fires, and the tighter the bar
         moves are relative to ``k*C`` the deeper the retrace required —
-        ``buffer = min(0.15, k*C / (E_ABS_MOVE*rms))`` is *subtracted* from the
-        half-threshold band.
+        ``buffer = min(0.3*threshold, k*C / (E_ABS_MOVE*rms))`` is *subtracted*
+        from the half-threshold band, and the band is floored at a small
+        positive fraction of the threshold so a cost-heavy market never
+        collapses into a sign-flip-only exit.
         """
         band = self.threshold / 2.0
         if self.costs is not None and symbol is not None:
             rms = self._last_move_rms.get(symbol, 0.0)
+            cap = 0.3 * self.threshold
             if rms > 0.0:
                 kc = self.costs.minimum_move(symbol, self.cost_edge_mult)
-                band -= min(0.15, kc / (E_ABS_MOVE * rms))
+                band -= min(cap, kc / (E_ABS_MOVE * rms))
             else:
-                band -= 0.15
+                band -= cap
+            band = max(band, self.threshold * 0.05)
         by_score = (direction > 0 and score < band) or (direction < 0 and score > -band)
         if self.exit_mode == "score":
             return by_score

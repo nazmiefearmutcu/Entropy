@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import enum
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -48,6 +49,9 @@ _CRYPTO_QUOTES = (
     "LINK", "DOT", "MATIC", "LTC", "BCH", "TRX", "SHIB", "EUR", "TRY",
 )
 
+#: Dated crypto futures carry a 6-digit expiry suffix (``BTCUSDT_250926``).
+_DATED_FUTURES_RE = re.compile(r"_\d{6}$")
+
 
 class MarketClass(enum.StrEnum):
     """The three cost regimes this bot can trade in."""
@@ -61,19 +65,27 @@ def classify_symbol(symbol: str) -> MarketClass:
     """Map a symbol to its cost regime.
 
     Explicit venue prefixes win (``binance-futures:`` / ``futures:`` /
-    ``binance-spot:`` / ``spot:``); otherwise a known equity universe member
-    is an equity and a crypto-style suffix is spot (the live crypto feed
-    connects to Binance spot). Unknown symbols fall back to the cheapest
-    regime so the model never fabricates costs that block trading.
+    ``binance-spot:`` / ``spot:`` / ``coinbase:`` / ``coinbase-spot:`` /
+    ``crypto:``); otherwise a known equity universe member is an equity and a
+    crypto-style suffix is spot (``SOLUSDT``, Coinbase's ``BTC-USD``). Perp and
+    dated-futures suffixes (``-PERP``, ``-SWAP``, ``BTCUSDT_250926``) are
+    futures. Unknown symbols fall back to the cheapest regime so the model
+    never fabricates costs that block trading.
     """
     low = symbol.lower()
     if low.startswith(("binance-futures", "futures:")):
         return MarketClass.CRYPTO_FUTURES
-    if low.startswith(("binance-spot", "spot:")):
+    if low.startswith(
+        ("binance-spot", "spot:", "coinbase:", "coinbase-spot:", "crypto:")
+    ):
         return MarketClass.CRYPTO_SPOT
     if symbol in UNIVERSE:
         return MarketClass.EQUITY
     up = symbol.upper()
+    if up.endswith(("-PERP", "-SWAP")) or _DATED_FUTURES_RE.search(up) is not None:
+        return MarketClass.CRYPTO_FUTURES
+    if up.endswith(("-USD", "-USDT", "-USDC")):
+        return MarketClass.CRYPTO_SPOT
     if any(up.endswith(q) for q in _CRYPTO_QUOTES):
         return MarketClass.CRYPTO_SPOT
     return MarketClass.EQUITY
@@ -129,8 +141,9 @@ class MarketCosts:
     def cost_to_stop(self, stop_pct: float) -> float:
         """``C / stop_distance`` with ``stop_pct`` in percent — churn red flag.
 
-        A 1% stop is 100 bps, so the ratio is ``round_trip_bps / (stop_pct*100)``;
-        >= 0.3 means the round trip eats more than 30% of the stop distance.
+        A 1% stop is 100 bps, so the ratio is ``round_trip_bps / (stop_pct*100)``.
+        The churn bound is applied by the caller via ``max_cost_to_stop``, not
+        pinned here.
         """
         if stop_pct <= 0.0:
             return math.inf
@@ -188,7 +201,8 @@ def fee_adjusted_kelly(
     """Cost-adjusted Kelly fraction ``f* = (b_net*p - q)/b_net``.
 
     ``b_net = (W - C)/(L + C)`` assumes ``W = payoff_ratio*L`` and charges the
-    round-trip cost ``C`` (fraction of notional) on every trade. A bot should
+    round-trip cost ``C`` (fraction of notional) on every trade. A zero or
+    negative net edge clamps to 0.0 — never a negative fraction. A bot should
     risk a fraction of this (e.g. 0.1-0.25x), never full Kelly.
     """
     if not 0.0 < win_rate < 1.0 or payoff_ratio <= 0.0 or round_trip < 0.0:
@@ -198,4 +212,7 @@ def fee_adjusted_kelly(
     b_net = (win - round_trip) / (loss + round_trip)
     if b_net <= 0.0:
         return 0.0
-    return (b_net * win_rate - (1.0 - win_rate)) / b_net
+    edge = b_net * win_rate - (1.0 - win_rate)
+    if edge <= 0.0:
+        return 0.0
+    return edge / b_net

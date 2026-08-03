@@ -50,6 +50,13 @@ class RiskManager:
     def set_profile(self, profile: RiskProfile) -> None:
         self.profile = profile
 
+    def update_cost_model(
+        self, cost_model: CostModel | None, max_cost_to_stop: float
+    ) -> None:
+        """Swap the cost model and churn bound without touching runtime state."""
+        self.cost_model = cost_model
+        self.max_cost_to_stop = max_cost_to_stop
+
     def reset_day(self) -> None:
         """Clear the daily-loss kill-switch at the start of a new trading day.
 
@@ -225,11 +232,17 @@ class RiskManager:
                 return RiskDecision(
                     False, None, "take-profit below round-trip cost"
                 )
-            if stop_bps <= 0.0 or round_trip_bps / stop_bps > self.max_cost_to_stop:
+            if (
+                stop_bps <= 0.0
+                or self.cost_model.cost_to_stop(signal.symbol, stop_bps / 100.0)
+                > self.max_cost_to_stop
+            ):
                 return RiskDecision(False, None, "cost-to-stop ratio too high")
 
-        side = OrderSide.BUY if signal.action is SignalAction.ENTER_LONG else OrderSide.SELL
-        order = Order(id=self._next_id(), symbol=signal.symbol, side=side,
+        order_side = (
+            OrderSide.BUY if signal.action is SignalAction.ENTER_LONG else OrderSide.SELL
+        )
+        order = Order(id=self._next_id(), symbol=signal.symbol, side=order_side,
                       intent=OrderIntent.OPEN, qty=qty, price=mark_px, ts_ns=ts_ns,
                       strategy=signal.strategy)
 
