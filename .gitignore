@@ -28,3 +28,5 @@ docs/superpowers/
 native/tauri/src-tauri/binaries/
 native/sidecar/build/
 native/sidecar/dist/
+native/frontend/dist/
+native/frontend/node_modules/

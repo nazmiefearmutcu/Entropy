@@ -9,7 +9,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static
 
-from ..config import BotConfig, validate
+from ..config import BotConfig, validate, warnings
 from .widgets import TradeLog
 
 
@@ -140,6 +140,8 @@ class BotSettingsScreen(ModalScreen[None]):
                         f"edge mult {new_cfg.cost_edge_mult:g}, "
                         f"max cost-to-stop {new_cfg.max_cost_to_stop:g}"
                     )
+                    for warning in warnings(new_cfg):
+                        self.app.query_one(TradeLog).log_line(f"warning: {warning}")
                     self._show_error("")
                     self._saving = False
                     self.dismiss(None)

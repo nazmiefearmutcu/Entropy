@@ -67,23 +67,26 @@ async def test_changing_profile_updates_runner_and_banner(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_apply_risk_change_blocked_by_cost_guard(tmp_path):
+async def test_apply_risk_change_partial_dead_warns_but_applies(tmp_path):
+    # Frosty + default costs: crypto spot (0.52) exceeds max_cost_to_stop but
+    # equities/futures still trade -> the switch applies with a warning.
     cfg = BotConfig(risk_profile="medium")
     bot = BotRunner(cfg, run_dir=str(tmp_path))
     app = BotDashboard(cfg, runner=bot)
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.apply_risk_change("frosty")  # 0.52 > 0.5 with default costs
+        app.apply_risk_change("frosty")
         await pilot.pause()
-        assert bot.risk.profile.name == "Medium"
+        assert bot.risk.profile.name == "Frosty"
         rendered = "\n".join(
             str(line) for line in app.query_one(TradeLog).lines
         )
-        assert "risk profile not changed" in rendered
+        assert "risk profile changed -> Frosty" in rendered
+        assert "warning:" in rendered and "crypto spot" in rendered
 
 
 @pytest.mark.asyncio
-async def test_settings_modal_frosty_change_blocked_by_cost_guard(tmp_path):
+async def test_settings_modal_frosty_change_warns_but_applies(tmp_path):
     cfg = BotConfig(risk_profile="medium")
     bot = BotRunner(cfg, run_dir=str(tmp_path))
     app = BotDashboard(cfg, runner=bot)
@@ -96,14 +99,13 @@ async def test_settings_modal_frosty_change_blocked_by_cost_guard(tmp_path):
         await pilot.pause()
         await pilot.click("#btn-save")
         await pilot.pause()
-        # The full config (profile + cost fields) is validated before the
-        # confirmation prompt, so Frosty with the default cost model is
-        # rejected right here instead of going silent after the switch.
-        assert not isinstance(app.screen, ConfirmRiskScreen)
-        assert isinstance(app.screen, BotSettingsScreen)
-        assert bot.risk.profile.name == "Medium"
-        error = app.screen.query_one("#settings-error", Label)
-        assert "Frosty" in str(error.render())
+        assert isinstance(app.screen, ConfirmRiskScreen)
+        await pilot.click("#confirm")
+        await pilot.pause()
+        assert not isinstance(app.screen, BotSettingsScreen)
+        assert bot.risk.profile.name == "Frosty"
+        rendered = "\n".join(str(line) for line in app.query_one(TradeLog).lines)
+        assert "warning:" in rendered and "crypto spot" in rendered
 
 
 @pytest.mark.asyncio

@@ -161,12 +161,13 @@ round-trip cost `C = 2(fee + slippage)`; breakeven move `m* = C`; a regime floor
 band tightened by a cost buffer (the score must retrace deeper before exiting) so positions are held
 through breakeven noise instead of being churned; and a churn guard in the risk layer rejecting
 entries whose round trip is more than `max_cost_to_stop` (default 0.5) of the stop distance. Position
-`validate()` refuses such a configuration up front — the CLI exits with a `config error` naming the
-profile, market and ratio, and the settings surfaces (TUI, native cockpit) reject the save — so a
-cost-aware run never starts with an entry set that would be rejected everywhere; raise
-`max_cost_to_stop` (e.g. 0.55) or set `cost_aware=False` to run it anyway. Position sizing stays
-risk-profile-driven; `costs.fee_adjusted_kelly()` documents the full-Kelly formula for anyone who
-wants to go further.
+`validate()` refuses a configuration where EVERY active market would reject its entries — the CLI
+exits with a `config error` and the settings surfaces (TUI, native cockpit) reject the save. When
+only some markets are dead, the run still starts and `warnings()` names each dead market (`config
+warning:` on the CLI, log lines in the TUI, a note in the cockpit); the risk layer keeps rejecting
+those entries at runtime either way. Raise `max_cost_to_stop` (e.g. 0.55) or set `cost_aware=False`
+to silence it. Position sizing stays risk-profile-driven; `costs.fee_adjusted_kelly()` documents the
+full-Kelly formula for anyone who wants to go further.
 
 `entropy calibrate` backtests stay flat-fee by default: `run_backtest` enables the cost-aware
 gates only when `market_costs` is passed (or `cost_aware=True` is set explicitly), so

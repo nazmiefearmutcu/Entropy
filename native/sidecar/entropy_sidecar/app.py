@@ -12,6 +12,7 @@ from entropy import settings as settings_store
 from entropy.app import AppConfig
 from entropy.bot.config import STRATEGY_NAMES, BotConfig
 from entropy.bot.config import validate as validate_bot
+from entropy.bot.config import warnings as warnings_bot
 from entropy.bot.risk.profiles import PRESETS
 from entropy.bot.strategies.consensus import EXIT_MODES, NORMALIZE_MODES, VOTE_MODES
 from entropy.engine.timeframe import CHART_INTERVALS, TIMEFRAMES
@@ -206,6 +207,8 @@ def create_app(*, source: SnapshotSource | None = None, tick_hz: float = 10.0) -
                 s.apply_app(cfg) if half == "app" else s.apply_bot(cfg)
             )
             problems.extend(f"{half}: {p}" for p in applied)
+            if half == "bot":
+                notes.extend(f"bot warning: {w}" for w in warnings_bot(cfg))
             if persist_error:
                 notes.append(persist_error)
         if problems:

@@ -220,7 +220,7 @@ class BotRunner:
         running portfolio would silently invalidate every open position and the
         ledger's P&L history. Those need a restart, and the UIs say so.
         """
-        from .config import validate
+        from .config import validate, warnings
         problems = validate(cfg)
         if problems:
             return problems
@@ -273,6 +273,13 @@ class BotRunner:
             "strategies": list(cfg.strategies), "risk": profile.name,
             "vote_mode": cfg.consensus.vote_mode,
             "cost_aware": cfg.cost_aware, "cost_edge_mult": cfg.cost_edge_mult,
+            "max_cost_to_stop": cfg.max_cost_to_stop,
+            "fee_bps": cfg.fee_bps, "slippage_bps": cfg.slippage_bps,
+            "market_costs": {
+                k.value: {"fee_bps": v.fee_bps, "slippage_bps": v.slippage_bps}
+                for k, v in cfg.market_costs.as_mapping().items()
+            },
+            "warnings": warnings(cfg),
         })
         return []
 

@@ -7,7 +7,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 
-from ..config import BotConfig, validate
+from ..config import BotConfig, validate, warnings
 from ..runner import BotRunner
 from .confirm import BotSettingsScreen
 from .widgets import ModeBanner, PnLPanel, PositionsTable, RiskBanner, TradeLog
@@ -70,6 +70,8 @@ class BotDashboard(App[None]):
         profile = self.runner.set_risk_profile(name)
         self.query_one(RiskBanner).set_profile(profile)
         self.query_one(TradeLog).log_line(f"risk profile changed -> {profile.name}")
+        for warning in warnings(prospective):
+            self.query_one(TradeLog).log_line(f"warning: {warning}")
 
     def action_trip_breaker(self) -> None:
         self.runner.trip_circuit_breaker()

@@ -11,7 +11,7 @@ import msgspec
 
 from entropy.engine.timeframe import TIMEFRAMES
 
-from .config import STRATEGY_NAMES, BotConfig, LiveConfig, validate
+from .config import STRATEGY_NAMES, BotConfig, LiveConfig, validate, warnings
 from .execution.live import LIVE_WARNING
 from .runner import BotRunner
 from .strategies.consensus import VOTE_MODES
@@ -136,6 +136,10 @@ def main(argv: list[str] | None = None) -> None:
         for problem in problems:
             print(f"config error: {problem}", file=sys.stderr)
         raise SystemExit(2)
+    for warning in warnings(cfg):
+        # Partial cost-gate overruns (some markets dead, others trading) are
+        # non-fatal: surface them, then start.
+        print(f"config warning: {warning}", file=sys.stderr)
     print(f"cadence: {cfg.timeframe} scanner / {cfg.bar_seconds():g}s strategy bars · "
           f"strategies: {', '.join(cfg.strategies)} · "
           f"consensus vote mode: {cfg.consensus.vote_mode}", flush=True)

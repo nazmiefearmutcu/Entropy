@@ -276,39 +276,22 @@ def validate(cfg: BotConfig) -> list[str]:
         problems.append(f"risk profile: {exc}")
         profile = None
     if profile is not None:
-        model = cfg.cost_model()
-        if model is not None:
-            # Cost-aware silent death: a stop so tight that the most expensive
-            # active market's round trip exceeds max_cost_to_stop makes the
-            # risk layer reject every entry (e.g. Frosty 0.5% + crypto spot
-            # 26 bps -> 0.52 > 0.5). Surface it before the bot goes quiet.
-            stop_bps = profile.stop_loss_pct * 100.0
-            if stop_bps > 0.0:
-                active: list[tuple[str, MarketClass]] = []
-                if cfg.enable_equities:
-                    active.append(("equities", MarketClass.EQUITY))
-                if cfg.enable_crypto:
-                    active.append(("crypto spot", MarketClass.CRYPTO_SPOT))
-                    active.append(("crypto futures", MarketClass.CRYPTO_FUTURES))
-                for label, cls in active:
-                    costs = model.market.get(cls)
-                    if costs is None:
-                        costs = MarketCosts(
-                            model.flat_fee_bps, model.flat_slippage_bps
-                        )
-                    else:
-                        costs = costs.resolved(
-                            model.flat_fee_bps, model.flat_slippage_bps
-                        )
-                    ratio = costs.round_trip_bps / stop_bps
-                    if ratio > cfg.max_cost_to_stop:
-                        problems.append(
-                            f"{profile.name} stop {profile.stop_loss_pct:g}%: "
-                            f"{label} round trip {costs.round_trip_bps:g} bps is "
-                            f"{ratio:.2f}x the stop distance, above "
-                            f"max_cost_to_stop={cfg.max_cost_to_stop:g} - cost-aware "
-                            "entries would all be rejected"
-                        )
+        # Cost-aware silent death: a stop so tight that every active market's
+        # round trip exceeds max_cost_to_stop makes the risk layer reject all
+        # entries (e.g. Frosty 0.5% + crypto spot 26 bps -> 0.52 > 0.5).
+        # Refuse the config when the WHOLE entry set is dead; when only some
+        # markets are dead, warnings() names them and the run may still trade
+        # the survivors.
+        overruns = _cost_gate_overruns(cfg, profile)
+        if overruns and len(overruns) == len(_active_markets(cfg)):
+            label, costs, ratio = max(overruns, key=lambda item: item[2])
+            problems.append(
+                f"{profile.name} stop {profile.stop_loss_pct:g}%: every active "
+                f"market round trip exceeds max_cost_to_stop="
+                f"{cfg.max_cost_to_stop:g} (worst: {label} "
+                f"{costs.round_trip_bps:g} bps is {ratio:.2f}x the stop distance) - "
+                "cost-aware entries would all be rejected"
+            )
     c = cfg.consensus
     if not 0.0 < c.threshold <= 1.0:
         problems.append("consensus threshold must be in (0, 1]")
@@ -362,4 +345,68 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
             )
         else:
             raise KeyError(f"Unknown strategy {name!r}")
+    return out
+
+
+def _active_markets(cfg: BotConfig) -> list[tuple[str, MarketClass]]:
+    """Active market (label, class) pairs, mirroring the risk layer's gates."""
+    active: list[tuple[str, MarketClass]] = []
+    if cfg.enable_equities:
+        active.append(("equities", MarketClass.EQUITY))
+    if cfg.enable_crypto:
+        active.append(("crypto spot", MarketClass.CRYPTO_SPOT))
+        active.append(("crypto futures", MarketClass.CRYPTO_FUTURES))
+    return active
+
+
+def _cost_gate_overruns(
+    cfg: BotConfig, profile: RiskProfile
+) -> list[tuple[str, MarketCosts, float]]:
+    """(label, costs, ratio) for every active market whose round trip exceeds
+    ``max_cost_to_stop`` of the stop distance."""
+    model = cfg.cost_model()
+    if model is None:
+        return []
+    stop_bps = profile.stop_loss_pct * 100.0
+    if stop_bps <= 0.0:
+        return []
+    overruns: list[tuple[str, MarketCosts, float]] = []
+    for label, cls in _active_markets(cfg):
+        costs = model.market.get(cls)
+        if costs is None:
+            costs = MarketCosts(model.flat_fee_bps, model.flat_slippage_bps)
+        else:
+            costs = costs.resolved(model.flat_fee_bps, model.flat_slippage_bps)
+        ratio = costs.round_trip_bps / stop_bps
+        if ratio > cfg.max_cost_to_stop:
+            overruns.append((label, costs, ratio))
+    return overruns
+
+
+def warnings(cfg: BotConfig) -> list[str]:
+    """Non-fatal config notes.
+
+    A cost-aware market whose round trip exceeds ``max_cost_to_stop`` of the
+    stop distance rejects every entry for that market while the others still
+    trade; that is surfaced here instead of failing the whole config.
+    ``validate()`` stays the hard gate: it only refuses a config where EVERY
+    active market is dead.
+    """
+    out: list[str] = []
+    try:
+        profile = cfg.profile()
+    except (KeyError, TypeError):
+        return out
+    if profile is None:
+        return out
+    overruns = _cost_gate_overruns(cfg, profile)
+    if not overruns or len(overruns) == len(_active_markets(cfg)):
+        return out
+    for label, costs, ratio in overruns:
+        out.append(
+            f"{profile.name} stop {profile.stop_loss_pct:g}%: {label} round trip "
+            f"{costs.round_trip_bps:g} bps is {ratio:.2f}x the stop distance, above "
+            f"max_cost_to_stop={cfg.max_cost_to_stop:g} - cost-aware entries would "
+            "be rejected for this market"
+        )
     return out
