@@ -58,8 +58,11 @@ DEFAULT_WEIGHTS: Mapping[str, float] = {
 VOTE_MODES = ("adaptive", "trend", "mean_revert", "legacy")
 #: How the weighted sum is turned into a score.
 NORMALIZE_MODES = ("participating", "total")
-#: What ends a position.
-EXIT_MODES = ("score", "trend_flip", "either")
+#: What ends a position. ``hold`` never exits on the score: the position runs
+#: until the risk layer's stop/take-profit (or a portfolio-level close).
+#: ``trail`` exits when the bar close retraces ``trail_pct`` from the peak
+#: (extreme close) seen since entry.
+EXIT_MODES = ("score", "trend_flip", "either", "hold", "trail")
 
 _VOTE_CHAR = {1: "+", 0: "0", -1: "-"}
 
@@ -94,6 +97,7 @@ class Regime:
     slope: float          # signed EMA slope per bar, normalized by price
     tradeable: bool       # enough movement to be worth trading
     trending: bool        # efficiency above the trend boundary
+    trend_dir: int = 0    # sign of the multi-bar EMA slope: +1 up / -1 down / 0 flat
 
     @property
     def label(self) -> str:
@@ -184,6 +188,10 @@ class _SymbolState:
     direction: int = 0  # what THIS strategy last signaled: +1 long, -1 short, 0 flat
     bars_in_trade: int = 0  # completed bars since the current entry
     bars_since_exit: int = 1 << 30  # completed bars since the last exit (cooldown)
+    streak: int = 0          # consecutive qualifying bars (entry confirmation)
+    streak_dir: int = 0      # sign of the score during the current streak
+    last_close: float = 0.0  # committed close of the last completed bar
+    peak: float = 0.0        # extreme close since entry (max long / min short)
 
 
 class ConsensusStrategy:
@@ -205,6 +213,16 @@ class ConsensusStrategy:
     once ``min_hold_bars`` have passed; they are exempt from the regime filter.
     The strategy only tracks what it has signaled itself — actual position state
     lives in the portfolio/risk layer.
+
+    Two optional filters tighten entries beyond the score:
+
+    * ``direction_bars``: only enter in the direction of the slow EMA's slope
+      over that many bars (a higher-timeframe trend proxy). Counter-trend and
+      flat (no-trend) markets are skipped, which removes the classic 15m
+      whipsaw where a bar-level cross fights the prevailing move.
+    * ``confirm_bars``: require the entry condition to hold for that many
+      consecutive completed bars before signalling, so a single noisy bar
+      cannot fire an entry.
     """
 
     name = "consensus"
@@ -243,6 +261,10 @@ class ConsensusStrategy:
         exit_mode: str = "score",
         regime_window: int = 20,
         slope_lookback: int = 5,
+        direction_bars: int = 0,
+        direction_min_slope: float = 0.00002,
+        confirm_bars: int = 1,
+        trail_pct: float = 0.0,
         regime_tilt: float = 2.0,
         warmup_symbol: str | None = None,
         costs: CostModel | None = None,
@@ -267,6 +289,14 @@ class ConsensusStrategy:
             raise ValueError("macd_fast must be shorter than macd_slow")
         if cost_edge_mult <= 0.0:
             raise ValueError("cost_edge_mult must be positive")
+        if confirm_bars < 1:
+            raise ValueError("confirm_bars must be >= 1")
+        if direction_bars < 0:
+            raise ValueError("direction_bars must be >= 0")
+        if direction_min_slope < 0.0:
+            raise ValueError("direction_min_slope must be >= 0")
+        if trail_pct < 0.0:
+            raise ValueError("trail_pct must be >= 0")
 
         self.symbols = symbols  # None = trade every symbol
         self.bar_s = bar_s
@@ -294,6 +324,10 @@ class ConsensusStrategy:
         self.exit_mode = exit_mode
         self.regime_window = max(2, regime_window)
         self.slope_lookback = max(1, slope_lookback)
+        self.direction_bars = direction_bars
+        self.direction_min_slope = direction_min_slope
+        self.confirm_bars = confirm_bars
+        self.trail_pct = trail_pct
         self.regime_tilt = regime_tilt
         self.warmup_symbol = warmup_symbol
         self.costs = costs
@@ -306,6 +340,7 @@ class ConsensusStrategy:
         self.min_bars = max(
             min_bars, ema_slow, macd_slow + macd_signal, rsi_period + 1,
             bb_period, self.regime_window + 1, self.slope_lookback + 1,
+            self.direction_bars + 1 if self.direction_bars > 0 else 0,
         )
         self._bar_ns = max(1, int(bar_s * _NS_PER_S))
         self._states: dict[str, _SymbolState] = {}
@@ -469,29 +504,67 @@ class ConsensusStrategy:
         if st.direction == 0:
             if st.bars_since_exit < self.cooldown_bars:
                 return []
-            if abs(score) >= self.threshold and regime.tradeable:
-                if self.costs is not None:
-                    floor = max(self.move_floor,
-                                self.costs.minimum_move(symbol, self.cost_edge_mult))
-                    # Effective entry floor: regime.tradeable uses the base
-                    # move_floor, so the cost-aware floor is checked explicitly.
-                    if regime.move <= floor:
-                        return []
+            qualifying = abs(score) >= self.threshold and regime.tradeable
+            if qualifying and self.costs is not None:
+                # Amortize the round-trip cost over the regime window: a
+                # position held ~regime_window bars only needs k*C TOTAL
+                # movement to clear costs, so the per-bar requirement is
+                # (k*C)/W rather than k*C. The old per-bar gate demanded a
+                # full round-trip cost of movement in a SINGLE bar, which on
+                # a 15m BTC bar (mean |ret| ~11 bps vs 52 bps round trip)
+                # made the strategy structurally untradeable.
+                window = max(1.0, float(self.regime_window))
+                floor = max(
+                    self.move_floor,
+                    self.costs.minimum_move(symbol, self.cost_edge_mult) / window,
+                )
+                if regime.move <= floor:
+                    qualifying = False
+                else:
                     rms = self._bar_move_rms(closes)
                     self._last_move_rms[symbol] = rms
-                    if rms < self.costs.sigma_gate(symbol, self.cost_edge_mult):
-                        return []
-                st.direction = 1 if score > 0 else -1
-                st.bars_in_trade = 0
-                action = SignalAction.ENTER_LONG if score > 0 else SignalAction.ENTER_SHORT
-                return [Signal(symbol=symbol, action=action, strength=abs(score),
-                               reason=reason, ts_ns=ts_ns, strategy=self.name)]
-            return []
+                    sigma_floor = (
+                        self.costs.sigma_gate(symbol, self.cost_edge_mult) / window
+                    )
+                    if rms < sigma_floor:
+                        qualifying = False
+            if not qualifying:
+                st.streak = 0
+                st.streak_dir = 0
+                return []
+            sgn = 1 if score > 0 else -1
+            if st.streak_dir != sgn:
+                st.streak, st.streak_dir = 1, sgn
+            else:
+                st.streak += 1
+            # Trend-direction filter: never fight the higher-timeframe slope,
+            # and skip no-trend (flat) regimes entirely.
+            if self.direction_bars > 0 and (
+                regime.trend_dir == 0 or (sgn > 0) != (regime.trend_dir > 0)
+            ):
+                st.streak = 0
+                st.streak_dir = 0
+                return []
+            if st.streak < self.confirm_bars:
+                return []
+            st.streak = 0
+            st.streak_dir = 0
+            st.direction = sgn
+            st.bars_in_trade = 0
+            action = SignalAction.ENTER_LONG if sgn > 0 else SignalAction.ENTER_SHORT
+            return [Signal(symbol=symbol, action=action, strength=abs(score),
+                           reason=reason, ts_ns=ts_ns, strategy=self.name)]
 
         if st.bars_in_trade < self.min_hold_bars:
             return []  # a fresh position rides out its first few bars
         if self.costs is not None:
             self._last_move_rms[symbol] = self._bar_move_rms(closes)
+        close = closes[-1]
+        st.last_close = close
+        if st.direction > 0:
+            st.peak = max(st.peak, close) if st.peak > 0.0 else close
+        else:
+            st.peak = min(st.peak, close) if st.peak > 0.0 else close
         if not self._should_exit(score, votes, st.direction, symbol):
             return []
         st.direction = 0
@@ -530,6 +603,16 @@ class ConsensusStrategy:
             return by_score
         ts = trend_score(votes, self.weights)
         by_trend = (direction > 0 and ts < 0.0) or (direction < 0 and ts > 0.0)
+        if self.exit_mode == "hold":
+            return False
+        if self.exit_mode == "trail":
+            st = self._states.get(symbol or "")
+            if st is None or st.peak <= 0.0 or st.last_close <= 0.0:
+                return False
+            px = st.last_close
+            if direction > 0:
+                return px <= st.peak * (1.0 - self.trail_pct)
+            return px >= st.peak * (1.0 + self.trail_pct)
         if self.exit_mode == "trend_flip":
             return by_trend
         return by_score or by_trend
@@ -572,8 +655,16 @@ class ConsensusStrategy:
             e_now, e_then = ema_slow[-1], ema_slow[-1 - lb]
             if e_now is not None and e_then is not None:
                 slope = (e_now - e_then) / lb / closes[-1]
+        trend_dir = 0
+        db = self.direction_bars
+        if db > 0 and len(ema_slow) > db and closes[-1] > 0.0:
+            e_now, e_then = ema_slow[-1], ema_slow[-1 - db]
+            if e_now is not None and e_then is not None:
+                dslope = (e_now - e_then) / db / closes[-1]
+                if abs(dslope) >= self.direction_min_slope:
+                    trend_dir = 1 if dslope > 0.0 else -1
         return Regime(
-            move=move, efficiency=efficiency, slope=slope,
+            move=move, efficiency=efficiency, slope=slope, trend_dir=trend_dir,
             tradeable=move > self.move_floor,
             trending=efficiency >= self.trend_er,
         )

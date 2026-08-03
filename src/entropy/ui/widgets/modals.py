@@ -65,6 +65,7 @@ _NORMALIZE_OPTIONS = [
 ]
 _EXIT_MODE_OPTIONS = [
     ("Score reversal", "score"), ("Trend flip", "trend_flip"), ("Either", "either"),
+    ("Trailing", "trail"), ("Hold", "hold"),
 ]
 _STRATEGY_LABELS = {
     "consensus": "Consensus (multi-indicator)",

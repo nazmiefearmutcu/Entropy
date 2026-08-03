@@ -132,6 +132,6 @@ def test_bot_cli_cost_defaults_leave_base_config_untouched():
 
     cfg = build_config(ns)
     assert cfg.cost_aware is True
-    assert cfg.cost_edge_mult == 2.0
+    assert cfg.cost_edge_mult == 1.0
     assert cfg.max_cost_to_stop == 0.5
     assert cfg.market_costs == MarketCostConfig()

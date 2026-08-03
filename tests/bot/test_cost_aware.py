@@ -118,11 +118,22 @@ def _trend_closes(drift: float, n: int = 120, seed: int = 3) -> list[float]:
 
 
 def test_consensus_cost_floor_blocks_small_moves():
+    """The cost floor is amortized over the 20-bar regime window: k*C = 52 bps
+    spread over 20 bars is ~2.6 bps/bar, so a ~1 bp/bar regime (which would
+    accumulate only ~20 bps of total movement) must be blocked."""
     cm = CostModel(flat_fee_bps=10.0, flat_slippage_bps=3.0)  # C=26bps, k*C=52bps
-    closes = _trend_closes(drift=0.0015)  # ~15 bps/bar < 52 bps floor
-    plain = ConsensusStrategy(symbols=("SPY",))
-    gated = ConsensusStrategy(symbols=("SPY",), costs=cm)
-    assert _feed(plain, "SPY", closes) == [SignalAction.ENTER_LONG]
+    rng = random.Random(3)
+    px, closes = 100.0, []
+    for _ in range(40):  # flat base so the EMAs seed without a stale gap
+        px *= 1.0 + rng.uniform(-0.00005, 0.00005)
+        closes.append(px)
+    for _ in range(120):  # ~1 bp/bar: below the amortized floor
+        px *= 1.0 + 0.0001 + rng.uniform(-0.00005, 0.00005)
+        closes.append(px)
+    # move_floor=0 isolates the cost gate from the plain regime filter.
+    plain = ConsensusStrategy(symbols=("SPY",), move_floor=0.0)
+    gated = ConsensusStrategy(symbols=("SPY",), move_floor=0.0, costs=cm)
+    assert SignalAction.ENTER_LONG in _feed(plain, "SPY", closes)
     assert _feed(gated, "SPY", closes) == []
 
 

@@ -292,7 +292,7 @@ async def test_dashboard_settings_modal_invalid_cost_number_not_applied(tmp_path
         await pilot.pause()
 
         assert isinstance(app.screen, BotSettingsScreen)
-        assert bot.config.cost_edge_mult == 2.0
+        assert bot.config.cost_edge_mult == 1.0
         error = app.screen.query_one("#settings-error", Label)
         assert "must be numbers" in str(error.render())
 

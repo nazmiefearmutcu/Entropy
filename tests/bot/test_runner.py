@@ -79,7 +79,7 @@ def test_apply_config_rejects_invalid_and_changes_nothing(tmp_path: Path):
     problems = bot.apply_config(BotConfig(timeframe="1m", strategies=()))
     assert problems and "strategy" in problems[0]
     assert bot.engine.cfg.window_labels == before
-    assert bot.config.strategies == ("consensus", "ema_cross")
+    assert bot.config.strategies == ("consensus",)
 
 
 def test_apply_config_hot_swaps_timeframe_and_risk(tmp_path: Path):

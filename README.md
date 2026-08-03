@@ -176,6 +176,35 @@ gates only when `market_costs` is passed (or `cost_aware=True` is set explicitly
 `scripts/repro_backtest_claims.py` to reproduce the gates-off vs gates-on results on one seeded
 tick stream, including the FROSTY+spot control where the cost-to-stop guard blocks every entry.
 
+### Accuracy
+
+Accuracy is measured on real data, not synthetic paths: `scripts/entropy_accuracy_btc15m.py`
+replays the bot on Binance spot BTCUSDT 15m bars with $100 paper and full 26 bps round-trip
+costs (10 bps fee + 3 bps slippage per side). The shipped consensus defaults are tuned
+against it — a trailing exit (`exit_mode="trail"`, `trail_pct=0.3`), no direction filter
+(`direction_bars=0`), `min_hold_bars=5`, and an asymmetric stop profile (SL 1.5% / TP 1.2%,
+i.e. TP < SL: smaller, more frequent wins). See `src/entropy/bot/config.py`
+(`ConsensusConfig`) and the accuracy script defaults.
+
+```bash
+uv run python scripts/entropy_accuracy_btc15m.py --bars 2880 --out /tmp/entropy_accuracy/repro_30d
+```
+
+Win rate was swept with `scripts/entropy_wr_sweep.py` (knob sweep over
+exit/trail/confirm/direction/hold/cooldown/SL/TP — 1,728 combos, shardable with
+`--shard` / `--shard-total`) and verified out-of-sample with `scripts/entropy_wr_verify.py`
+(30d window + 4 walk-forward folds, chained OOS). The OOS winner — trail /
+trail_pct 0.3 / confirm 2 / direction 0 / hold 5 / cooldown 4 / SL 1.5 / TP 1.2 — is what ships:
+
+| Run | 30d win rate | Detail |
+|---|---|---|
+| OOS winner (ship default) | 60.7% (28 trades) | chained OOS +0.62% |
+| Final 30d accuracy run | 62.1% (29 trades) | PF 0.94, max DD 0.58%, −0.12% return |
+
+Honest caveat: the win rate clears 50% out-of-sample, but expectancy is still noise-band
+around flat (PF ≈ 0.9–1.0). This is a ship-readiness metric, not a profit generator — the
+bot now qualifies on the accuracy metric without destroying capital.
+
 ## The native app
 
 Not a rewrite — a second frontend. A Tauri (Rust) shell spawns the Python engine headless as a bundled

@@ -131,11 +131,16 @@ class MarketCosts:
         return self.round_trip
 
     def minimum_move(self, edge_mult: float = 2.0) -> float:
-        """Regime floor ``k*C``: a bar must move this much to be tradeable."""
+        """Regime floor ``k*C``: a holding window must move this much in total
+        to be tradeable. Strategies amortize it over the regime window
+        (per-bar requirement ``k*C / W``) so a full round-trip cost is not
+        demanded from a single bar."""
         return edge_mult * self.round_trip
 
     def sigma_gate(self, edge_mult: float = 2.0) -> float:
-        """Per-bar volatility floor implied by ``E|move| >= k*C``."""
+        """Volatility floor implied by ``E|move| >= k*C`` over the holding
+        window; strategies amortize it per bar the same way as
+        :meth:`minimum_move`."""
         return edge_mult * self.round_trip / E_ABS_MOVE
 
     def cost_to_stop(self, stop_pct: float) -> float:

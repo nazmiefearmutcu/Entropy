@@ -38,7 +38,7 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
     threshold: float = 0.5
     min_bars: int = 35
     vote_mode: str = "adaptive"          # adaptive | trend | mean_revert | legacy
-    normalize: str = "participating"     # participating | total
+    normalize: str = "total"             # participating | total
     min_participation: float = 0.5
     w_ema: float = 0.35
     w_macd: float = 0.30
@@ -62,15 +62,19 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
     bb_trend_low: float = 0.20
     bb_trend_high: float = 0.80
     # --- regime ----------------------------------------------------------
-    move_floor: float = 0.0005
+    move_floor: float = 0.0003
     trend_er: float = 0.35
     regime_window: int = 20
     slope_lookback: int = 5
+    direction_bars: int = 0
+    direction_min_slope: float = 0.00002
+    confirm_bars: int = 2
+    trail_pct: float = 0.3
     regime_tilt: float = 2.0
     # --- position lifecycle ----------------------------------------------
-    min_hold_bars: int = 3
-    cooldown_bars: int = 2
-    exit_mode: str = "score"             # score | trend_flip | either
+    min_hold_bars: int = 5
+    cooldown_bars: int = 4
+    exit_mode: str = "trail"             # score | trend_flip | either | hold | trail
 
     def weights(self) -> dict[str, float]:
         return {
@@ -155,7 +159,7 @@ class BotConfig(msgspec.Struct, frozen=True):
     mode: str = "paper"  # "paper" | "live"
     risk_profile: str = "medium"
     risk_overrides: RiskOverrides = msgspec.field(default_factory=RiskOverrides)
-    strategies: tuple[str, ...] = ("consensus", "ema_cross")
+    strategies: tuple[str, ...] = ("consensus",)
     symbols: tuple[str, ...] = ()  # () = all symbols from the feed
     starting_cash: float = 100_000.0
     #: Flat fallback costs; overridden per market by `market_costs`.
@@ -166,8 +170,9 @@ class BotConfig(msgspec.Struct, frozen=True):
     cost_aware: bool = True
     #: Per-market fee/slippage overrides (realistic venue schedules by default).
     market_costs: MarketCostConfig = msgspec.field(default_factory=MarketCostConfig)
-    #: ``k`` in the cost gates ``mean|r| >= k*C`` and ``0.798*sigma >= k*C``.
-    cost_edge_mult: float = 2.0
+    #: ``k`` in the cost gates ``mean|r| >= k*C`` and ``0.798*sigma >= k*C``,
+    #: amortized over the regime window (per-bar requirement ``k*C / W``).
+    cost_edge_mult: float = 1.0
     #: Churn red flag: reject entries whose round-trip cost is more than this
     #: fraction of the stop distance (``C/stop > max_cost_to_stop``).
     max_cost_to_stop: float = 0.5
@@ -333,6 +338,10 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
                 min_hold_bars=c.min_hold_bars, cooldown_bars=c.cooldown_bars,
                 exit_mode=c.exit_mode, regime_window=c.regime_window,
                 slope_lookback=c.slope_lookback, regime_tilt=c.regime_tilt,
+                direction_bars=c.direction_bars,
+                direction_min_slope=c.direction_min_slope,
+                confirm_bars=c.confirm_bars,
+                trail_pct=c.trail_pct,
                 warmup_symbol=cfg.ema_symbol,
                 costs=costs, cost_edge_mult=cfg.cost_edge_mult,
             ))

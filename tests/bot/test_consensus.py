@@ -138,14 +138,21 @@ def test_regime_filter_blocks_scaled_down_trend(seed):
 
 
 def test_consensus_sigma_gate_blocks_marginal_volatility():
-    """Red side of the cost sigma gate: per-bar movement clears the k*C move
-    floor but the RMS bar move stays under k*C / E_ABS_MOVE, so the cost-aware
-    strategy must NOT enter while the plain strategy does."""
+    """Red side of the amortized cost sigma gate: per-bar movement clears the
+    (k*C)/W move floor but the RMS bar move stays under (k*C)/(E_ABS_MOVE*W),
+    so the cost-aware strategy must NOT enter while the plain one does."""
     cm = CostModel(flat_fee_bps=10.0, flat_slippage_bps=3.0)  # C=26bps, k*C=52bps
-    closes = path_trend(3, direction=1, drift=0.006)  # ~60 bps/bar
-    plain = ConsensusStrategy(symbols=("SPY",))
-    gated = ConsensusStrategy(symbols=("SPY",), costs=cm)
-    assert [a for _, a in feed_bars(plain, "SPY", closes)] == [SignalAction.ENTER_LONG]
+    rng = random.Random(3)
+    px, closes = 100.0, []
+    for _ in range(40):
+        px *= 1.0 + rng.uniform(-0.00005, 0.00005)
+        closes.append(px)
+    for i in range(120):  # alternating 4bp/2bp: mean|r|=3bp > 2.6bp floor,
+        px *= 1.0 + (0.0004 if i % 2 == 0 else 0.0002)  # but RMS ~3.16bp < 3.26bp
+        closes.append(px)
+    plain = ConsensusStrategy(symbols=("SPY",), move_floor=0.0)
+    gated = ConsensusStrategy(symbols=("SPY",), move_floor=0.0, costs=cm)
+    assert SignalAction.ENTER_LONG in [a for _, a in feed_bars(plain, "SPY", closes)]
     assert feed_bars(gated, "SPY", closes) == []
 
 
@@ -461,9 +468,9 @@ def test_symbols_none_accepts_all():
 
 def test_default_strategies_include_consensus():
     cfg = BotConfig()
-    assert cfg.strategies == ("consensus", "ema_cross")
+    assert cfg.strategies == ("consensus",)
     strats = build_strategies(cfg)
-    assert [s.name for s in strats] == ["consensus", "ema_cross"]
+    assert [s.name for s in strats] == ["consensus"]
     assert isinstance(strats[0], ConsensusStrategy)
 
 
@@ -580,3 +587,68 @@ def test_adaptive_beats_legacy_on_trend_then_chop_then_reversal():
     assert len(legacy) > 4 * len(adaptive)
     assert _naive_directional_pnl(legacy, closes) < 0.0
     assert _naive_directional_pnl(adaptive, closes) > 10.0
+
+
+# ---- direction filter / confirmation / trail / hold -----------------------
+
+
+def test_direction_filter_blocks_countertrend_bounce():
+    """A sharp bounce inside a downtrend can flip the bar-level votes long; the
+    multi-bar EMA slope is still down, so the direction filter must refuse it."""
+    down = path_trend(5, direction=-1, n=100)
+    rng = random.Random(77)
+    px, bounce = down[-1], []
+    for _ in range(12):  # ~4.9% bounce: flips the fast votes, not the 20-bar slope
+        px *= 1.0 + 0.004 + rng.uniform(-0.0005, 0.0005)
+        bounce.append(px)
+    closes = down + bounce
+    plain = ConsensusStrategy(symbols=("SPY",))
+    filtered = ConsensusStrategy(symbols=("SPY",), direction_bars=20)
+    plain_events = [a for _, a in feed_bars(plain, "SPY", closes)]
+    filtered_events = [a for _, a in feed_bars(filtered, "SPY", closes)]
+    assert SignalAction.ENTER_LONG in plain_events
+    assert SignalAction.ENTER_LONG not in filtered_events
+
+
+def test_confirm_bars_delays_entry():
+    """confirm_bars=N requires N consecutive qualifying bars: the entry must
+    fire strictly later than with confirm_bars=1 (same market shape)."""
+    closes = path_trend(3, direction=1)
+    quick = ConsensusStrategy(symbols=("SPY",), confirm_bars=1)
+    slow = ConsensusStrategy(symbols=("SPY",), confirm_bars=4)
+    q_events = feed_bars(quick, "SPY", closes)
+    s_events = feed_bars(slow, "SPY", closes)
+    assert [a for _, a in q_events] == [SignalAction.ENTER_LONG]
+    assert [a for _, a in s_events] == [SignalAction.ENTER_LONG]
+    assert s_events[0][0] > q_events[0][0]
+
+
+def test_trail_exit_after_retrace():
+    """A rise to a peak, then a pullback beyond trail_pct from the peak: the
+    trail exit must close the position while the score may not have flipped."""
+    closes = path_trend(3, direction=1, n=120)
+    rng = random.Random(9)
+    px, down = closes[-1], []
+    for _ in range(60):  # give back ~1.5% after the peak
+        px *= 1.0 - 0.00025 + rng.uniform(-0.0003, 0.0003)
+        down.append(px)
+    path = closes + down
+    strat = ConsensusStrategy(symbols=("SPY",), exit_mode="trail", trail_pct=0.004)
+    events = feed_bars(strat, "SPY", path)
+    actions = [a for _, a in events]
+    assert SignalAction.ENTER_LONG in actions
+    assert SignalAction.EXIT in actions
+    exit_bar = next(b for b, a in events if a is SignalAction.EXIT)
+    entry_bar = events[0][0]
+    assert exit_bar > entry_bar
+
+
+def test_hold_mode_never_exits_on_score():
+    """exit_mode='hold' leaves position management to the risk layer: the
+    strategy must emit ENTER but never a score-driven EXIT."""
+    closes = path_reversal(7)
+    strat = ConsensusStrategy(symbols=("SPY",), exit_mode="hold")
+    events = feed_bars(strat, "SPY", closes)
+    actions = [a for _, a in events]
+    assert SignalAction.ENTER_LONG in actions
+    assert SignalAction.EXIT not in actions
