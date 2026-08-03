@@ -302,6 +302,15 @@ export interface BotLiveJSON {
   api_secret: string
 }
 
+export interface MarketCostConfigJSON {
+  equity_fee_bps: number | null
+  equity_slippage_bps: number | null
+  crypto_spot_fee_bps: number | null
+  crypto_spot_slippage_bps: number | null
+  crypto_futures_fee_bps: number | null
+  crypto_futures_slippage_bps: number | null
+}
+
 export interface BotConfigJSON {
   mode: string
   risk_profile: string
@@ -311,6 +320,14 @@ export interface BotConfigJSON {
   starting_cash: number
   fee_bps: number
   slippage_bps: number
+  /** Master switch for the cost-aware gate layer; off = legacy flat fees. */
+  cost_aware: boolean
+  /** ``k`` in the cost gates ``mean|r| >= k*C``. */
+  cost_edge_mult: number
+  /** Reject entries whose round-trip cost exceeds this fraction of the stop. */
+  max_cost_to_stop: number
+  /** Per-market fee/slippage overrides; ``null`` = inherit the flat values. */
+  market_costs: MarketCostConfigJSON
   ema_symbol: string
   ema_fast: number
   ema_slow: number
@@ -342,9 +359,10 @@ export interface SettingsPayload {
  */
 export interface SettingsPatch {
   app?: Partial<Omit<AppConfigJSON, 'engine'>>
-  bot?: Partial<Omit<BotConfigJSON, 'consensus' | 'risk_overrides' | 'live'>> & {
+  bot?: Partial<Omit<BotConfigJSON, 'consensus' | 'risk_overrides' | 'live' | 'market_costs'>> & {
     consensus?: Partial<ConsensusConfigJSON>
     risk_overrides?: Partial<RiskOverridesJSON>
+    market_costs?: Partial<MarketCostConfigJSON>
     live?: Partial<BotLiveJSON>
   }
 }

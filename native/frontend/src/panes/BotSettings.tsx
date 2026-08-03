@@ -1,6 +1,7 @@
 import type {
   BotConfigJSON,
   ConsensusConfigJSON,
+  MarketCostConfigJSON,
   MetaResponse,
   RiskOverridesJSON,
   SettingsPatch,
@@ -45,6 +46,20 @@ const RISK_OVERRIDE_FIELDS: {
   { key: 'cooldown_s', label: 'Cooldown', step: 1, suffix: 's' },
   { key: 'min_volatility_pct', label: 'Min volatility', step: 0.05, suffix: '%' },
   { key: 'vol_window_s', label: 'Vol window', step: 1, suffix: 's' },
+]
+
+const MARKET_COST_FIELDS: {
+  key: keyof MarketCostConfigJSON
+  label: string
+  /** Which flat Account field a null value inherits. */
+  kind: 'fee' | 'slippage'
+}[] = [
+  { key: 'crypto_spot_fee_bps', label: 'Spot fee', kind: 'fee' },
+  { key: 'crypto_spot_slippage_bps', label: 'Spot slippage', kind: 'slippage' },
+  { key: 'crypto_futures_fee_bps', label: 'Futures fee', kind: 'fee' },
+  { key: 'crypto_futures_slippage_bps', label: 'Futures slippage', kind: 'slippage' },
+  { key: 'equity_fee_bps', label: 'Equity fee', kind: 'fee' },
+  { key: 'equity_slippage_bps', label: 'Equity slippage', kind: 'slippage' },
 ]
 
 function WeightSlider({
@@ -302,6 +317,69 @@ export function BotSettings({
             onCommit={(v) => setBot({ slippage_bps: v })}
           />
         </Row3>
+      </Section>
+
+      <Section
+        title="Costs"
+        caption="The cost-aware gate layer. When on, realistic per-market fees decide whether a trade is worth taking."
+      >
+        <div className="py-1.5">
+          <div className="flex items-center gap-2">
+            <Toggle
+              label="Cost-aware trading"
+              checked={bot.cost_aware}
+              onChange={(v) => setBot({ cost_aware: v })}
+            />
+            <span className="text-xs text-ink-dim">{bot.cost_aware ? 'on' : 'off'}</span>
+          </div>
+          <p className="mt-1 text-xs text-ink-mute">
+            Off = legacy flat-fee behavior: only the Account fee/slippage apply and every cost gate is
+            skipped.
+          </p>
+        </div>
+        <Row2>
+          <NumberField
+            label="Cost edge multiplier"
+            value={bot.cost_edge_mult}
+            step={0.1}
+            min={0}
+            onCommit={(v) => setBot({ cost_edge_mult: v })}
+            hint="k in the entry gates mean|r| >= k*C."
+          />
+          <NumberField
+            label="Max cost-to-stop"
+            value={bot.max_cost_to_stop}
+            step={0.05}
+            min={0}
+            max={1}
+            onCommit={(v) => setBot({ max_cost_to_stop: v })}
+            hint="Round-trip cost over stop distance; above this the entry is rejected."
+          />
+        </Row2>
+        <Disclosure
+          title="Per-market fees & slippage"
+          caption="bps per side; blank inherits the flat Account values"
+        >
+          <p className="mb-1 text-xs leading-relaxed text-ink-mute">
+            A blank (null) field inherits the flat fee/slippage from Account. Editing one writes an
+            explicit override for that market.
+          </p>
+          <Row3>
+            {MARKET_COST_FIELDS.map((f) => (
+              <NumberField
+                key={f.key}
+                label={f.label}
+                value={bot.market_costs[f.key] ?? (f.kind === 'fee' ? bot.fee_bps : bot.slippage_bps)}
+                step={0.5}
+                min={0}
+                suffix="bps"
+                onCommit={(v) =>
+                  setBot({ market_costs: { ...bot.market_costs, [f.key]: v } })
+                }
+              />
+            ))}
+          </Row3>
+        </Disclosure>
       </Section>
 
       <div className="px-4 pb-4">
