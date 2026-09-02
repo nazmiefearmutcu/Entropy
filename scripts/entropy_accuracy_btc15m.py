@@ -14,6 +14,29 @@ cost-aware risk layer) with real Binance 15m klines:
 Usage:
   .venv/bin/python scripts/entropy_accuracy_btc15m.py --bars 2880 --out /tmp/entropy_accuracy/30d
   .venv/bin/python scripts/entropy_accuracy_btc15m.py --bars 96 --end-date 2026-08-02T00:00:00Z --out /tmp/entropy_accuracy/1d
+
+Honest-measurement conventions (these intentionally lower the measured win
+rate versus the original harness — that is the point):
+
+  * Pessimistic intrabar barrier resolution. Each 15m bar is fed as 4 ticks
+    O, L, H, C — the stop-tripping tick BEFORE the take-profit-tripping tick.
+    When a bar's range contains both an open position's stop and its
+    take-profit, the STOP resolves first (a same-bar entry whose first bar
+    spans both barriers is covered too, which a per-bar pre-scan of
+    already-open positions would miss).
+  * Level fills, not bar extremes. Exit fills from mechanical stop/TP intents
+    are clamped, when pairing, to the barrier level the risk layer anchored at
+    entry (worse of level and actual fill, both with the close-side adverse
+    slippage the executor charges). Strategy exits (intent "close") and the
+    end-of-test liquidation are untouched.
+  * Zero PnL is a loss: only ``pnl > 0`` counts as a win (reported as
+    ``win_definition``).
+  * ``--warmup-bars N`` (default 100) seeds strategy/risk state with N extra
+    bars before the evaluated window; warmup trades are not counted and a
+    position still open at the window start is liquidated at the first
+    evaluated tick. ``--warmup-bars 0`` restores the old cold-start behavior.
+  * Long-only metrics (``win_rate_long_only``) report the spot-deployable
+    subset alongside the total.
 """
 
 from __future__ import annotations
@@ -34,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from entropy.bot.calibration import DummyLedger
 from entropy.bot.config import BotConfig, ConsensusConfig, MarketCostConfig, RiskOverrides
-from entropy.bot.orders import OrderSide
+from entropy.bot.orders import Fill, OrderIntent, OrderSide
 from entropy.bot.portfolio import PositionSide
 from entropy.bot.runner import BotRunner
 
@@ -105,13 +128,25 @@ def fetch_klines(bars: int, end_ms: int, cache: Path | None = None,
 
 
 def build_ticks(klines: list[list[Any]], symbol: str = SYMBOL) -> list[dict[str, Any]]:
+    """One 15m kline -> 4 ticks: O, L, H, C.
+
+    The LOW tick is fed BEFORE the HIGH tick on purpose (pessimistic intrabar
+    convention): the risk layer compares the running mark against an open
+    position's stop and take-profit on every tick, so with the historical
+    O,H,L,C order a take-profit inside the bar always resolved BEFORE a stop
+    also inside the bar, at the bar's extreme price. Feeding L first makes the
+    STOP resolve first whenever both barriers sit inside one bar's [low, high]
+    — including bars where the position was opened at the open tick — and the
+    remaining level-fill clamp in simulate() keeps mechanical fills honest.
+    Strategy bars bucket on ts//900s so all four ticks land in the same 15m
+    bar regardless of order.
+    """
     ticks: list[dict[str, Any]] = []
     for k in klines:
         open_ms = int(k[0])
         open_px, high, low, close = float(k[1]), float(k[2]), float(k[3]), float(k[4])
-        # open, high, low, close as 4 ticks inside the bar; strategy bars bucket
-        # on ts//900s so all four land in the same 15m bar.
-        for off_s, px in ((0, open_px), (1, high), (2, low), (3, close)):
+        # open, low, high, close as 4 ticks inside the bar (stop before TP)
+        for off_s, px in ((0, open_px), (1, low), (2, high), (3, close)):
             ticks.append({
                 "symbol": symbol, "price": px, "amount": 1.0, "side": "buy",
                 "ts_ns": (open_ms + off_s * 1000) * 1_000_000,
@@ -123,47 +158,44 @@ def utc_day(ts_ns: int) -> str:
     return datetime.fromtimestamp(ts_ns / _NS, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
-def simulate(klines: list[list[Any]], cfg: BotConfig,
-             run_dir: str = "/tmp/entropy_accuracy/_sim/ledger",
-             trade_csv: str = "/tmp/entropy_accuracy/_sim/trades.csv",
-             symbol: str = SYMBOL) -> dict[str, Any]:
-    """Feed real 15m klines through the final-state BotRunner and compute the
-    full accuracy report. Mirrors the metric math of calibration.run_backtest
-    (end-of-test liquidation, paired fills, costs)."""
-    out_dir = Path(run_dir).parent
-    out_dir.mkdir(parents=True, exist_ok=True)
-    runner = BotRunner(cfg, run_dir=str(out_dir / "ledger"))
-    dummy = DummyLedger()
-    runner.ledger = dummy  # type: ignore[assignment]
+class _BarrierLedger(DummyLedger):
+    """DummyLedger that remembers the stop/take-profit levels the risk layer
+    anchored at each open fill.
 
-    ticks = build_ticks(klines, symbol=symbol)
-    equity_curve: list[tuple[int, float, float]] = []  # (ts_ns, equity, exposure)
-    max_exposure_pct = 0.0
-    max_open = 0
-    prev_day = None
-    print(f"[entropy-accuracy] feeding {len(ticks)} ticks ...")
-    for t in ticks:
-        day = utc_day(t["ts_ns"])
-        if day != prev_day:
-            # Backtest is fast-forwarded, so the runner's wall-clock day
-            # rollover never fires; reset per tick-day to keep the daily-loss
-            # kill-switch genuinely daily (same semantics as live).
-            if prev_day is not None:
-                runner.portfolio.reset_day()
-                runner.risk.reset_day()
-            runner._utc_day = day
-            prev_day = day
-        runner.on_trade(t["symbol"], t["price"], t["amount"], t["side"], t["ts_ns"])
-        snap = runner.portfolio.snapshot(t["ts_ns"])
-        equity_curve.append((t["ts_ns"], snap.equity, snap.open_count))
-        if snap.open_count > max_open:
-            max_open = snap.open_count
-        exp = runner.portfolio.exposure()
-        if snap.equity > 0 and exp / snap.equity > max_exposure_pct:
-            max_exposure_pct = exp / snap.equity
+    The runner prices mechanical exits at the mark that tripped them, so a
+    stop/TP fill recorded inside a wide bar carries the bar's extreme, not the
+    barrier. The levels (``RiskManager.stop_tp_prices`` on the
+    slippage-adjusted entry fill, volatility scaling included) are captured
+    from the live position at open-fill time — after ``portfolio.open`` — so
+    the anchoring math is mirrored exactly, and the pairing step in
+    :func:`simulate` can clamp mechanical exit fills back to the barrier.
+    """
 
-    # ---- end-of-test liquidation (mirrors calibration.run_backtest) ----
-    final_ts = ticks[-1]["ts_ns"]
+    def __init__(self, runner: BotRunner) -> None:
+        super().__init__()
+        self._runner = runner
+        # barrier levels captured at each OPEN fill, aligned 1:1 with
+        # self.fills (a symbol-keyed dict would be overwritten by later
+        # trades before the pairing walk ever reads it)
+        self.open_levels: list[tuple[float, float] | None] = []
+
+    def record_fill(self, fill: Any, intent: Any) -> None:
+        levels: tuple[float, float] | None = None
+        if getattr(intent, "value", intent) == "open":
+            pos = self._runner.portfolio.positions.get(fill.symbol)
+            if pos is not None:
+                levels = (pos.stop_px, pos.tp_px)
+        self.open_levels.append(levels)
+        super().record_fill(fill, intent)
+
+
+def _liquidate_open_positions(runner: BotRunner, ledger: DummyLedger, ts_ns: int,
+                              *, notify_reason: str | None = None) -> None:
+    """Flatten every open position at the mark, with close-side adverse
+    slippage and fees — the end-of-test liquidation math. Also used at the
+    warmup/window boundary so a position still open when the evaluated window
+    begins is liquidated at the window's first tick (its fill lands in the
+    warmup ledger and is not counted)."""
     executor = runner.executor
     for symbol in list(runner.portfolio.positions):
         pos = runner.portfolio.positions[symbol]
@@ -176,38 +208,139 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
         slip = mark_px * (slip_bps / 10_000.0)
         fill_px = mark_px - slip if close_side is OrderSide.SELL else mark_px + slip
         fee = abs(fill_px * pos.qty) * (fee_bps / 10_000.0)
-        from entropy.bot.orders import Fill, OrderIntent
-        dummy.record_fill(
+        ledger.record_fill(
             Fill(order_id=f"liq-{symbol}", symbol=symbol, side=close_side, qty=pos.qty,
-                 price=fill_px, fee=fee, slippage=slip, ts_ns=final_ts),
+                 price=fill_px, fee=fee, slippage=slip, ts_ns=ts_ns),
             OrderIntent.CLOSE,
         )
-        runner.portfolio.close(symbol, fill_px, final_ts, fee=fee)
+        runner.portfolio.close(symbol, fill_px, ts_ns, fee=fee)
+        if notify_reason is not None:
+            # the run continues after a warmup-boundary liquidation: re-arm the
+            # strategies exactly as the runner does for risk-originated closes
+            runner._notify_closed(symbol, notify_reason)
+
+
+def simulate(klines: list[list[Any]], cfg: BotConfig,
+             run_dir: str = "/tmp/entropy_accuracy/_sim/ledger",
+             trade_csv: str = "/tmp/entropy_accuracy/_sim/trades.csv",
+             symbol: str = SYMBOL, warmup_bars: int = 0) -> dict[str, Any]:
+    """Feed real 15m klines through the final-state BotRunner and compute the
+    full accuracy report. Mirrors the metric math of calibration.run_backtest
+    (end-of-test liquidation, paired fills, costs).
+
+    ``warmup_bars`` feeds the FIRST ``warmup_bars`` klines through the runner
+    without counting their trades (strategy/risk state carries into the
+    evaluated window; positions open at the window start are liquidated at the
+    window's first tick). ``warmup_bars=0`` is the legacy cold start.
+    """
+    out_dir = Path(run_dir).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    runner = BotRunner(cfg, run_dir=str(out_dir / "ledger"))
+    warm_ledger = _BarrierLedger(runner)
+    dummy = _BarrierLedger(runner)
+    runner.ledger = warm_ledger  # type: ignore[assignment]
+
+    # Split into warmup and evaluated slices (keep at least one evaluated bar).
+    warmup_bars = max(0, min(warmup_bars, len(klines) - 1)) if klines else 0
+    warm_ticks = build_ticks(klines[:warmup_bars], symbol=symbol)
+    eval_ticks = build_ticks(klines[warmup_bars:], symbol=symbol)
+
+    def _feed(ticks: list[dict[str, Any]]):
+        curve: list[tuple[int, float, float]] = []
+        max_open = 0
+        max_exp = 0.0
+        prev_day = None
+        for t in ticks:
+            day = utc_day(t["ts_ns"])
+            if day != prev_day:
+                # Backtest is fast-forwarded, so the runner's wall-clock day
+                # rollover never fires; reset per tick-day to keep the daily-loss
+                # kill-switch genuinely daily (same semantics as live).
+                if prev_day is not None:
+                    runner.portfolio.reset_day()
+                    runner.risk.reset_day()
+                runner._utc_day = day
+                prev_day = day
+            runner.on_trade(t["symbol"], t["price"], t["amount"], t["side"], t["ts_ns"])
+            snap = runner.portfolio.snapshot(t["ts_ns"])
+            curve.append((t["ts_ns"], snap.equity, snap.open_count))
+            if snap.open_count > max_open:
+                max_open = snap.open_count
+            exp = runner.portfolio.exposure()
+            if snap.equity > 0 and exp / snap.equity > max_exp:
+                max_exp = exp / snap.equity
+        return curve, max_open, max_exp
+
+    warmup_trades = 0
+    if warmup_bars:
+        print(f"[entropy-accuracy] warmup: feeding {len(warm_ticks)} ticks "
+              f"({warmup_bars} bars) ...")
+        _feed(warm_ticks)
+        warmup_trades = len(warm_ledger.fills) // 2
+        if runner.portfolio.positions:
+            # flatten at the window's first tick, before the evaluated feed
+            _liquidate_open_positions(runner, warm_ledger, eval_ticks[0]["ts_ns"],
+                                      notify_reason="warmup_liquidation")
+    runner.ledger = dummy  # type: ignore[assignment]  # evaluated trades only
+
+    print(f"[entropy-accuracy] feeding {len(eval_ticks)} evaluated ticks ...")
+    equity_curve, max_open, max_exposure_pct = _feed(eval_ticks)
+
+    # ---- end-of-test liquidation (mirrors calibration.run_backtest) ----
+    final_ts = eval_ticks[-1]["ts_ns"]
+    _liquidate_open_positions(runner, dummy, final_ts)
 
     snap = runner.portfolio.snapshot(final_ts)
     total_trades = len(dummy.fills) // 2
     costs_paid = sum(f.fee + f.slippage * f.qty for f, _ in dummy.fills)
+    # Close-side adverse slippage the executor charges (PaperExecutor: slip =
+    # order price * slippage_bps/1e4 against the trade direction) — used to
+    # re-price mechanical stop/TP fills at their barrier level below.
+    resolved_costs = runner.executor.cost_model.for_symbol(symbol)
+    slip_bps = (
+        resolved_costs.slippage_bps if resolved_costs.slippage_bps is not None
+        else cfg.slippage_bps
+    )
     wins = losses = 0
+    long_trades = long_wins = 0
     total_profit = total_loss = 0.0
     closed_pnls: list[float] = []
     trades: list[dict[str, Any]] = []
     positions_history: dict[str, Any] = {}
+    # symbol -> levels captured (at record time) at that symbol's open fill
+    trade_levels: dict[str, tuple[float, float] | None] = {}
     exit_breakdown: Counter = Counter()
     hold_bars: list[float] = []
-    for fill, intent in dummy.fills:
+    for i, (fill, intent) in enumerate(dummy.fills):
         if intent.value == "open":
             positions_history[fill.symbol] = fill
+            trade_levels[fill.symbol] = dummy.open_levels[i]
         else:
             entry = positions_history.pop(fill.symbol)
+            exit_px = fill.price
+            levels = trade_levels.pop(fill.symbol, None)
+            if intent.value in ("stop", "take_profit") and levels is not None:
+                # Level fills, not bar extremes: clamp mechanical stop/TP exit
+                # fills to the barrier level the risk layer anchored at entry,
+                # taking the WORSE of the level fill and the actual fill (both
+                # carry the adverse close-side slippage). Strategy exits and
+                # the end-of-test liquidation (intent "close") are untouched.
+                stop_px, tp_px = levels
+                level = stop_px if intent.value == "stop" else tp_px
+                if fill.side.value == "sell":  # closing a long: worse = lower
+                    exit_px = min(level * (1.0 - slip_bps / 10_000.0), fill.price)
+                else:                          # closing a short: worse = higher
+                    exit_px = max(level * (1.0 + slip_bps / 10_000.0), fill.price)
             qty = fill.qty
-            if entry.side.value == "buy":
-                pnl = (fill.price - entry.price) * qty - entry.fee - fill.fee
+            side_str = "LONG" if entry.side.value == "buy" else "SHORT"
+            if side_str == "LONG":
+                pnl = (exit_px - entry.price) * qty - entry.fee - fill.fee
             else:
-                pnl = (entry.price - fill.price) * qty - entry.fee - fill.fee
+                pnl = (entry.price - exit_px) * qty - entry.fee - fill.fee
             closed_pnls.append(pnl)
             trades.append({
-                "side": "LONG" if entry.side.value == "buy" else "SHORT",
-                "entry_px": round(entry.price, 2), "exit_px": round(fill.price, 2),
+                "side": side_str,
+                "entry_px": round(entry.price, 2), "exit_px": round(exit_px, 2),
                 "qty": round(qty, 6),
                 "entry_ts": datetime.fromtimestamp(entry.ts_ns / _NS, tz=timezone.utc).isoformat(),
                 "exit_ts": datetime.fromtimestamp(fill.ts_ns / _NS, tz=timezone.utc).isoformat(),
@@ -216,6 +349,12 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
             })
             exit_breakdown[intent.value] += 1
             hold_bars.append((fill.ts_ns - entry.ts_ns) / (900 * _NS))
+            if side_str == "LONG":
+                long_trades += 1
+                if pnl > 0:
+                    long_wins += 1
+            # Zero PnL is a loss: only strictly positive pnl counts as a win
+            # (conservative — costs make exact-zero rare but possible).
             if pnl > 0:
                 wins += 1
                 total_profit += pnl
@@ -224,6 +363,7 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
                 total_loss += abs(pnl)
 
     win_rate = wins / total_trades if total_trades else 0.0
+    win_rate_long_only = long_wins / long_trades if long_trades else 0.0
     profit_factor = total_profit / total_loss if total_loss > 0 else (total_profit if total_profit > 0 else 1.0)
     if len(closed_pnls) > 1:
         mean_pnl = sum(closed_pnls) / len(closed_pnls)
@@ -260,6 +400,9 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
             "total_return_pct": round(total_return, 4),
             "total_trades": total_trades,
             "win_rate": round(win_rate, 4),
+            "win_definition": "pnl > 0",
+            "win_rate_long_only": round(win_rate_long_only, 4),
+            "total_trades_long_only": long_trades,
             "profit_factor": round(profit_factor, 4),
             "sharpe": round(sharpe, 4),
             "costs_paid": round(costs_paid, 4),
@@ -277,13 +420,20 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
         "exit_breakdown": dict(exit_breakdown),
         "avg_hold_bars": round(sum(hold_bars) / len(hold_bars), 2) if hold_bars else 0.0,
         "rejects": dict(Counter(r for _, r in dummy.rejects)),
+        "warmup": {"bars": warmup_bars, "trades": warmup_trades},
     }
     return report
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bars", type=int, default=2880, help="number of 15m bars")
+    ap.add_argument("--bars", type=int, default=2880,
+                    help="number of EVALUATED 15m bars (warmup bars are extra)")
+    ap.add_argument("--warmup-bars", type=int, default=100,
+                    help="extra bars fed before the evaluated window to seed "
+                         "strategy/risk state; their trades are NOT counted and "
+                         "a position open at the window start is liquidated at "
+                         "the first evaluated tick (0 = legacy cold start)")
     ap.add_argument("--symbol", default="BTCUSDT",
                     help="Binance spot symbol, e.g. BTCUSDT, ETHUSDT")
     ap.add_argument("--end-date", default="now")
@@ -323,10 +473,14 @@ def main() -> None:
 
     end_ms = parse_end(args.end_date)
     cache = None if args.skip_fetch else out_dir / "klines.json"
-    print(f"[entropy-accuracy] fetching {args.bars} x 15m {raw} bars ending {end_ms} ...")
-    klines = fetch_klines(args.bars, end_ms, cache, raw=raw)
-    print(f"[entropy-accuracy] got {len(klines)} closed bars "
-          f"({datetime.fromtimestamp(klines[0][0]/1000, tz=timezone.utc):%Y-%m-%d %H:%M} -> "
+    total_bars = args.bars + max(0, args.warmup_bars)
+    print(f"[entropy-accuracy] fetching {total_bars} x 15m {raw} bars ending {end_ms} ...")
+    klines = fetch_klines(total_bars, end_ms, cache, raw=raw)
+    warmup_bars = max(0, min(args.warmup_bars, len(klines) - 1)) if klines else 0
+    eval_klines = klines[warmup_bars:]
+    print(f"[entropy-accuracy] got {len(eval_klines)} evaluated closed bars "
+          f"(+{warmup_bars} warmup) "
+          f"({datetime.fromtimestamp(eval_klines[0][0]/1000, tz=timezone.utc):%Y-%m-%d %H:%M} -> "
           f"{datetime.fromtimestamp(klines[-1][6]/1000, tz=timezone.utc):%Y-%m-%d %H:%M} UTC)")
 
     strategies = tuple(args.strategy) if args.strategy else ("consensus",)
@@ -374,10 +528,12 @@ def main() -> None:
     )
 
     report = simulate(klines, cfg, run_dir=str(out_dir / "ledger"),
-                      trade_csv=str(out_dir / "trades.csv"), symbol=symbol)
+                      trade_csv=str(out_dir / "trades.csv"), symbol=symbol,
+                      warmup_bars=args.warmup_bars)
     report["config"] = {
-        "symbol": symbol, "interval": INTERVAL, "bars": len(klines),
-        "start_utc": datetime.fromtimestamp(klines[0][0] / 1000, tz=timezone.utc).isoformat(),
+        "symbol": symbol, "interval": INTERVAL, "bars": len(eval_klines),
+        "warmup_bars": warmup_bars,
+        "start_utc": datetime.fromtimestamp(eval_klines[0][0] / 1000, tz=timezone.utc).isoformat(),
         "end_utc": datetime.fromtimestamp(klines[-1][6] / 1000, tz=timezone.utc).isoformat(),
         "starting_cash": args.cash,
         "timeframe": "15m", "bar_s": 900.0,
@@ -403,7 +559,10 @@ def main() -> None:
     print(f"risk         : {args.per_trade_pct}%/trade, max {args.max_concurrent} open, "
           f"exposure <= {args.max_total_exposure_pct}%, daily loss <= {args.max_daily_loss_pct}%")
     print(f"final equity : ${m['final_equity']:.2f}  (return {m['total_return_pct']:+.2f}%)")
-    print(f"accuracy     : win rate {m['win_rate']*100:.1f}%  ({m['total_trades']} closed trades)")
+    print(f"accuracy     : win rate {m['win_rate']*100:.1f}%  ({m['total_trades']} closed trades, "
+          f"win = pnl > 0)")
+    print(f"long-only    : win rate {m['win_rate_long_only']*100:.1f}%  "
+          f"({m['total_trades_long_only']} closed long trades, spot-deployable)")
     print(f"quality      : profit factor {m['profit_factor']:.2f}, sharpe {m['sharpe']:.2f}")
     print(f"costs paid   : ${m['costs_paid']:.2f}  (turnover {m['notional_turnover_x']}x cash)")
     print(f"risk         : max DD {m['max_drawdown_pct']:.2f}%, max exposure {m['max_exposure_pct_observed']:.1f}%, "
