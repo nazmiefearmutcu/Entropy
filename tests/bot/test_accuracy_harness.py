@@ -8,9 +8,12 @@ the roll into bar 36, i.e. confirm_bars=2 both qualifying bars; risk barriers
 are fixed percentages of the slippage-adjusted entry fill because
 vol_window_s=30 leaves fewer than 5 window ticks at entry):
 
-* pessimistic intrabar barrier resolution — the LOW tick is fed before the
-  HIGH tick, so when one bar's range contains both an open position's stop and
-  its take-profit the STOP resolves first;
+* pessimistic intrabar barrier resolution — the low/high tick order inside a
+  bar is DIRECTION-AWARE (an open long feeds L before H, an open short feeds
+  H before L; the order is chosen after the open tick, so just-opened
+  positions are covered): when one bar's range contains both an open
+  position's stop and its take-profit the STOP resolves first, for either
+  direction;
 * level fills — mechanical stop/TP exit fills are clamped, when pairing, to
   the barrier level anchored at entry (worse of level and actual fill, both
   with the close-side adverse slippage), never left at the bar extreme;
@@ -177,6 +180,52 @@ def test_stop_gap_through_keeps_the_worse_fill():
     assert stop_level > wild_open * 0.95  # the low gapped through the barrier
     assert stop["exit_px"] == pytest.approx(wild_open * 0.95 * (1 - SLIP), rel=1e-3)
     assert stop["exit_px"] < stop_level * (1 - SLIP)
+
+
+def _short_base_klines() -> list[list[Any]]:
+    """Mirror of :func:`_base_klines` on a 0.3%/bar downtrend: the short entry
+    fires at the roll into bar 36 and bar 38 is a wild bar whose [low, high]
+    swallows the short's stop (above) AND take-profit (below)."""
+    klines, px = _ramp(38, pct=0.997)   # bars 0..37
+    klines.append(_kline(38, px, px * 0.996, hi=px * 1.05, lo=px * 0.95))
+    px *= 0.996
+    for i in range(39, 90):
+        o, c = px, px * 0.997
+        klines.append(_kline(i, o, c))
+        px = c
+    return klines
+
+
+def test_both_in_bar_resolves_stop_first_for_shorts():
+    """The mirror case: for a SHORT the stop sits ABOVE the entry and the
+    take-profit below, so a fixed L-before-H order would resolve the TP first
+    (the direction bias the round-1 review caught — it reintroduced the WR
+    inflation for shorts). The wild bar must stop the position out via its
+    HIGH tick, which for shorts is fed before the low tick."""
+    klines = _short_base_klines()
+    report = _run(klines, _cfg())
+    trades = report["trades"]
+    assert trades, "the downtrend must produce trades"
+    shorts = [t for t in trades if t["side"] == "SHORT"]
+    assert shorts, "the downtrend must produce SHORT trades"
+    stops = [t for t in trades if t["exit_intent"] == "stop"]
+    assert len(stops) == 1, f"exactly the wild bar may stop out: {report['exit_breakdown']}"
+    stop = stops[0]
+    assert stop["side"] == "SHORT"
+    # both barriers were inside the wild bar's range -> the both-in-bar case
+    stop_level = stop["entry_px"] * (1 + 0.015)
+    tp_level = stop["entry_px"] * (1 - 0.012)
+    wild = klines[38]
+    assert wild[2] >= stop_level and wild[3] <= tp_level
+    # the exit fill lands on the wild bar's HIGH tick — fed FIRST for shorts
+    # (re-stamped to +1s so fed time stays monotonic)
+    exit_ms = datetime.fromisoformat(stop["exit_ts"]).timestamp() * 1000.0
+    assert wild[0] < exit_ms <= wild[0] + BAR_MS
+    assert exit_ms - wild[0] == 1000.0
+    # worse-of keeps the deeper BUY fill (bar high + adverse slippage)
+    assert stop["exit_px"] == pytest.approx(wild[2] * (1 + SLIP), rel=1e-3)
+    assert stop["exit_px"] > stop_level * (1 + SLIP)
+    assert stop["pnl"] < 0
 
 
 # ---- level fills, not bar extremes ---------------------------------------------
