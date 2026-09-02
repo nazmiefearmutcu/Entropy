@@ -401,6 +401,11 @@ class ConsensusStrategy:
         st.direction = 0
         st.bars_in_trade = 0
         st.bars_since_exit = 0
+        # Reset the trail anchors too: a mechanical stop/take-profit must not
+        # leave the next trade inheriting this trade's high-water mark, or the
+        # trail band fires far too early on re-entry.
+        st.peak = 0.0
+        st.last_close = 0.0
 
     # ---- hot path -------------------------------------------------------
 
@@ -551,20 +556,31 @@ class ConsensusStrategy:
             st.streak_dir = 0
             st.direction = sgn
             st.bars_in_trade = 0
+            # Fresh trail anchors: without this the new trade inherits the
+            # PREVIOUS trade's high-water mark (a second long keeps the old
+            # peak, a second short the old low) and the trail band fires far
+            # too early — often on the first bar after min_hold.
+            st.peak = 0.0
+            st.last_close = 0.0
             action = SignalAction.ENTER_LONG if sgn > 0 else SignalAction.ENTER_SHORT
             return [Signal(symbol=symbol, action=action, strength=abs(score),
                            reason=reason, ts_ns=ts_ns, strategy=self.name)]
 
-        if st.bars_in_trade < self.min_hold_bars:
-            return []  # a fresh position rides out its first few bars
-        if self.costs is not None:
-            self._last_move_rms[symbol] = self._bar_move_rms(closes)
+        # Trail anchors accumulate from the FIRST completed bar of the trade:
+        # this block deliberately runs above the min_hold early-return so the
+        # first trail comparison after min_hold uses the true high-water mark
+        # of the whole trade, not just the bars since min_hold elapsed. The
+        # min_hold gate itself only blocks EXIT DECISIONS below.
         close = closes[-1]
         st.last_close = close
         if st.direction > 0:
             st.peak = max(st.peak, close) if st.peak > 0.0 else close
         else:
             st.peak = min(st.peak, close) if st.peak > 0.0 else close
+        if st.bars_in_trade < self.min_hold_bars:
+            return []  # a fresh position rides out its first few bars
+        if self.costs is not None:
+            self._last_move_rms[symbol] = self._bar_move_rms(closes)
         if not self._should_exit(score, votes, st.direction, symbol):
             return []
         st.direction = 0

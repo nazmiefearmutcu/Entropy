@@ -652,3 +652,118 @@ def test_hold_mode_never_exits_on_score():
     actions = [a for _, a in events]
     assert SignalAction.ENTER_LONG in actions
     assert SignalAction.EXIT not in actions
+
+
+# ---- trail anchor lifecycle (peak/last_close reset) -------------------------
+#
+# The trail band (`px <= peak*(1-trail_pct)` for longs) is only as good as the
+# anchor: a trade must anchor at ITS OWN high-water mark, accumulated from the
+# first completed bar (even while min_hold_bars still gates the exit decision).
+# These scenarios use a two-vote weight map (EMA + RSI) so the MACD histogram —
+# which sours for a dozen bars after any dip — cannot gate the re-entry timing.
+
+
+def _two_long_trades_path() -> tuple[list[float], float]:
+    """Ramp -> entry -> one-bar dip that pierces a 0.5% trail band -> flat
+    bottom -> fresh ramp. The re-entry fires while price is still BELOW the
+    first trade's trail band, with no short in between (the dip is too shallow
+    to qualify one)."""
+    closes: list[float] = []
+    px = 100.0
+    for _ in range(45):
+        px *= 1.003
+        closes.append(px)
+    peak = px
+    for f in (0.994, 0.999, 0.999, 1.0):
+        px *= f
+        closes.append(px)
+    for _ in range(25):
+        px *= 1.003
+        closes.append(px)
+    return closes, peak
+
+
+def test_trail_anchor_resets_on_re_entry():
+    """A second long must anchor its trail at ITS entry region, not the first
+    trade's high-water mark P.
+
+    The re-entry happens below the first trade's trail band, so under the
+    stale-peak bug the very first decision bar of trade 2 would judge
+    ``close <= P*(1-trail_pct)`` true and exit immediately. With the anchor
+    reset at entry, the second trade rides the fresh ramp."""
+    closes, peak = _two_long_trades_path()
+    strat = ConsensusStrategy(
+        symbols=("SPY",), exit_mode="trail", trail_pct=0.005,
+        min_hold_bars=0, cooldown_bars=0, confirm_bars=1,
+        weights={"ema": 0.5, "rsi": 0.5},
+    )
+    events = feed_bars(strat, "SPY", closes)
+    assert [a for _, a in events] == [
+        SignalAction.ENTER_LONG, SignalAction.EXIT, SignalAction.ENTER_LONG,
+    ]
+    _, exit_bar, reentry_bar = (b for b, _ in events)
+    assert exit_bar == reentry_bar - 1  # re-entry on the bar after the trail exit
+    # ... below the first trade's trail band: the bug would exit right here
+    assert closes[reentry_bar] < peak * (1.0 - 0.005)
+    # the flat bottom bar that follows is what the stale anchor would judge —
+    # it is below the band, so the bug's immediate exit triggers exactly here
+    assert closes[reentry_bar + 1] <= peak * (1.0 - 0.005)
+    assert strat._states["SPY"].direction == 1
+
+
+def test_on_position_closed_resets_trail_anchor():
+    """A mechanical stop/take-profit must not leave the stale high-water mark
+    behind for the next trade (the runner re-arms the strategy through this
+    hook when the risk layer closes a position the strategy did not ask to)."""
+    closes = path_trend(3, direction=1, n=60)
+    strat = ConsensusStrategy(
+        symbols=("SPY",), exit_mode="trail", trail_pct=0.005,
+        min_hold_bars=0, confirm_bars=1, weights={"ema": 0.5, "rsi": 0.5},
+    )
+    events = feed_bars(strat, "SPY", closes)
+    assert [a for _, a in events] == [SignalAction.ENTER_LONG]
+    st = strat._states["SPY"]
+    assert st.peak > 0.0 and st.last_close > 0.0  # anchors accumulated
+    strat.on_position_closed("SPY", "stop")
+    assert st.direction == 0
+    assert st.peak == 0.0
+    assert st.last_close == 0.0
+
+
+def test_peak_accumulates_during_min_hold_and_anchors_first_trail_decision():
+    """The trail anchor must accumulate from the FIRST completed bar of the
+    trade, even though min_hold_bars gates the exit decision itself.
+
+    The run-up to the trade's high-water mark happens entirely inside the
+    min_hold window; the crash below the trail band happens while min_hold is
+    still active and price then goes flat. The exit must therefore fire on the
+    VERY FIRST post-min-hold decision bar — which is only possible if the peak
+    includes the pre-min-hold run-up (a peak tracked from min_hold onward would
+    sit at the flat price and never exit)."""
+    closes: list[float] = []
+    px = 100.0
+    for _ in range(35):  # the entry fires on the earliest bar the indicators allow
+        px *= 1.003
+        closes.append(px)
+    px *= 1.01  # trade bar 1: run-up to the trade high while min_hold is active
+    trade_high = px
+    closes.append(px)
+    px *= 0.95  # trade bar 2: crash below the trail band, still inside min_hold
+    closes.append(px)
+    for _ in range(15):  # flat below the band for the rest of the path
+        px *= 1.0005
+        closes.append(px)
+
+    strat = ConsensusStrategy(
+        symbols=("SPY",), exit_mode="trail", trail_pct=0.02,
+        min_hold_bars=5, cooldown_bars=0, confirm_bars=1,
+        weights={"ema": 0.5, "rsi": 0.5},
+    )
+    events = feed_bars(strat, "SPY", closes)
+    assert [(b, a) for b, a in events] == [
+        (35, SignalAction.ENTER_LONG), (40, SignalAction.EXIT),
+    ]
+    entry_bar, exit_bar = (b for b, _ in events)
+    assert exit_bar - entry_bar == 5  # the FIRST decision bar min_hold allows
+    # the anchor was the pre-crash high accumulated during min_hold
+    assert strat._states["SPY"].peak == pytest.approx(trade_high)
