@@ -250,8 +250,10 @@ Evidence (honest harness, all net of 26 bps round trip; orchestrator battery):
 |---|---|---|---|---|---|
 | ETH OOS 30d | **76.7%** | 30 | +1.79% | 1.35 | [59.1%, 88.2%] |
 | BTC 30d regression | **80.6%** | 36 | +1.53% | 1.57 | beats H 75.0%/1.45 |
-| ETH 60d | 76.6% | 64 | +1.62% | **0.90 (soft)** | — |
+| ETH 60d † | 76.6% | 64 | +1.62% | **0.90 (soft)** | — |
 | ETH 7d tail | 75.0% | 8 | — | 0.23 (1 big stop, tiny sample) | — |
+
+† The ETH 60d window (07-05→09-03) overlaps the 120d train (ending 08-03) over 07-05→08-03; it mixes ~30d of train with ~30d of true OOS and is not pure OOS. All gate decisions rest on the clean 30d rows.
 
 Post-ship verification (bare defaults, no overrides, window ending
 2026-09-03 ~15:00 UTC — matches the battery to window-shift): ETH 30d
@@ -267,10 +269,17 @@ the shipped config (pinned by
 `tests/bot/test_consensus.py::test_default_config_is_shipped_h`); the gate's
 `build_ship_default_cfg` is 1:1 with the harness CLI defaults (extended
 contract test runs BOTH mains stubbed and compares cfg subtrees).
+Full shipped behavior also needs `entry_grace_bars=3`, which lives on
+`simulate()` (signature default stays 0) and arrives via the harness CLI /
+gate defaults — bare `simulate(klines, BotConfig())` runs grace 0.
 
 Standing risk note (not hidden): the 20σ stop is very wide — it almost never
 fires (post-ship 30d: 0 stops in 30 ETH trades, 2 in 37 BTC trades); exits
-are TP / time-stop / score. A single sharp selloff can erase weeks of small
+are TP / time-stop / score. Note s20's 20σ stop was TUNED on this same 30d
+ETH window (stop-widening ladder 8→20σ plus f04 refinement), not merely
+selected among families — so the 30d numbers are optimistic for the stop
+knob specifically, and s20 stays provisional until the rolling gate confirms
+on a fresh window. A single sharp selloff can erase weeks of small
 TPs — the 60d PF of 0.90 proves it. The rolling gate
 (`scripts/entropy_wr_gate.py`, now s20-par with `--stop-sigma-mult`,
 `--tp-sigma-mult`, `--max-hold-bars`, `--direction-bars` flags) is the
