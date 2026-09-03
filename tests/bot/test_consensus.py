@@ -767,3 +767,119 @@ def test_peak_accumulates_during_min_hold_and_anchors_first_trail_decision():
     assert exit_bar - entry_bar == 5  # the FIRST decision bar min_hold allows
     # the anchor was the pre-crash high accumulated during min_hold
     assert strat._states["SPY"].peak == pytest.approx(trade_high)
+
+
+# ---- T3 accuracy levers: long_only, time stop, entry sigma ------------------
+
+
+def feed_signals(strat: ConsensusStrategy, symbol: str,
+                 closes: list[float]) -> list[tuple[int, Signal]]:
+    """One tick per 5s bucket; returns (bar_index, Signal) pairs."""
+    out: list[tuple[int, Signal]] = []
+    for i, px in enumerate(closes):
+        ts = i * _BAR_NS + 1
+        for sig in strat.on_tick(symbol, px, ts, events=[]):
+            out.append((i, sig))
+    return out
+
+
+@pytest.mark.parametrize("seed", [1, 7, 42])
+def test_long_only_never_emits_enter_short(seed):
+    """A short-qualifying score is skipped entirely under long_only: the
+    downtrend that produces exactly one ENTER_SHORT normally must produce
+    NOTHING, and the strategy must not secretly track a short either."""
+    strat = ConsensusStrategy(symbols=("SPY",), long_only=True)
+    events = feed_signals(strat, "SPY", path_trend(seed, direction=-1))
+    assert events == []
+    assert strat._states["SPY"].direction == 0
+    # no short streak survives either: the reset leaves it at zero
+    assert strat._states["SPY"].streak == 0
+
+
+@pytest.mark.parametrize("seed", [1, 7, 42])
+def test_long_only_still_enters_long(seed):
+    strat = ConsensusStrategy(symbols=("SPY",), long_only=True)
+    events = feed_signals(strat, "SPY", path_trend(seed, direction=1))
+    assert [sig.action for _, sig in events] == [SignalAction.ENTER_LONG]
+
+
+def test_long_only_default_false_keeps_shorts():
+    """Default off: existing behavior bit-for-bit (the short still fires)."""
+    strat = ConsensusStrategy(symbols=("SPY",))
+    events = feed_signals(strat, "SPY", path_trend(7, direction=-1))
+    assert [sig.action for _, sig in events] == [SignalAction.ENTER_SHORT]
+
+
+def test_time_stop_fires_at_the_configured_bar():
+    """max_hold_bars=3 with exit_mode='hold' (which never exits on score):
+    the only possible EXIT is the time stop, exactly 3 completed bars in,
+    overriding the score/trend/trail checks by construction."""
+    closes = path_trend(7, direction=1, n=60)
+    strat = ConsensusStrategy(
+        symbols=("SPY",), exit_mode="hold", max_hold_bars=3, min_hold_bars=3,
+        confirm_bars=1, cooldown_bars=1 << 30,  # no re-entry: exactly one trade
+    )
+    events = feed_signals(strat, "SPY", closes)
+    assert [sig.action for _, sig in events] == [
+        SignalAction.ENTER_LONG, SignalAction.EXIT,
+    ]
+    entry_bar, exit_bar = (b for b, _ in events)
+    assert exit_bar - entry_bar == 3
+    assert "time stop" in events[1][1].reason
+    st = strat._states["SPY"]
+    assert st.direction == 0 and st.bars_in_trade == 0
+
+
+def test_time_stop_is_off_by_default():
+    """max_hold_bars defaults to 0: the same hold-mode path never exits."""
+    strat = ConsensusStrategy(symbols=("SPY",), exit_mode="hold")
+    events = feed_signals(strat, "SPY", path_trend(7, direction=1, n=120))
+    assert [sig.action for _, sig in events] == [SignalAction.ENTER_LONG]
+
+
+def test_time_stop_validation_requires_min_hold_compatibility():
+    with pytest.raises(ValueError):
+        ConsensusStrategy(symbols=("SPY",), min_hold_bars=5, max_hold_bars=3)
+    with pytest.raises(ValueError):
+        ConsensusStrategy(symbols=("SPY",), max_hold_bars=-1)
+    # 0 (off) and >= min_hold are both legal
+    ConsensusStrategy(symbols=("SPY",), min_hold_bars=5, max_hold_bars=0)
+    ConsensusStrategy(symbols=("SPY",), min_hold_bars=5, max_hold_bars=5)
+
+
+def test_entry_signals_carry_entry_bar_sigma():
+    """ENTRY signals carry the entry bar's RMS of returns (a fraction) and the
+    cost-gate cache is set to the same value; EXIT signals carry no sigma."""
+    closes = path_trend(3, direction=1, n=60) + [
+        px * 0.97 for px in path_trend(3, direction=1, n=60)[-60:]
+    ]
+    strat = ConsensusStrategy(
+        symbols=("SPY",), exit_mode="trail", trail_pct=0.005,
+        min_hold_bars=0, cooldown_bars=0, confirm_bars=1,
+        weights={"ema": 0.5, "rsi": 0.5},
+    )
+    events = feed_signals(strat, "SPY", closes)
+    actions = [sig.action for _, sig in events]
+    assert SignalAction.ENTER_LONG in actions
+    assert SignalAction.EXIT in actions
+    entry = [sig for _, sig in events if sig.action is SignalAction.ENTER_LONG][-1]
+    exit_sig = next(sig for _, sig in events if sig.action is SignalAction.EXIT)
+    assert entry.sigma is not None and entry.sigma > 0.0
+    assert entry.sigma < 1.0  # a fraction, not a percent
+    # the cache holds the LAST entry's sigma (no cost model -> no other writer)
+    assert strat._last_move_rms["SPY"] == pytest.approx(entry.sigma)
+    assert exit_sig.sigma is None
+
+
+def test_config_wiring_long_only_and_max_hold_bars():
+    from entropy.bot.config import ConsensusConfig
+
+    cfg = BotConfig(strategies=("consensus",), consensus=ConsensusConfig(
+        long_only=True, max_hold_bars=9,
+    ))
+    strat = build_strategies(cfg)[0]
+    assert strat.long_only is True
+    assert strat.max_hold_bars == 9
+    # defaults stay no-ops
+    dflt = build_strategies(BotConfig())[0]
+    assert dflt.long_only is False and dflt.max_hold_bars == 0

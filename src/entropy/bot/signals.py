@@ -18,3 +18,7 @@ class Signal(msgspec.Struct, frozen=True):
     reason: str
     ts_ns: int
     strategy: str
+    #: Per-bar RMS of returns (a fraction, e.g. 0.0011) at the entry bar, set by
+    #: strategies on ENTRY signals. Sigma-scaled stop/TP barriers consume it;
+    #: None (exits, strategies that do not measure it) falls back to percent.
+    sigma: float | None = None

@@ -223,6 +223,15 @@ class ConsensusStrategy:
     * ``confirm_bars``: require the entry condition to hold for that many
       consecutive completed bars before signalling, so a single noisy bar
       cannot fire an entry.
+
+    Two optional position-lifecycle levers:
+
+    * ``long_only``: never emit ENTER_SHORT (a short-qualifying score resets
+      the streak instead of entering). Matches spot-deployable reality — Binance
+      spot cannot open shorts live, so short "accuracy" is not executable.
+    * ``max_hold_bars``: time stop — after that many completed bars in the
+      trade the position is exited regardless of score/trend/trail (0 = off;
+      must be 0 or >= ``min_hold_bars`` or construction raises).
     """
 
     name = "consensus"
@@ -259,6 +268,8 @@ class ConsensusStrategy:
         min_hold_bars: int = 3,
         cooldown_bars: int = 2,
         exit_mode: str = "score",
+        max_hold_bars: int = 0,
+        long_only: bool = False,
         regime_window: int = 20,
         slope_lookback: int = 5,
         direction_bars: int = 0,
@@ -297,6 +308,12 @@ class ConsensusStrategy:
             raise ValueError("direction_min_slope must be >= 0")
         if trail_pct < 0.0:
             raise ValueError("trail_pct must be >= 0")
+        if max_hold_bars < 0:
+            raise ValueError("max_hold_bars must be >= 0 (0 = off)")
+        if max_hold_bars > 0 and max_hold_bars < max(0, min_hold_bars):
+            # A time stop that expires BEFORE the min-hold gate lifts can never
+            # fire — the config is contradictory, refuse it at construction.
+            raise ValueError("max_hold_bars must be 0 (off) or >= min_hold_bars")
 
         self.symbols = symbols  # None = trade every symbol
         self.bar_s = bar_s
@@ -322,6 +339,12 @@ class ConsensusStrategy:
         self.min_hold_bars = max(0, min_hold_bars)
         self.cooldown_bars = max(0, cooldown_bars)
         self.exit_mode = exit_mode
+        self.max_hold_bars = max_hold_bars
+        #: When True the strategy never emits ENTER_SHORT: a short-qualifying
+        #: score skips the entry entirely. Matches spot-deployable reality —
+        #: Binance spot cannot open short positions live, so the accuracy the
+        #: harness measures on shorts is not executable.
+        self.long_only = long_only
         self.regime_window = max(2, regime_window)
         self.slope_lookback = max(1, slope_lookback)
         self.direction_bars = direction_bars
@@ -538,6 +561,12 @@ class ConsensusStrategy:
                 st.streak_dir = 0
                 return []
             sgn = 1 if score > 0 else -1
+            if self.long_only and sgn < 0:
+                # long_only: a short-qualifying score is not an entry chance we
+                # sit out — the short is never tradable, so the streak resets.
+                st.streak = 0
+                st.streak_dir = 0
+                return []
             if st.streak_dir != sgn:
                 st.streak, st.streak_dir = 1, sgn
             else:
@@ -562,9 +591,16 @@ class ConsensusStrategy:
             # too early — often on the first bar after min_hold.
             st.peak = 0.0
             st.last_close = 0.0
+            # Sigma at the ENTRY bar, fresh for this signal (not the cost gate's
+            # cached read): the risk layer converts it into sigma-scaled stop/TP
+            # barriers. Same value the cost gate cached — set the cache too so
+            # both consumers agree.
+            sigma = self._bar_move_rms(closes)
+            self._last_move_rms[symbol] = sigma
             action = SignalAction.ENTER_LONG if sgn > 0 else SignalAction.ENTER_SHORT
             return [Signal(symbol=symbol, action=action, strength=abs(score),
-                           reason=reason, ts_ns=ts_ns, strategy=self.name)]
+                           reason=reason, ts_ns=ts_ns, strategy=self.name,
+                           sigma=sigma)]
 
         # Trail anchors accumulate from the FIRST completed bar of the trade:
         # this block deliberately runs above the min_hold early-return so the
@@ -577,6 +613,18 @@ class ConsensusStrategy:
             st.peak = max(st.peak, close) if st.peak > 0.0 else close
         else:
             st.peak = min(st.peak, close) if st.peak > 0.0 else close
+        if self.max_hold_bars > 0 and st.bars_in_trade >= self.max_hold_bars:
+            # Time stop: overrides the score/trend/trail checks entirely and is
+            # independent of min_hold (construction pins max_hold_bars == 0 or
+            # >= min_hold_bars, so it always fires the moment it is eligible).
+            held = st.bars_in_trade
+            st.direction = 0
+            st.bars_in_trade = 0
+            st.bars_since_exit = 0
+            return [Signal(symbol=symbol, action=SignalAction.EXIT, strength=1.0,
+                           reason=f"time stop after {held} bars "
+                                  f"(max_hold_bars={self.max_hold_bars})",
+                           ts_ns=ts_ns, strategy=self.name)]
         if st.bars_in_trade < self.min_hold_bars:
             return []  # a fresh position rides out its first few bars
         if self.costs is not None:
