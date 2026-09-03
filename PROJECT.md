@@ -215,7 +215,7 @@ trades >= 20 AND PF >= 1.0 AND return >= 0; prints the Wilson 95% CI and exits
 .venv/Scripts/python scripts/entropy_accuracy_btc15m.py --bars 2880 --out C:/tmp/entropy_accuracy/ship_30d
 .venv/Scripts/python scripts/entropy_wr_gate.py --bars 2880 --out C:/tmp/entropy_wr_gate
 .venv/Scripts/python scripts/entropy_accuracy_btc15m.py --symbol ETHUSDT --bars 2880 --out C:/tmp/entropy_accuracy/ship_eth_30d
-.venv/Scripts/python scripts/entropy_accuracy_btc15m.py --bars 2880 --stop-mode percent --max-hold-bars 0 --direction-bars 0 --allow-short --out C:/tmp/entropy_accuracy/legacy_30d  # pre-H legacy shape
+.venv/Scripts/python scripts/entropy_accuracy_btc15m.py --bars 2880 --stop-mode percent --max-hold-bars 0 --direction-bars 0 --allow-short --vote-mode adaptive --entry-grace-bars 0 --out C:/tmp/entropy_accuracy/legacy_30d  # pre-H legacy shape
 ```
 
 ### Round 2 — ETH fixed (2026-09-03, shipped)
