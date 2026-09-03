@@ -109,6 +109,16 @@ class BotRunner:
         self.paused = False
         self._recent_signals: deque[str] = deque(maxlen=_RECENT_MAX)
         self._recent_rejects: deque[str] = deque(maxlen=_RECENT_MAX)
+        # Sigma-scaled barrier mode (RiskOverrides.stop_mode): when "sigma", an
+        # entry signal carrying sigma > 0 anchors the stop/TP at
+        # mult * sigma instead of the profile's percents. Barriers are anchored
+        # ONCE at open below — never re-anchored (harness ledger invariant).
+        self._stop_mode = config.risk_overrides.stop_mode
+        self._stop_sigma_mult = config.risk_overrides.stop_sigma_mult
+        self._tp_sigma_mult = config.risk_overrides.tp_sigma_mult
+        #: symbol -> entry-bar sigma of the entry signal being processed (set
+        #: in on_trade, consumed-or-dropped in _execute / on rejection).
+        self._entry_sigma: dict[str, float] = {}
 
     # ---- synchronous hot path -------------------------------------------------
     def on_trade(self, symbol: str, price: float, amount: float, side: str, ts_ns: int) -> None:
@@ -132,6 +142,11 @@ class BotRunner:
                     self._recent_rejects.append(f"{sig.symbol}: paused")
                     self._notify_closed(sig.symbol, "paused")
                     continue
+                if sig.action in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT):
+                    # Stash the entry bar's sigma (None when the strategy does
+                    # not measure it) so the open path below can anchor
+                    # sigma-scaled barriers. Removed on use or rejection.
+                    self._entry_sigma[sig.symbol] = sig.sigma
                 decision = self.risk.evaluate(sig, self.portfolio, price, ts_ns)
                 if decision.approved and decision.order is not None:
                     self._execute(decision.order)
@@ -142,6 +157,7 @@ class BotRunner:
                         # The entry never happened, so the strategy must not go on
                         # believing it holds the position it just asked for.
                         self._notify_closed(sig.symbol, f"rejected: {decision.reason}")
+                        self._entry_sigma.pop(sig.symbol, None)
 
     def _execute(self, order: Order) -> None:
         try:
@@ -157,7 +173,25 @@ class BotRunner:
             return
         if order.intent is OrderIntent.OPEN:
             pos_side = PositionSide.LONG if order.side is OrderSide.BUY else PositionSide.SHORT
-            stop_px, tp_px = self.risk.stop_tp_prices(pos_side, fill.price, order.symbol)
+            sigma = self._entry_sigma.pop(order.symbol, None)
+            if (
+                self._stop_mode == "sigma"
+                and sigma is not None and sigma > 0.0
+            ):
+                # Sigma-scaled barriers: convert the sigma multipliers into the
+                # percent units the barrier computation already consumes.
+                # stop_tp_prices skips its tick-window volatility scale here —
+                # sigma IS the entry bar's volatility (no double-counting).
+                stop_pct = self._stop_sigma_mult * sigma * 100.0
+                tp_pct = self._tp_sigma_mult * sigma * 100.0
+                stop_px, tp_px = self.risk.stop_tp_prices(
+                    pos_side, fill.price, order.symbol,
+                    stop_pct=stop_pct, tp_pct=tp_pct,
+                )
+            else:
+                # percent mode, or sigma missing/zero on the entry signal:
+                # exactly the legacy anchoring.
+                stop_px, tp_px = self.risk.stop_tp_prices(pos_side, fill.price, order.symbol)
             self.portfolio.open(order.symbol, pos_side, fill.qty, fill.price,
                                 stop_px, tp_px, fill.ts_ns, fill.fee)
             self.ledger.record_trade_open(
@@ -250,6 +284,10 @@ class BotRunner:
         old_profile = self.risk.profile.name
 
         self.config = cfg
+        # Barrier mode rides on risk_overrides, read fresh per open below.
+        self._stop_mode = cfg.risk_overrides.stop_mode
+        self._stop_sigma_mult = cfg.risk_overrides.stop_sigma_mult
+        self._tp_sigma_mult = cfg.risk_overrides.tp_sigma_mult
         profile = cfg.profile()
         if profile != self.risk.profile:
             self.risk.set_profile(profile)

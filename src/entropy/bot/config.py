@@ -75,6 +75,12 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
     min_hold_bars: int = 5
     cooldown_bars: int = 4
     exit_mode: str = "trail"             # score | trend_flip | either | hold | trail
+    #: Time stop: exit after this many completed bars in the trade regardless
+    #: of score/trend/trail (0 = off; must be 0 or >= min_hold_bars).
+    max_hold_bars: int = 0
+    #: Never emit ENTER_SHORT (spot shorts are not executable live, so the
+    #: short leg's measured accuracy is not deployable).
+    long_only: bool = False
 
     def weights(self) -> dict[str, float]:
         return {
@@ -130,11 +136,20 @@ class MarketCostConfig(msgspec.Struct, frozen=True):
         return out
 
 
+#: RiskOverrides fields consumed by the runner directly, never handed to
+#: make_custom() via active() (they are not RiskProfile overrides).
+_RISK_BARRIER_FIELDS = frozenset({"stop_mode", "stop_sigma_mult", "tp_sigma_mult"})
+
+
 class RiskOverrides(msgspec.Struct, frozen=True):
     """Optional per-field overrides applied on top of the named risk preset.
 
     ``None`` means "inherit the preset". This is how the settings UI offers a
     Custom profile without needing a whole extra preset vocabulary.
+
+    Barrier-mode fields (``stop_mode`` and the sigma multipliers) are NOT risk
+    preset overrides — they are consumed by :class:`~entropy.bot.runner.BotRunner`
+    directly and are therefore excluded from :meth:`active`.
     """
 
     per_trade_pct: float | None = None
@@ -146,12 +161,31 @@ class RiskOverrides(msgspec.Struct, frozen=True):
     cooldown_s: float | None = None
     min_volatility_pct: float | None = None
     vol_window_s: float | None = None
+    #: Stop/TP barrier anchoring: "percent" anchors at the profile's fixed
+    #: percents (legacy), "sigma" anchors at sigma-mult x the entry bar's
+    #: per-bar return RMS carried by the entry signal (falls back to percent
+    #: when the signal carries no usable sigma). Barriers are anchored ONCE at
+    #: open and never re-anchored — see the harness `_BarrierLedger` invariant.
+    stop_mode: str = "percent"
+    #: sigma multipliers: stop distance = stop_sigma_mult * sigma, TP distance
+    #: = tp_sigma_mult * sigma (as fractions of entry; defaults mirror the
+    #: shipped 1.5% / 1.2% shape at sigma ~ 0.001).
+    stop_sigma_mult: float = 1.5
+    tp_sigma_mult: float = 1.2
+
+    def __post_init__(self) -> None:
+        if self.stop_mode not in ("percent", "sigma"):
+            raise ValueError(
+                f"stop_mode must be 'percent' or 'sigma', got {self.stop_mode!r}"
+            )
+        if self.stop_sigma_mult <= 0.0 or self.tp_sigma_mult <= 0.0:
+            raise ValueError("sigma multipliers must be > 0")
 
     def active(self) -> dict[str, object]:
         return {
             name: value
             for name, value in ((n, getattr(self, n)) for n in self.__struct_fields__)
-            if value is not None
+            if value is not None and name not in _RISK_BARRIER_FIELDS
         }
 
 
@@ -310,6 +344,18 @@ def validate(cfg: BotConfig) -> list[str]:
         problems.append("consensus weights cannot all be zero")
     if not 0.0 <= c.min_participation <= 1.0:
         problems.append("consensus min participation must be a fraction in [0, 1]")
+    if c.max_hold_bars < 0:
+        problems.append("consensus max_hold_bars must be >= 0 (0 = off)")
+    elif c.max_hold_bars > 0 and c.max_hold_bars < max(0, c.min_hold_bars):
+        problems.append(
+            "consensus max_hold_bars must be 0 (off) or >= min_hold_bars, "
+            "otherwise the time stop can never fire"
+        )
+    ro = cfg.risk_overrides
+    if ro.stop_mode not in ("percent", "sigma"):
+        problems.append(f"risk stop_mode must be 'percent' or 'sigma', got {ro.stop_mode!r}")
+    if ro.stop_sigma_mult <= 0.0 or ro.tp_sigma_mult <= 0.0:
+        problems.append("risk sigma multipliers must be > 0")
     if cfg.mode == "live" and not cfg.live.acknowledged_risk:
         problems.append("live mode requires the risk acknowledgement")
     return problems
@@ -337,6 +383,7 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
                 min_participation=c.min_participation,
                 min_hold_bars=c.min_hold_bars, cooldown_bars=c.cooldown_bars,
                 exit_mode=c.exit_mode, regime_window=c.regime_window,
+                max_hold_bars=c.max_hold_bars, long_only=c.long_only,
                 slope_lookback=c.slope_lookback, regime_tilt=c.regime_tilt,
                 direction_bars=c.direction_bars,
                 direction_min_slope=c.direction_min_slope,

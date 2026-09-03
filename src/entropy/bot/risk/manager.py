@@ -107,25 +107,44 @@ class RiskManager:
         return f"o{self._order_seq}"
 
     def stop_tp_prices(
-        self, side: PositionSide, entry_px: float, symbol: str | None = None
+        self, side: PositionSide, entry_px: float, symbol: str | None = None,
+        *, stop_pct: float | None = None, tp_pct: float | None = None,
     ) -> tuple[float, float]:
-        p = self.profile
-        scale_factor = 1.0
-        if symbol is not None:
-            history = self.ticks_history.get(symbol)
-            if history:
-                # Same windowed sample the entry guards use (>= 5 in-window ticks);
-                # anything thinner falls back to the profile's base percentages.
-                prices = self._window_prices(symbol, history[-1][0])
-                if len(prices) >= _MIN_WINDOW_TICKS:
-                    mean = sum(prices) / len(prices)
-                    if mean > 0:
-                        variance = sum((x - mean) ** 2 for x in prices) / len(prices)
-                        std = variance ** 0.5
-                        scale_factor = 1.0 + std / mean
+        """Barrier prices for a fresh position.
 
-        stop_loss_pct = min(p.stop_loss_pct * scale_factor, _MAX_STOP_TP_PCT)
-        take_profit_pct = min(p.take_profit_pct * scale_factor, _MAX_STOP_TP_PCT)
+        Default (both ``stop_pct``/``tp_pct`` omitted): the profile's percents,
+        scaled by the tick window's volatility — the legacy behavior, unchanged.
+
+        With explicit ``stop_pct``/``tp_pct`` (percent-of-entry distances, e.g.
+        sigma-mult x sigma x 100 for sigma-scaled barriers), those are used as
+        the base distances instead of the profile's percents, and the
+        tick-window scale factor is SKIPPED: sigma already encodes the market's
+        volatility at the entry bar, so applying it again would double-count.
+        The 50% safety clamp still applies in both modes. Barriers are anchored
+        ONCE here at open and never re-anchored (see the harness
+        ``_BarrierLedger`` capture-at-open invariant).
+        """
+        if stop_pct is not None and tp_pct is not None and stop_pct > 0.0 and tp_pct > 0.0:
+            stop_loss_pct = min(stop_pct, _MAX_STOP_TP_PCT)
+            take_profit_pct = min(tp_pct, _MAX_STOP_TP_PCT)
+        else:
+            p = self.profile
+            scale_factor = 1.0
+            if symbol is not None:
+                history = self.ticks_history.get(symbol)
+                if history:
+                    # Same windowed sample the entry guards use (>= 5 in-window ticks);
+                    # anything thinner falls back to the profile's base percentages.
+                    prices = self._window_prices(symbol, history[-1][0])
+                    if len(prices) >= _MIN_WINDOW_TICKS:
+                        mean = sum(prices) / len(prices)
+                        if mean > 0:
+                            variance = sum((x - mean) ** 2 for x in prices) / len(prices)
+                            std = variance ** 0.5
+                            scale_factor = 1.0 + std / mean
+
+            stop_loss_pct = min(p.stop_loss_pct * scale_factor, _MAX_STOP_TP_PCT)
+            take_profit_pct = min(p.take_profit_pct * scale_factor, _MAX_STOP_TP_PCT)
 
         if side is PositionSide.LONG:
             return entry_px * (1 - stop_loss_pct / 100), entry_px * (1 + take_profit_pct / 100)
