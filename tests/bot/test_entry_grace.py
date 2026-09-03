@@ -247,3 +247,86 @@ def test_risk_trail_breakeven_exit_in_harness():
     # same bars, trail off: no ratchet, the position runs to the take-profit
     r_off = _run(klines, _cfg())
     assert r_off["trades"][0]["exit_intent"] == "take_profit"
+
+
+# ---- I1: FIFO exit-level pairing across re-entries --------------------------------
+
+def _two_tp_klines() -> list[list[Any]]:
+    """Ramp 36 bars (entry at bar 35's O tick) -> TP1 overshoots its level on
+    bar 39 -> re-entry at bar 41's O tick -> TP2 overshoots on bar 45; the
+    series ends at bar 45 so no third entry can fire (re-entry needs
+    cooldown 2 + confirm 2 = 4 completed bars)."""
+    klines, px = _ramp(36)
+    for i in range(36, 46):
+        o, c = klines[-1][4], klines[-1][4] * 1.003
+        klines.append(_kline(i, o, c))
+    return klines
+
+
+def test_two_mechanical_exits_pair_own_levels():
+    """I1 regression (trail=0, byte-identical requirement): a symbol with TWO
+    mechanical exits must clamp each fill to ITS OWN open-anchored level. The
+    bar-39 high overshoots trade 1's TP, so a correct pairing re-prices the
+    fill to trade 1's own tp; the old symbol-keyed dict popped trade 2's
+    levels for trade 1's fill (its higher TP let the raw overshoot through)
+    and popped None for trade 2 (masked by the open-level fallback)."""
+    klines = _two_tp_klines()
+    report = _run(klines, _cfg())
+    trades = report["trades"]
+    assert len(trades) == 2, report["trades"]
+    t1, t2 = trades
+    assert t1["exit_intent"] == "take_profit"
+    assert _bar_of(t1["exit_ts"]) == 39
+    assert t2["exit_intent"] == "take_profit"
+    assert _bar_of(t2["exit_ts"]) == 45
+    # each fill clamps to its OWN trade's anchored TP (the bar high overshot
+    # the level, so the unpaired raw fill would have stayed above it)
+    assert t1["exit_px"] == pytest.approx(t1["entry_px"] * 1.012 * (1 - SLIP), rel=1e-3)
+    assert t2["exit_px"] == pytest.approx(t2["entry_px"] * 1.012 * (1 - SLIP), rel=1e-3)
+    # the two trades anchored at different prices: the pairing itself mattered
+    assert t2["entry_px"] > t1["entry_px"]
+
+
+def _two_stop_ratchet_klines() -> list[list[Any]]:
+    """Ramp 36 bars -> deep low on bar 36 stops trade 1 -> re-entry at bar
+    39's O tick -> the ramp's bar-41 close crosses the 0.5*tp_dist trigger
+    (ratchet moves trade 2's stop to breakeven = entry) -> bar 42's low sits
+    BELOW breakeven but far ABOVE trade 2's anchored 1.5% stop, so the stop
+    fires at the shallow tick; series ends at bar 44 (no third entry)."""
+    klines, px = _ramp(36)
+    klines.append(_kline(36, px, px * 1.003, hi=px * 1.006, lo=px * 0.97))
+    for i in range(37, 42):
+        o, c = klines[-1][4], klines[-1][4] * 1.003
+        klines.append(_kline(i, o, c))
+    o42 = klines[-1][4]
+    klines.append(_kline(42, o42, o42 * 1.003, hi=o42 * 1.004, lo=o42 * 0.989))
+    for i in range(43, 45):
+        o, c = klines[-1][4], klines[-1][4] * 1.003
+        klines.append(_kline(i, o, c))
+    return klines
+
+
+def test_ratcheted_stop_pairing_survives_reentry():
+    """I1 regression with risk_trail_pct=0.5: trade 2's stop ratchets to
+    breakeven (entry) before its exit bar. Its fill must clamp to trade 2's
+    RATCHETED level — the shallow low-tick fill — NOT be re-priced down to
+    the stale open-anchored 1.5% stop. The old symbol-keyed dict popped None
+    for trade 2's fill (trade 1 consumed the only entry) and fell back to the
+    anchored level, exactly the barrier-capture failure T7 exists to fix."""
+    klines = _two_stop_ratchet_klines()
+    report = _run(klines, _cfg(risk_trail_pct=0.5))
+    trades = report["trades"]
+    assert len(trades) == 2, report["trades"]
+    t1, t2 = trades
+    assert t1["exit_intent"] == "stop"
+    assert _bar_of(t1["exit_ts"]) == 36
+    assert t2["exit_intent"] == "stop"
+    assert _bar_of(t2["exit_ts"]) == 42
+    # trade 2's exit tick: entry at bar-39 O (o39), bar 42's open is o39*1.003^3,
+    # the low is 0.989 of that open; the ratcheted stop fired there so the fill
+    # is that tick, not the deep anchored level
+    o42 = t2["entry_px"] / (1 + SLIP) * 1.003 ** 3
+    assert t2["exit_px"] == pytest.approx(o42 * 0.989 * (1 - SLIP), rel=1e-3)
+    assert t2["exit_px"] > t2["entry_px"] * 0.985 * (1 - SLIP) * 1.001
+    # trade 1 was a deep-low stop: its own levels, clamp inert (raw tick)
+    assert t1["exit_px"] < t1["entry_px"] * 0.98

@@ -206,10 +206,14 @@ class _BarrierLedger(DummyLedger):
         # self.fills (a symbol-keyed dict would be overwritten by later
         # trades before the pairing walk ever reads it)
         self.open_levels: list[tuple[float, float] | None] = []
-        # symbol -> (stop_px, tp_px) at mechanical exit order-emission time
-        # (the position is still open then, so the stop reflects any T7
-        # ratchet; the pairing walk pops it at the close fill)
-        self.exit_levels: dict[str, tuple[float, float]] = {}
+        # (stop_px, tp_px) at mechanical exit order-emission time, FIFO-aligned
+        # with the mechanical fills that consume them. Emissions happen in feed
+        # order and each emitted order produces exactly one fill in that same
+        # order, so append/pop aligns per trade — a symbol-keyed dict would be
+        # overwritten by the LAST emission and mis-pair every multi-exit symbol
+        # (the first fill would pop the last trade's levels; later fills pop
+        # None and fall back to the open-captured stop, losing any T7 ratchet)
+        self.exit_levels: list[tuple[float, float]] = []
 
     def record_fill(self, fill: Any, intent: Any) -> None:
         levels: tuple[float, float] | None = None
@@ -302,7 +306,7 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
                 pos.entry_ts_ns, ts_ns, bar_ns, entry_grace_bars
             ):
                 continue  # mechanical stop suppressed during entry grace
-            runner.ledger.exit_levels[o.symbol] = (pos.stop_px, pos.tp_px)  # type: ignore[attr-defined]
+            runner.ledger.exit_levels.append((pos.stop_px, pos.tp_px))  # type: ignore[attr-defined]
             out.append(o)
         return out
 
@@ -429,7 +433,7 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
                 # level anchored at open — the check_exits wrapper recorded the
                 # position's live barriers at order-emission time; prefer them
                 # (the TP is never ratcheted, so its exit level == open level).
-                exit_lv = dummy.exit_levels.pop(fill.symbol, None)
+                exit_lv = dummy.exit_levels.pop(0) if dummy.exit_levels else None
                 if exit_lv is not None:
                     levels = exit_lv
                 if levels is not None:
