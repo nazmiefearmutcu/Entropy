@@ -37,8 +37,28 @@ _spec.loader.exec_module(ha)
 from entropy.bot.config import BotConfig, ConsensusConfig, MarketCostConfig, RiskOverrides
 from entropy.bot.orders import OrderIntent
 from entropy.bot.portfolio import PositionSide
+from entropy.bot.risk.manager import RiskDecision
+from entropy.bot.signals import SignalAction
 
 _NS = 1_000_000_000
+
+
+def _ema_prefix(closes: list[float], n: int) -> list[float | None]:
+    """EMA(n) prefix array: out[i] = EMA over closes[0..i-1] (None until n
+    values consumed). Seed = SMA of the first n closes (repo indicator
+    convention), then standard EMA with alpha=2/(n+1). No lookahead: out[i]
+    never sees closes[i]."""
+    out: list[float | None] = [None] * (len(closes) + 1)
+    if n <= 0 or len(closes) < n:
+        return out
+    sma = sum(closes[:n]) / n
+    out[n] = sma
+    a = 2.0 / (n + 1)
+    e = sma
+    for i in range(n, len(closes)):
+        e = e * (1.0 - a) + closes[i] * a
+        out[i + 1] = e
+    return out
 
 
 def build_cfg(raws: list[str], args, out_dir: Path) -> BotConfig:
@@ -95,7 +115,7 @@ def build_cfg(raws: list[str], args, out_dir: Path) -> BotConfig:
 
 def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig,
                    run_dir: str, warmup_bars: int, entry_grace_bars: int,
-                   raws: list[str]) -> dict[str, Any]:
+                   raws: list[str], btc_gate_bars: int = 0) -> dict[str, Any]:
     out_dir = Path(run_dir).parent
     out_dir.mkdir(parents=True, exist_ok=True)
     runner = ha.BotRunner(cfg, run_dir=str(out_dir / "ledger"))
@@ -105,6 +125,42 @@ def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig
 
     bar_ns = int(cfg.bar_seconds() * _NS)
     _orig_check_exits = runner.risk.check_exits
+
+    # ---- BTC-regime pool gate (v0, pre-registered): no NEW entries while the
+    # last COMPLETED BTC bar's close is below its EMA(n) on the same timeframe.
+    # Exits always pass. EMA is fed only by closed bars (prefix array => the
+    # value used at global bar g is EMA over closes[0..g-1]: no lookahead).
+    gate_closed_bars = 0
+    gate_eval_bars = 0
+    if btc_gate_bars > 0:
+        btc_closes = [float(k[4]) for k in per_symbol_klines["BTCUSDT"]]
+        ema_pref = _ema_prefix(btc_closes, btc_gate_bars)
+        state = {"g": -1}
+
+        def _gate_note_bar(g: int) -> None:
+            state["g"] = g
+
+        def _gate_is_closed() -> bool:
+            g = state["g"]
+            if g < 1:
+                return False
+            e = ema_pref[g] if g < len(ema_pref) else None
+            return e is not None and btc_closes[g - 1] < e
+
+        _orig_evaluate = runner.risk.evaluate
+
+        def _evaluate(signal, portfolio, mark_px, ts_ns):
+            nonlocal gate_closed_bars, gate_eval_bars
+            if signal.action is not SignalAction.EXIT:
+                gate_eval_bars += 1
+                if _gate_is_closed():
+                    gate_closed_bars += 1
+                    return RiskDecision(False, None, "btc-regime gate closed")
+            return _orig_evaluate(signal, portfolio, mark_px, ts_ns)
+
+        runner.risk.evaluate = _evaluate  # type: ignore[method-assign]
+    else:
+        _gate_note_bar = lambda g: None  # noqa: E731
 
     def _check_exits(portfolio, ts_ns):
         orders = _orig_check_exits(portfolio, ts_ns)
@@ -157,7 +213,7 @@ def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig
         warm_ticks_by[sym] = _restamp(warm_ticks_by[sym], sym)
         eval_ticks_by[sym] = _restamp(eval_ticks_by[sym], sym)
 
-    def _feed(ticks_by: dict[str, list[dict[str, Any]]]):
+    def _feed(ticks_by: dict[str, list[dict[str, Any]]], g_offset: int = 0):
         curve: list[tuple[int, float, float]] = []
         max_open = 0
         max_exp = 0.0
@@ -183,6 +239,7 @@ def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig
                 max_exp = exp / snap.equity
 
         for i in range(n_bars):
+            _gate_note_bar(g_offset + i)
             for sym in ordered_syms:
                 bar = ticks_by[sym][i * 4:(i + 1) * 4]
                 _on(bar[0])
@@ -211,7 +268,7 @@ def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig
         runner.ledger = dummy  # type: ignore[assignment]
 
     print(f"[entropy-multi] feeding {sum(len(v) for v in eval_ticks_by.values())} evaluated ticks ...")
-    equity_curve, max_open, max_exposure_pct = _feed(eval_ticks_by)
+    equity_curve, max_open, max_exposure_pct = _feed(eval_ticks_by, g_offset=warmup_bars)
 
     final_ts = max(v[-1]["ts_ns"] for v in eval_ticks_by.values())
     ha._liquidate_open_positions(runner, dummy, final_ts)
@@ -322,6 +379,10 @@ def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig
         "avg_hold_bars": round(sum(hold_bars) / len(hold_bars), 2) if hold_bars else 0.0,
         "rejects": dict(Counter(r for _, r in dummy.rejects)),
         "warmup": {"bars": warmup_bars, "trades": warmup_trades},
+        "gate": ({"bars": btc_gate_bars,
+                  "entry_decisions": gate_eval_bars,
+                  "entry_decisions_gated": gate_closed_bars}
+                 if btc_gate_bars > 0 else None),
     }
     return report
 
@@ -363,10 +424,17 @@ def main() -> None:
     ap.add_argument("--tp-sigma-mult", type=float, default=4.0)
     ap.add_argument("--entry-grace-bars", type=int, default=3)
     ap.add_argument("--risk-trail-pct", type=float, default=0.0)
+    ap.add_argument("--btc-ema-gate", type=int, default=0,
+                    help="pool-level entry kill-switch: no NEW entries while the "
+                         "last completed BTC close < BTC EMA(n) on the same "
+                         "timeframe (0 = off). Exits always pass. Pre-registered "
+                         "v0 rule — do not tune N on the evaluation windows.")
     ap.add_argument("--skip-fetch", action="store_true")
     args = ap.parse_args()
 
     raws = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    if args.btc_ema_gate > 0 and "BTCUSDT" not in raws:
+        ap.error("--btc-ema-gate requires BTCUSDT in --symbols")
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     end_ms = ha.parse_end(args.end_date)
@@ -388,11 +456,13 @@ def main() -> None:
     cfg = build_cfg(raws, args, out_dir)
     report = simulate_multi(per_symbol, cfg, run_dir=str(out_dir / "ledger"),
                             warmup_bars=args.warmup_bars,
-                            entry_grace_bars=args.entry_grace_bars, raws=raws)
+                            entry_grace_bars=args.entry_grace_bars, raws=raws,
+                            btc_gate_bars=args.btc_ema_gate)
     report["config"] = {
         "symbols": raws, "interval": ha.INTERVAL, "bars": args.bars,
         "warmup_bars": args.warmup_bars,
         "end_date": args.end_date, "starting_cash": args.cash,
+        "btc_ema_gate": args.btc_ema_gate,
         "risk": {
             "per_trade_pct": args.per_trade_pct,
             "max_concurrent": args.max_concurrent,
@@ -419,6 +489,12 @@ def main() -> None:
         wr = b["wins"] / b["trades"] * 100 if b["trades"] else 0.0
         print(f"  {sym:28s} {b['trades']:4d}t  WR {wr:5.1f}%  pnl ${b['pnl']:+.2f}")
     print(f"exits        : {report['exit_breakdown']}  (avg hold {report['avg_hold_bars']} bars)")
+    if report["gate"]:
+        g = report["gate"]
+        pct = (g["entry_decisions_gated"] / g["entry_decisions"] * 100.0
+               if g["entry_decisions"] else 0.0)
+        print(f"btc gate     : EMA({g['bars']}) — {g['entry_decisions_gated']}/{g['entry_decisions']} "
+              f"entry decisions gated ({pct:.1f}%)")
     print(f"report       : {out_dir / 'report.json'}")
 
 
