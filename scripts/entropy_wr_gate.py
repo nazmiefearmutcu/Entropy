@@ -2,9 +2,9 @@
 """Rolling win-rate gate for the Entropy consensus bot.
 
 Re-runs the ship-default accuracy gate (scripts/entropy_accuracy_btc15m.py
-simulate()/fetch_klines, defaults = the verified "H" configuration) on the
-rolling 30d window of real Binance BTCUSDT 15m bars ending now (or --end-date),
-then applies the user's standing "keep win rate > 60% net of commissions"
+simulate()/fetch_klines, defaults = the Round-2 winner s20 — see PROJECT.md
+"Round 2 — ETH fixed") on the rolling 30d window of real Binance 15m bars
+ending now (or --end-date), then applies the user's standing "keep win rate > 60% net of commissions"
 directive as a hard predicate:
 
     PASS  iff  win_rate > 0.60  AND  trades >= 20
@@ -85,10 +85,15 @@ def gate_verdict(win_rate: float, trades: int, profit_factor: float,
 
 
 def build_ship_default_cfg(cash: float, symbol: str, out_dir: Path, *,
-                         vote_mode: str = "adaptive",
-                         risk_trail_pct: float = 0.0) -> BotConfig:
+                         vote_mode: str = "trend",
+                         risk_trail_pct: float = 0.0,
+                         stop_sigma_mult: float = 20.0,
+                         tp_sigma_mult: float = 4.0,
+                         max_hold_bars: int = 192,
+                         direction_bars: int = 20) -> BotConfig:
     """The exact configuration scripts/entropy_accuracy_btc15m.py builds from
-    its CLI defaults — which since 2026-09-03 ARE the shipped "H" config.
+    its CLI defaults — which since 2026-09-03 (T9) ARE the shipped Round-2
+    winner s20 (vote trend, stop 20σ / TP 4σ, hold 192, grace 3).
     Kept 1:1 with that script so the gate measures precisely what the
     scheduled accuracy runs measure (see the T5 brief / PROJECT.md).
 
@@ -96,10 +101,12 @@ def build_ship_default_cfg(cash: float, symbol: str, out_dir: Path, *,
       * vote_mode -> ConsensusConfig.vote_mode (the gate runs one symbol at
         a time like the harness, so a single mode per run).
       * risk_trail_pct -> RiskOverrides.risk_trail_pct (0.0 = off).
+      * stop_sigma_mult / tp_sigma_mult -> RiskOverrides sigma barriers.
+      * max_hold_bars / direction_bars -> ConsensusConfig time stop / filter.
       * entry_grace_bars is NOT a cfg field: simulate() takes it as a
         top-level kwarg (see entropy_accuracy_btc15m.simulate), so it is
         forwarded at the simulate() call site in main(), not here.
-    With all three at their defaults the returned cfg is field-identical to
+    With all knobs at their defaults the returned cfg is field-identical to
     the harness's CLI-default cfg."""
     return BotConfig(
         mode="paper",
@@ -125,10 +132,10 @@ def build_ship_default_cfg(cash: float, symbol: str, out_dir: Path, *,
             vote_mode=vote_mode,
             normalize="total",
             min_participation=0.5,
-            direction_bars=20,
+            direction_bars=direction_bars,
             confirm_bars=2,
             trail_pct=0.3,
-            max_hold_bars=96,
+            max_hold_bars=max_hold_bars,
             long_only=True,
         ),
         risk_overrides=RiskOverrides(
@@ -142,8 +149,8 @@ def build_ship_default_cfg(cash: float, symbol: str, out_dir: Path, *,
             min_volatility_pct=0.05,
             vol_window_s=900.0,
             stop_mode="sigma",
-            stop_sigma_mult=5.0,
-            tp_sigma_mult=4.0,
+            stop_sigma_mult=stop_sigma_mult,
+            tp_sigma_mult=tp_sigma_mult,
             risk_trail_pct=risk_trail_pct,
         ),
         console_log_path=str(out_dir / "console.log"),
@@ -174,17 +181,29 @@ def main() -> int:
     ap.add_argument("--end-date", default="now",
                     help="window end ('now' or ISO-8601, e.g. 2026-09-03T00:00:00Z)")
     ap.add_argument("--cash", type=float, default=100.0)
-    ap.add_argument("--vote-mode", default="adaptive",
+    ap.add_argument("--vote-mode", default="trend",
                     choices=("adaptive", "trend", "mean_revert", "legacy"),
                     help="consensus vote mode for this gate run (single mode "
                          "per run — the gate gates one symbol at a time)")
     ap.add_argument("--risk-trail-pct", type=float, default=0.0,
                     help="risk-trail stop ratchet as a fraction of the TP "
                          "distance at open (0 = off)")
-    ap.add_argument("--entry-grace-bars", type=int, default=0,
+    ap.add_argument("--entry-grace-bars", type=int, default=3,
                     help="suppress the MECHANICAL stop for the entry bar + "
                          "N-1 following completed bars of each position "
-                         "(0 = off; forwarded to simulate(), not via cfg)")
+                         "(0 = off; forwarded to simulate(), not via cfg; "
+                         "default 3 = shipped)")
+    ap.add_argument("--stop-sigma-mult", type=float, default=20.0,
+                    help="stop distance = mult * sigma (sigma mode only; "
+                         "default 20.0 = shipped)")
+    ap.add_argument("--tp-sigma-mult", type=float, default=4.0,
+                    help="take-profit distance = mult * sigma (sigma mode only)")
+    ap.add_argument("--max-hold-bars", type=int, default=192,
+                    help="time stop: exit after N completed bars in a trade "
+                         "(0 = off)")
+    ap.add_argument("--direction-bars", type=int, default=20,
+                    help="trend filter: enter only in the slow-EMA slope "
+                         "direction over this many bars (0 = off)")
     ap.add_argument("--out", default="/tmp/entropy_wr_gate",
                     help="output dir (klines cache + report.json land here)")
     args = ap.parse_args()
@@ -205,7 +224,11 @@ def main() -> int:
 
     cfg = build_ship_default_cfg(args.cash, symbol, out_dir,
                                    vote_mode=args.vote_mode,
-                                   risk_trail_pct=args.risk_trail_pct)
+                                   risk_trail_pct=args.risk_trail_pct,
+                                   stop_sigma_mult=args.stop_sigma_mult,
+                                   tp_sigma_mult=args.tp_sigma_mult,
+                                   max_hold_bars=args.max_hold_bars,
+                                   direction_bars=args.direction_bars)
     report = simulate(klines, cfg, run_dir=str(out_dir / "ledger"),
                       trade_csv=str(out_dir / "trades.csv"), symbol=symbol,
                       warmup_bars=args.warmup_bars,
@@ -230,7 +253,10 @@ def main() -> int:
     print(f"total_return_pct : {ret:+.2f}%")
     print(f"levers           : vote_mode={args.vote_mode}, "
           f"risk_trail_pct={args.risk_trail_pct:g}, "
-          f"entry_grace_bars={args.entry_grace_bars}")
+          f"entry_grace_bars={args.entry_grace_bars}, "
+          f"stop {args.stop_sigma_mult:g}x / tp {args.tp_sigma_mult:g}x sigma, "
+          f"max_hold_bars={args.max_hold_bars}, "
+          f"direction_bars={args.direction_bars}")
     print(f"thresholds       : WR > {MIN_WIN_RATE:.2f}, trades >= {MIN_TRADES}, "
           f"PF >= {MIN_PROFIT_FACTOR:.2f}, return >= {MIN_RETURN_PCT:.2f}%")
     for reason in failed:
@@ -256,6 +282,10 @@ def main() -> int:
             "vote_mode": args.vote_mode,
             "risk_trail_pct": args.risk_trail_pct,
             "entry_grace_bars": args.entry_grace_bars,
+            "stop_sigma_mult": args.stop_sigma_mult,
+            "tp_sigma_mult": args.tp_sigma_mult,
+            "max_hold_bars": args.max_hold_bars,
+            "direction_bars": args.direction_bars,
         },
         "exit_breakdown": report["exit_breakdown"],
     }, indent=2))

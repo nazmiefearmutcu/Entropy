@@ -143,8 +143,8 @@ class TestGateVerdict:
 
 def test_ship_default_cfg_matches_the_accuracy_script_defaults():
     """The gate's config must be 1:1 with the accuracy script's CLI defaults
-    (the verified "H" config): same consensus knobs, same risk overrides, same
-    26 bps crypto-spot cost schedule."""
+    (the shipped Round-2 winner s20): same consensus knobs, same risk
+    overrides, same 26 bps crypto-spot cost schedule."""
     acc = sys.modules["entropy_accuracy_btc15m"]
     from pathlib import Path as _P
 
@@ -152,10 +152,10 @@ def test_ship_default_cfg_matches_the_accuracy_script_defaults():
     arg_names = dict(
         bars=2880, warmup_bars=100, cash=100.0,
         threshold=0.5, exit_mode="trail", min_hold_bars=5, cooldown_bars=4,
-        cost_edge_mult=1.0, move_floor=0.0003, vote_mode="adaptive",
+        cost_edge_mult=1.0, move_floor=0.0003, vote_mode="trend",
         normalize="total", min_participation=0.5, direction_bars=20,
-        confirm_bars=2, trail_pct=0.3, long_only=True, max_hold_bars=96,
-        stop_mode="sigma", stop_sigma_mult=5.0, tp_sigma_mult=4.0,
+        confirm_bars=2, trail_pct=0.3, long_only=True, max_hold_bars=192,
+        stop_mode="sigma", stop_sigma_mult=20.0, tp_sigma_mult=4.0,
     )
     # Build the accuracy script's config from those same values (its main()
     # defaults, pinned here) and compare the knob-bearing subtrees.
@@ -168,16 +168,16 @@ def test_ship_default_cfg_matches_the_accuracy_script_defaults():
         cost_edge_mult=1.0,
         consensus=acc.ConsensusConfig(
             threshold=0.5, exit_mode="trail", min_hold_bars=5,
-            cooldown_bars=4, move_floor=0.0003, vote_mode="adaptive",
+            cooldown_bars=4, move_floor=0.0003, vote_mode="trend",
             normalize="total", min_participation=0.5, direction_bars=20,
-            confirm_bars=2, trail_pct=0.3, max_hold_bars=96, long_only=True,
+            confirm_bars=2, trail_pct=0.3, max_hold_bars=192, long_only=True,
         ),
         risk_overrides=acc.RiskOverrides(
             per_trade_pct=10.0, max_concurrent=4, stop_loss_pct=1.5,
             take_profit_pct=1.2, max_total_exposure_pct=40.0,
             max_daily_loss_pct=40.0, cooldown_s=180.0,
             min_volatility_pct=0.05, vol_window_s=900.0,
-            stop_mode="sigma", stop_sigma_mult=5.0, tp_sigma_mult=4.0,
+            stop_mode="sigma", stop_sigma_mult=20.0, tp_sigma_mult=4.0,
         ),
         console_log_path="/tmp/wr_gate_test/console.log",
         trade_csv_path="/tmp/wr_gate_test/trades.csv",
@@ -265,9 +265,10 @@ class TestRound2Levers:
 
     def test_builder_defaults_match_harness_cli_defaults(self):
         """1:1 contract: with defaults, the gate cfg is field-identical to
-        the accuracy harness's CLI-default cfg — including the Round-2
-        levers (harness: --vote-mode adaptive, --risk-trail-pct 0.0,
-        --entry-grace-bars 0)."""
+        the accuracy harness's CLI-default cfg — the shipped Round-2 winner
+        s20 (harness: --vote-mode trend, --risk-trail-pct 0.0,
+        --stop-sigma-mult 20.0, --tp-sigma-mult 4.0, --max-hold-bars 192,
+        --direction-bars 20, --entry-grace-bars 3)."""
         import inspect
         from pathlib import Path as _P
 
@@ -276,65 +277,155 @@ class TestRound2Levers:
             100.0, acc.SYMBOL, _P("/tmp/wr_gate_t9a"))
         # The harness defaults, pinned here next to the assertion that uses
         # them (same style as the pre-T9a parity test above).
-        assert gate_cfg.consensus.vote_mode == "adaptive"
+        assert gate_cfg.consensus.vote_mode == "trend"
+        assert gate_cfg.consensus.max_hold_bars == 192
+        assert gate_cfg.consensus.direction_bars == 20
         assert gate_cfg.risk_overrides.risk_trail_pct == 0.0
         assert gate_cfg.risk_overrides == acc.RiskOverrides(
             per_trade_pct=10.0, max_concurrent=4, stop_loss_pct=1.5,
             take_profit_pct=1.2, max_total_exposure_pct=40.0,
             max_daily_loss_pct=40.0, cooldown_s=180.0,
             min_volatility_pct=0.05, vol_window_s=900.0,
-            stop_mode="sigma", stop_sigma_mult=5.0, tp_sigma_mult=4.0,
+            stop_mode="sigma", stop_sigma_mult=20.0, tp_sigma_mult=4.0,
             risk_trail_pct=0.0,
         )
         # entry_grace_bars lives on simulate(), not on cfg: the gate's CLI
-        # default must equal the harness simulate() default (both off).
+        # default must equal the harness CLI default (3 = shipped), while the
+        # simulate() signature default stays 0 (the T6 byte-identical
+        # guarantee for explicit grace=0 runs).
         assert inspect.signature(acc.simulate).parameters[
             "entry_grace_bars"].default == 0
-        assert inspect.signature(
-            mod.build_ship_default_cfg).parameters[
-            "vote_mode"].default == "adaptive"
-        assert inspect.signature(
-            mod.build_ship_default_cfg).parameters[
-            "risk_trail_pct"].default == 0.0
+        params = inspect.signature(mod.build_ship_default_cfg).parameters
+        assert params["vote_mode"].default == "trend"
+        assert params["risk_trail_pct"].default == 0.0
+        assert params["stop_sigma_mult"].default == 20.0
+        assert params["tp_sigma_mult"].default == 4.0
+        assert params["max_hold_bars"].default == 192
+        assert params["direction_bars"].default == 20
 
-    def test_main_forwards_entry_grace_to_simulate_and_echoes_config(
+    def test_gate_cli_defaults_match_harness_cli_defaults(
+            self, tmp_path, monkeypatch):
+        """End-to-end 1:1: run BOTH mains with fetch/simulate stubbed and no
+        knob flags — the gate's cfg subtrees must equal the harness's, and
+        both must forward the shipped entry_grace_bars=3 to simulate()."""
+        acc = sys.modules["entropy_accuracy_btc15m"]
+
+        gate_captured: dict = {}
+        harness_captured: dict = {}
+
+        def _fake_fetch(*args, **kwargs):
+            return _fake_klines()
+
+        def _fake_gate_simulate(klines, cfg, **kwargs):
+            gate_captured["cfg"] = cfg
+            gate_captured.update(kwargs)
+            return _fake_passing_report()
+
+        def _fake_harness_simulate(klines, cfg, **kwargs):
+            harness_captured["cfg"] = cfg
+            harness_captured.update(kwargs)
+            return {
+                "metrics": {
+                    "final_equity": 100.0, "total_return_pct": 0.0,
+                    "total_trades": 0, "win_rate": 0.0,
+                    "win_definition": "pnl > 0",
+                    "win_rate_long_only": 0.0,
+                    "total_trades_long_only": 0,
+                    "profit_factor": 1.0, "sharpe": 0.0,
+                    "costs_paid": 0.0, "max_drawdown_pct": 0.0,
+                    "max_exposure_pct_observed": 0.0,
+                    "max_concurrent_open": 0,
+                    "total_notional_traded": 0.0,
+                    "notional_turnover_x": 0.0, "halted": False,
+                    "best_day_pct": 0.0, "worst_day_pct": 0.0,
+                },
+                "daily": {},
+                "trades": [],
+                "exit_breakdown": {},
+                "avg_hold_bars": 0.0,
+                "rejects": {},
+                "warmup": {"bars": 100, "trades": 0},
+                "entry_grace_bars": 0,
+            }
+
+        monkeypatch.setattr(mod, "fetch_klines", _fake_fetch)
+        monkeypatch.setattr(mod, "simulate", _fake_gate_simulate)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["entropy_wr_gate.py", "--out", str(tmp_path),
+             "--end-date", "2026-09-03T00:00:00Z"],
+        )
+        assert mod.main() in (0, 1)
+        monkeypatch.setattr(acc, "fetch_klines", _fake_fetch)
+        monkeypatch.setattr(acc, "simulate", _fake_harness_simulate)
+        monkeypatch.setattr(
+            sys, "argv", ["entropy_accuracy_btc15m.py", "--out", str(tmp_path)],
+        )
+        acc.main()
+        # default symbol is BTCUSDT on both CLIs
+        assert gate_captured["cfg"].consensus == harness_captured["cfg"].consensus
+        assert (gate_captured["cfg"].risk_overrides
+                == harness_captured["cfg"].risk_overrides)
+        assert gate_captured["entry_grace_bars"] == 3
+        assert harness_captured["entry_grace_bars"] == 3
+
+    def test_main_forwards_all_knobs_to_builder_and_simulate(
             self, tmp_path, monkeypatch, capsys):
-        """--vote-mode/--risk-trail-pct/--entry-grace-bars reach the builder
-        and simulate(); report.json + console echo all three."""
-        import json as _json
-
+        """Every ship-default knob flag reaches the builder and simulate();
+        report.json + console echo carry all of them."""
         rc, captured, report = _run_main(
             monkeypatch, tmp_path,
-            "--vote-mode", "trend",
+            "--vote-mode", "adaptive",
             "--risk-trail-pct", "0.5",
-            "--entry-grace-bars", "2")
+            "--entry-grace-bars", "2",
+            "--stop-sigma-mult", "8.0",
+            "--tp-sigma-mult", "6.0",
+            "--max-hold-bars", "96",
+            "--direction-bars", "0")
         assert rc == 0
         assert captured["entry_grace_bars"] == 2
-        assert captured["cfg"].consensus.vote_mode == "trend"
+        assert captured["cfg"].consensus.vote_mode == "adaptive"
+        assert captured["cfg"].consensus.max_hold_bars == 96
+        assert captured["cfg"].consensus.direction_bars == 0
         assert captured["cfg"].risk_overrides.risk_trail_pct == 0.5
-        assert report["config"]["vote_mode"] == "trend"
+        assert captured["cfg"].risk_overrides.stop_sigma_mult == 8.0
+        assert captured["cfg"].risk_overrides.tp_sigma_mult == 6.0
+        assert report["config"]["vote_mode"] == "adaptive"
         assert report["config"]["risk_trail_pct"] == 0.5
         assert report["config"]["entry_grace_bars"] == 2
-        out = capsys.readouterr().out
-        assert "vote_mode=trend" in out
-        assert "risk_trail_pct=0.5" in out
-        assert "entry_grace_bars=2" in out
-
-    def test_main_defaults_keep_old_behavior(self, tmp_path, monkeypatch,
-                                             capsys):
-        """No new flags: simulate() gets entry_grace_bars=0, cfg carries the
-        old H values, and the echo shows the defaults (byte-identical runs)."""
-        rc, captured, report = _run_main(monkeypatch, tmp_path)
-        assert rc == 0
-        assert captured["entry_grace_bars"] == 0
-        assert captured["cfg"].consensus.vote_mode == "adaptive"
-        assert captured["cfg"].risk_overrides.risk_trail_pct == 0.0
-        assert report["config"]["vote_mode"] == "adaptive"
-        assert report["config"]["risk_trail_pct"] == 0.0
-        assert report["config"]["entry_grace_bars"] == 0
+        assert report["config"]["stop_sigma_mult"] == 8.0
+        assert report["config"]["tp_sigma_mult"] == 6.0
+        assert report["config"]["max_hold_bars"] == 96
+        assert report["config"]["direction_bars"] == 0
         out = capsys.readouterr().out
         assert "vote_mode=adaptive" in out
-        assert "entry_grace_bars=0" in out
+        assert "risk_trail_pct=0.5" in out
+        assert "entry_grace_bars=2" in out
+        assert "stop 8x / tp 6x sigma" in out
+        assert "max_hold_bars=96" in out
+        assert "direction_bars=0" in out
+
+    def test_main_defaults_match_shipped_s20(self, tmp_path, monkeypatch,
+                                             capsys):
+        """No knob flags: simulate() gets entry_grace_bars=3, cfg carries the
+        shipped s20 values, and the echo shows the defaults."""
+        rc, captured, report = _run_main(monkeypatch, tmp_path)
+        assert rc == 0
+        assert captured["entry_grace_bars"] == 3
+        assert captured["cfg"].consensus.vote_mode == "trend"
+        assert captured["cfg"].consensus.max_hold_bars == 192
+        assert captured["cfg"].consensus.direction_bars == 20
+        assert captured["cfg"].risk_overrides.stop_sigma_mult == 20.0
+        assert captured["cfg"].risk_overrides.tp_sigma_mult == 4.0
+        assert captured["cfg"].risk_overrides.risk_trail_pct == 0.0
+        assert report["config"]["vote_mode"] == "trend"
+        assert report["config"]["risk_trail_pct"] == 0.0
+        assert report["config"]["entry_grace_bars"] == 3
+        assert report["config"]["stop_sigma_mult"] == 20.0
+        assert report["config"]["max_hold_bars"] == 192
+        out = capsys.readouterr().out
+        assert "vote_mode=trend" in out
+        assert "entry_grace_bars=3" in out
 
     def test_invalid_vote_mode_rejected(self, monkeypatch, tmp_path):
         """--vote-mode is restricted to the four consensus modes."""

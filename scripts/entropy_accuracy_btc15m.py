@@ -39,14 +39,15 @@ rate versus the original harness — that is the point):
     evaluated tick. ``--warmup-bars 0`` restores the old cold-start behavior.
   * Long-only metrics (``win_rate_long_only``) report the spot-deployable
     subset alongside the total.
-  * Accuracy levers; the defaults ARE the shipped configuration (verified "H",
-    see PROJECT.md "Win rate > 60% OOS"): ``--long-only`` makes the strategy
-    never emit ENTER_SHORT (spot shorts are not executable live),
-    ``--max-hold-bars N`` adds a time stop, and ``--stop-mode sigma`` anchors
-    stop/TP at ``--stop-sigma-mult``/``--tp-sigma-mult`` times the entry bar's
-    per-bar return RMS instead of the fixed percents. Pass
-    ``--stop-mode percent --max-hold-bars 0 --direction-bars 0`` (and no
-    ``--long-only``) to reproduce the pre-H legacy behavior.
+   * Accuracy levers; the defaults ARE the shipped configuration (Round-2
+     winner s20, see PROJECT.md "Round 2 — ETH fixed"): ``--long-only`` makes
+     the strategy never emit ENTER_SHORT (spot shorts are not executable
+     live), ``--max-hold-bars N`` adds a time stop, and ``--stop-mode sigma``
+     anchors stop/TP at ``--stop-sigma-mult``/``--tp-sigma-mult`` times the
+     entry bar's per-bar return RMS instead of the fixed percents. Pass
+     ``--stop-mode percent --max-hold-bars 0 --direction-bars 0
+     --vote-mode adaptive --entry-grace-bars 0`` (and no ``--long-only``) to
+     reproduce the pre-H legacy behavior.
 """
 
 from __future__ import annotations
@@ -576,7 +577,7 @@ def main() -> None:
     ap.add_argument("--cooldown-bars", type=int, default=4)
     ap.add_argument("--cost-edge-mult", type=float, default=1.0)
     ap.add_argument("--move-floor", type=float, default=0.0003)
-    ap.add_argument("--vote-mode", default="adaptive")
+    ap.add_argument("--vote-mode", default="trend")
     ap.add_argument("--normalize", default="total")
     ap.add_argument("--min-participation", type=float, default=0.5)
     ap.add_argument("--direction-bars", type=int, default=20,
@@ -589,20 +590,20 @@ def main() -> None:
                          "subset only; pass --allow-short to disable)")
     ap.add_argument("--allow-short", dest="long_only", action="store_false",
                     help="re-enable the short leg (legacy behavior)")
-    ap.add_argument("--max-hold-bars", type=int, default=96,
+    ap.add_argument("--max-hold-bars", type=int, default=192,
                     help="time stop: exit after N completed bars in a trade "
                          "(0 = off; must be 0 or >= --min-hold-bars)")
     ap.add_argument("--stop-mode", choices=("percent", "sigma"), default="sigma",
                     help="barrier anchoring: sigma-scaled from the entry bar's "
                          "return RMS (default) or fixed percents (legacy)")
-    ap.add_argument("--stop-sigma-mult", type=float, default=5.0,
+    ap.add_argument("--stop-sigma-mult", type=float, default=20.0,
                     help="stop distance = mult * sigma (sigma mode only)")
     ap.add_argument("--tp-sigma-mult", type=float, default=4.0,
                     help="take-profit distance = mult * sigma (sigma mode only)")
-    ap.add_argument("--entry-grace-bars", type=int, default=0,
-                    help="T6: suppress the MECHANICAL stop for the entry bar + "
-                         "N-1 following completed bars of each position (TP stays "
-                         "live, barriers unchanged; 0 = off)")
+    ap.add_argument("--entry-grace-bars", type=int, default=3,
+                     help="T6: suppress the MECHANICAL stop for the entry bar + "
+                          "N-1 following completed bars of each position (TP stays "
+                          "live, barriers unchanged; 0 = off; default 3 = shipped)")
     ap.add_argument("--risk-trail-pct", type=float, default=0.0,
                     help="T7: risk-trail stop ratchet as a FRACTION of the TP "
                          "distance at open (0 = off; 0<pct<1 = breakeven at "
