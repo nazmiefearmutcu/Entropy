@@ -263,6 +263,7 @@ class ConsensusStrategy:
         bb_trend_low: float = 0.20,
         bb_trend_high: float = 0.80,
         vote_mode: str = "adaptive",
+        vote_mode_for: dict[str, str] | None = None,
         normalize: str = "participating",
         min_participation: float = 0.5,
         min_hold_bars: int = 3,
@@ -287,6 +288,12 @@ class ConsensusStrategy:
             raise ValueError("threshold must be in (0, 1]")
         if vote_mode not in VOTE_MODES:
             raise ValueError(f"vote_mode must be one of {VOTE_MODES}")
+        if vote_mode_for is not None:
+            for sym, mode in vote_mode_for.items():
+                if mode not in VOTE_MODES:
+                    raise ValueError(
+                        f"vote_mode for {sym!r} must be one of {VOTE_MODES}"
+                    )
         if normalize not in NORMALIZE_MODES:
             raise ValueError(f"normalize must be one of {NORMALIZE_MODES}")
         if exit_mode not in EXIT_MODES:
@@ -329,10 +336,17 @@ class ConsensusStrategy:
         self.bb_low, self.bb_high = bb_low, bb_high
         self.bb_trend_low, self.bb_trend_high = bb_trend_low, bb_trend_high
         self.vote_mode = vote_mode
+        #: Per-symbol vote-mode overrides (symbol -> mode); ``self.vote_mode``
+        #: stays the fallback for symbols not listed. Keys may be the raw
+        #: symbol ("BTCUSDT") or the canonical venue form — :meth:`_mode_for`
+        #: matches either.
+        self._vote_mode_for: dict[str, str] = dict(vote_mode_for) if vote_mode_for else {}
         # The legacy mapping is only faithful with total-weight normalization and
         # no participation floor — pin them so `vote_mode="legacy"` really is the
-        # old strategy rather than the old votes under new scoring.
-        if vote_mode == "legacy":
+        # old strategy rather than the old votes under new scoring. Scoring knobs
+        # are strategy-global, so a per-symbol "legacy" entry pins them for the
+        # whole strategy (the only way that symbol can be scored as legacy).
+        if vote_mode == "legacy" or "legacy" in self._vote_mode_for.values():
             normalize, min_participation = "total", 0.0
         self.normalize = normalize
         self.min_participation = min_participation
@@ -467,6 +481,15 @@ class ConsensusStrategy:
 
     # ---- evaluation (completed bars only) --------------------------------
 
+    def _mode_for(self, symbol: str) -> str:
+        """Per-symbol vote mode: the per-symbol map first (exact symbol match,
+        then the raw suffix for canonical ``venue:SYMBOL`` keys), else the
+        strategy fallback ``self.vote_mode``."""
+        mode = self._vote_mode_for.get(symbol)
+        if mode is None and ":" in symbol:
+            mode = self._vote_mode_for.get(symbol.split(":", 1)[1])
+        return mode if mode is not None else self.vote_mode
+
     def _evaluate(self, symbol: str, ts_ns: int, st: _SymbolState) -> list[Signal]:
         closes = list(st.closes)
         if len(closes) < self.min_bars:
@@ -497,8 +520,9 @@ class ConsensusStrategy:
         # the informative question is "is momentum confirming?"; while ranging it
         # is "are we stretched far enough to snap back?". Asking the second one
         # during a trend is what made the original mapping trend-blind.
-        momentum_read = self.vote_mode == "trend" or (
-            self.vote_mode == "adaptive" and regime.trending
+        mode = self._mode_for(symbol)
+        momentum_read = mode == "trend" or (
+            mode == "adaptive" and regime.trending
         )
         if momentum_read:
             rsi_vote = _momentum_vote(rsi[-1], low=self.rsi_trend_low, high=self.rsi_trend_high)
@@ -516,7 +540,7 @@ class ConsensusStrategy:
         # Legacy keeps flat weights so `vote_mode="legacy"` reproduces old runs
         # exactly; every other mode lets the regime decide which block leads.
         weights = (
-            self.weights if self.vote_mode == "legacy"
+            self.weights if mode == "legacy"
             else tilt_weights(self.weights, trending=regime.trending, tilt=self.regime_tilt)
         )
         score = score_votes(

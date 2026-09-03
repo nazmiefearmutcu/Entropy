@@ -9,7 +9,7 @@ from entropy.engine.timeframe import TIMEFRAMES, get_timeframe
 from .costs import CostModel, MarketClass, MarketCosts
 from .risk.profiles import RiskProfile, get_profile, make_custom
 from .strategies.base import Strategy
-from .strategies.consensus import ConsensusStrategy
+from .strategies.consensus import VOTE_MODES, ConsensusStrategy
 from .strategies.ema_cross import EmaCrossStrategy
 from .strategies.momentum_scalper import MomentumScalper
 
@@ -37,7 +37,12 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
     # --- scoring ---------------------------------------------------------
     threshold: float = 0.5
     min_bars: int = 35
-    vote_mode: str = "adaptive"          # adaptive | trend | mean_revert | legacy
+    #: adaptive | trend | mean_revert | legacy, or a per-symbol map of raw
+    #: symbol ("BTCUSDT") -> mode. A plain string applies to every symbol; a
+    #: dict overrides the strategy's fallback (``adaptive`` when the map form
+    #: is used) per symbol — the Round-2 fix for ETH's regime misclassification
+    #: without regressing BTC (see the Round-2 design doc).
+    vote_mode: str | dict[str, str] = "adaptive"
     normalize: str = "total"             # participating | total
     min_participation: float = 0.5
     w_ema: float = 0.35
@@ -360,6 +365,16 @@ def validate(cfg: BotConfig) -> list[str]:
     c = cfg.consensus
     if not 0.0 < c.threshold <= 1.0:
         problems.append("consensus threshold must be in (0, 1]")
+    vm = c.vote_mode
+    if isinstance(vm, str):
+        if vm not in VOTE_MODES:
+            problems.append(f"consensus vote_mode must be one of {VOTE_MODES}")
+    else:
+        for sym, mode in vm.items():
+            if mode not in VOTE_MODES:
+                problems.append(
+                    f"consensus vote_mode for {sym!r} must be one of {VOTE_MODES}"
+                )
     if c.ema_fast >= c.ema_slow:
         problems.append("consensus EMA fast period must be shorter than slow")
     if c.macd_fast >= c.macd_slow:
@@ -394,6 +409,12 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
     bar_s = cfg.bar_seconds()
     c = cfg.consensus
     costs = cfg.cost_model()
+    #: Per-symbol vote_mode union: a dict maps raw symbol -> mode (the strategy
+    #: matches both raw and canonical keys); a plain string stays the single
+    #: mode for every symbol with an empty per-symbol map. When the dict form
+    #: is used the strategy-level fallback is ``adaptive``.
+    vote_mode = c.vote_mode if isinstance(c.vote_mode, str) else "adaptive"
+    vote_mode_for = dict(c.vote_mode) if isinstance(c.vote_mode, dict) else None
     out: list[Strategy] = []
     for name in cfg.strategies:
         if name == "consensus":
@@ -407,7 +428,8 @@ def build_strategies(cfg: BotConfig) -> list[Strategy]:
                 bb_period=c.bb_period, bb_std=c.bb_std,
                 bb_low=c.bb_low, bb_high=c.bb_high,
                 bb_trend_low=c.bb_trend_low, bb_trend_high=c.bb_trend_high,
-                vote_mode=c.vote_mode, normalize=c.normalize,
+                vote_mode=vote_mode, vote_mode_for=vote_mode_for,
+                normalize=c.normalize,
                 min_participation=c.min_participation,
                 min_hold_bars=c.min_hold_bars, cooldown_bars=c.cooldown_bars,
                 exit_mode=c.exit_mode, regime_window=c.regime_window,
@@ -477,6 +499,16 @@ def warnings(cfg: BotConfig) -> list[str]:
     active market is dead.
     """
     out: list[str] = []
+    vm = cfg.consensus.vote_mode
+    if isinstance(vm, dict) and cfg.symbols:
+        known = {s.split(":", 1)[-1] if ":" in s else s for s in cfg.symbols}
+        for sym in sorted(vm):
+            if sym not in known:
+                out.append(
+                    f"consensus vote_mode key {sym!r} is not a configured trading "
+                    "symbol (unknown keys are ignored; symbols not in the map "
+                    "fall back to 'adaptive')"
+                )
     try:
         profile = cfg.profile()
     except (KeyError, TypeError):
