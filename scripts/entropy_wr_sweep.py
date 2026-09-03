@@ -12,7 +12,9 @@ Usage:
       --bars 5760 --shard 0 --shard-total 8 --out /tmp/entropy_accuracy/wr/wave1_s0.csv
 
 The space: 1152 base combos (exit trend_flip|score|either) + 192 trail combos
-= 1344 total.
+= 1344 total. ``wave3`` adds a 1536-combo space (long_only x trail x sigma
+barriers x time stop) with selection guards (min trades/PF/return/max-DD):
+every row is reported with an ``eligible`` flag, eligible rows rank first.
 """
 
 from __future__ import annotations
@@ -67,6 +69,30 @@ WAVE2 = {
     "tp": (0.5, 0.8),
 }
 
+# wave3: long/short x trail tightness x consensus gates x sigma-barrier shape
+# x time stop. exit_mode is fixed "trail"; barriers carry
+# (stop_mode, stop_sigma_mult, tp_sigma_mult) — the "percent" entry keeps the
+# legacy 1.5%/1.2% fixed percents (which also stay as the fallback barriers a
+# sigma entry falls back to when a signal carries no usable sigma).
+WAVE3_BARRIERS = (
+    ("percent", 1.5, 1.2),
+    ("sigma", 4.0, 3.2),
+    ("sigma", 5.0, 4.0),
+    ("sigma", 6.0, 4.8),
+)
+WAVE3 = {
+    "exit_mode": ("trail",),
+    "long_only": (True, False),
+    "trail_pct": (0.2, 0.3, 0.5),
+    "threshold": (0.5, 0.65),
+    "confirm_bars": (1, 2),
+    "direction_bars": (0, 20),
+    "min_hold_bars": (3, 5),
+    "cooldown_bars": (2, 4),
+    "barriers": WAVE3_BARRIERS,
+    "max_hold_bars": (0, 96),
+}
+
 FIXED = {"vote_mode": "adaptive", "normalize": "total",
          "min_participation": 0.5, "move_floor": 0.0003,
          "cost_edge_mult": 1.0}
@@ -74,18 +100,40 @@ FIXED = {"vote_mode": "adaptive", "normalize": "total",
 
 def combos(space_name: str = "full") -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    spaces = {"full": (BASE, TRAIL), "wave2": (WAVE2,)}[space_name]
+    spaces = {"full": (BASE, TRAIL), "wave2": (WAVE2,), "wave3": (WAVE3,)}[space_name]
     for space in spaces:
         for values in itertools.product(*(space[k] for k in space)):
             d = dict(zip(space.keys(), values, strict=True))
             if d["exit_mode"] != "trail":
                 d["trail_pct"] = 0.0
+            if "barriers" in d:
+                # wave3: expand the barrier tuple; the fixed percents stay at
+                # 1.5/1.2 for every entry (the sigma fallback anchors).
+                stop_mode, stop_mult, tp_mult = d.pop("barriers")
+                d["sl"], d["tp"] = 1.5, 1.2
+                d["stop_mode"] = stop_mode
+                d["stop_sigma_mult"] = stop_mult
+                d["tp_sigma_mult"] = tp_mult
             d.update(FIXED)
             out.append(d)
     return out
 
 
 def combo_key(c: dict[str, Any]) -> str:
+    if "long_only" in c:  # wave3: short-form key over every swept knob
+        bar = (f"p{c['sl']}x{c['tp']}" if c["stop_mode"] == "percent"
+               else f"s{c['stop_sigma_mult']}x{c['tp_sigma_mult']}")
+        return "/".join((
+            f"lo={'T' if c['long_only'] else 'F'}",
+            f"tr{c['trail_pct']}",
+            f"th{c['threshold']}",
+            f"cb{c['confirm_bars']}",
+            f"db{c['direction_bars']}",
+            f"mh{c['min_hold_bars']}",
+            f"co{c['cooldown_bars']}",
+            f"sl={bar}",
+            f"hold{c['max_hold_bars']}",
+        ))
     return "/".join(f"{k}={c[k]}" for k in
                     ("exit_mode", "trail_pct", "threshold", "confirm_bars",
                      "direction_bars", "min_hold_bars", "cooldown_bars",
@@ -117,6 +165,8 @@ def build_cfg(c: dict[str, Any]) -> BotConfig:
             direction_bars=c["direction_bars"],
             confirm_bars=c["confirm_bars"],
             trail_pct=c["trail_pct"],
+            max_hold_bars=c.get("max_hold_bars", 0),
+            long_only=c.get("long_only", False),
         ),
         risk_overrides=RiskOverrides(
             per_trade_pct=10.0,
@@ -128,10 +178,68 @@ def build_cfg(c: dict[str, Any]) -> BotConfig:
             cooldown_s=180.0,
             min_volatility_pct=0.05,
             vol_window_s=900.0,
+            stop_mode=c.get("stop_mode", "percent"),
+            stop_sigma_mult=c.get("stop_sigma_mult", 1.5),
+            tp_sigma_mult=c.get("tp_sigma_mult", 1.2),
         ),
         console_log_path=f"/tmp/entropy_accuracy/_wr/console-{os.getpid()}.log",
         trade_csv_path=f"/tmp/entropy_accuracy/_wr/trades-{os.getpid()}.csv",
     )
+
+
+CSV_FIELDS = ("key", "return_pct", "trades", "win_rate", "pf", "max_dd_pct",
+              "costs", "avg_hold_bars", "exits")
+WAVE3_CSV_FIELDS = CSV_FIELDS + ("eligible", "long_only", "stop_mode",
+                                 "max_hold_bars")
+
+
+def is_eligible(row: dict[str, Any], *, min_trades: int, min_pf: float,
+                min_return: float, max_dd: float) -> bool:
+    """wave3 selection guard: enough trades, profitable enough, and shallow
+    enough drawdown."""
+    return (int(row["trades"]) >= min_trades
+            and float(row["pf"]) >= min_pf
+            and float(row["return_pct"]) >= min_return
+            and float(row["max_dd_pct"]) <= max_dd)
+
+
+def rank_rows(rows: list[dict[str, Any]], space_name: str, *, min_trades: int,
+              min_pf: float, min_return: float, max_dd: float) -> list[dict[str, Any]]:
+    """Eligible-first ranking. wave3 applies the full selection guard and
+    ranks by win_rate then return_pct; the legacy spaces keep their
+    min-trades-only, win_rate-only behavior."""
+    if space_name != "wave3":
+        eligible = [r for r in rows if int(r["trades"]) >= min_trades]
+        rest = [r for r in rows if int(r["trades"]) < min_trades]
+        return (sorted(eligible, key=lambda x: -float(x["win_rate"]))
+                + sorted(rest, key=lambda x: -float(x["win_rate"])))
+    for r in rows:
+        r["eligible"] = is_eligible(r, min_trades=min_trades, min_pf=min_pf,
+                                    min_return=min_return, max_dd=max_dd)
+    return sorted(rows, key=lambda x: (not x["eligible"], -float(x["win_rate"]),
+                                       -float(x["return_pct"])))
+
+
+def build_row(c: dict[str, Any], r: dict[str, Any]) -> dict[str, Any]:
+    """One CSV row from a combo and its simulate() report (wave3 rows carry
+    the extra long_only/stop_mode/max_hold_bars columns)."""
+    m = r["metrics"]
+    row: dict[str, Any] = {
+        "key": combo_key(c),
+        "return_pct": m["total_return_pct"],
+        "trades": m["total_trades"],
+        "win_rate": m["win_rate"],
+        "pf": m["profit_factor"],
+        "max_dd_pct": m["max_drawdown_pct"],
+        "costs": m["costs_paid"],
+        "avg_hold_bars": r["avg_hold_bars"],
+        "exits": r["exit_breakdown"],
+    }
+    if "long_only" in c:
+        row["long_only"] = c["long_only"]
+        row["stop_mode"] = c["stop_mode"]
+        row["max_hold_bars"] = c["max_hold_bars"]
+    return row
 
 
 def main() -> None:
@@ -142,8 +250,14 @@ def main() -> None:
     ap.add_argument("--shard-total", type=int, default=1)
     ap.add_argument("--out", required=True)
     ap.add_argument("--min-trades", type=int, default=20)
+    ap.add_argument("--min-pf", type=float, default=1.0,
+                    help="wave3 guard: minimum profit factor")
+    ap.add_argument("--min-return", type=float, default=0.0,
+                    help="wave3 guard: minimum total return %%")
+    ap.add_argument("--max-dd", type=float, default=5.0,
+                    help="wave3 guard: maximum max-drawdown %%")
     ap.add_argument("--limit", type=int, default=0, help="debug: only first N combos")
-    ap.add_argument("--space", choices=("full", "wave2"), default="full")
+    ap.add_argument("--space", choices=("full", "wave2", "wave3"), default="full")
     args = ap.parse_args()
 
     klines = json.loads(Path(args.klines).read_text())["klines"][-args.bars:]
@@ -158,27 +272,17 @@ def main() -> None:
     for i, c in enumerate(mine, 1):
         r = simulate(klines, build_cfg(c), run_dir=f"/tmp/entropy_accuracy/_wr/ledger-{os.getpid()}",
                      trade_csv=f"/tmp/entropy_accuracy/_wr/trades-{os.getpid()}.csv")
-        m = r["metrics"]
-        rows.append({
-            "key": combo_key(c),
-            "return_pct": m["total_return_pct"],
-            "trades": m["total_trades"],
-            "win_rate": m["win_rate"],
-            "pf": m["profit_factor"],
-            "max_dd_pct": m["max_drawdown_pct"],
-            "costs": m["costs_paid"],
-            "avg_hold_bars": r["avg_hold_bars"],
-            "exits": r["exit_breakdown"],
-        })
+        rows.append(build_row(c, r))
         if i % 25 == 0:
             print(f"[wr] {i}/{len(mine)} done, {time.perf_counter()-t0:.0f}s", flush=True)
 
-    eligible = [r for r in rows if int(r["trades"]) >= args.min_trades]
-    ranked = sorted(eligible, key=lambda x: -float(x["win_rate"])) + \
-        sorted((r for r in rows if r not in eligible), key=lambda x: -float(x["win_rate"]))
+    ranked = rank_rows(rows, args.space, min_trades=args.min_trades,
+                       min_pf=args.min_pf, min_return=args.min_return,
+                       max_dd=args.max_dd)
+    fields = WAVE3_CSV_FIELDS if args.space == "wave3" else CSV_FIELDS
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     with Path(args.out).open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(ranked[0].keys()))
+        w = csv.DictWriter(f, fieldnames=list(fields))
         w.writeheader()
         w.writerows(ranked)
     print(f"[wr] done {time.perf_counter()-t0:.0f}s -> {args.out}", flush=True)
