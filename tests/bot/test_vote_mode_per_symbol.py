@@ -210,3 +210,27 @@ def test_build_strategies_string_form_has_empty_map():
     strat = build_strategies(cfg)[0]
     assert strat.vote_mode == "trend"
     assert strat._vote_mode_for == {}
+
+
+# ---- warmup x per-symbol mode (T8 review cannot-verify #2) ---------------------
+
+
+def test_warmup_then_per_symbol_modes_still_diverge():
+    """Warmup-chained state must not flatten the per-symbol vote mode: after
+    seeding both symbols from the same warmup bars, the legacy symbol stays
+    trend-blind while the adaptive symbol rides the trend — i.e. _evaluate
+    resolves _mode_for(symbol) at evaluation time, not at warmup time."""
+    from entropy.strategy.engine import Bar
+
+    closes = path_trend(42, direction=1)
+    strat = ConsensusStrategy(symbols=("A", "B"),
+                              vote_mode_for={"A": "legacy", "B": "adaptive"})
+    seed = [Bar(ts_ns=(i + 1) * _BAR_NS, close=c) for i, c in enumerate(closes[:40])]
+    strat.warmup(seed)
+    # both symbols adopted the same seeded closes; the mode must still
+    # diverge at evaluation
+    assert list(strat._states["A"].closes) == list(strat._states["B"].closes)
+    a_events = [a for _, a in feed_bars(strat, "A", closes[40:], start_bucket=41)]
+    b_events = [a for _, a in feed_bars(strat, "B", closes[40:], start_bucket=41)]
+    assert SignalAction.ENTER_LONG not in a_events    # legacy: trend-blind
+    assert SignalAction.ENTER_LONG in b_events        # adaptive: rides the trend
