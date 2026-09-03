@@ -115,7 +115,8 @@ def build_cfg(raws: list[str], args, out_dir: Path) -> BotConfig:
 
 def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig,
                    run_dir: str, warmup_bars: int, entry_grace_bars: int,
-                   raws: list[str], btc_gate_bars: int = 0) -> dict[str, Any]:
+                   raws: list[str], btc_gate_bars: int = 0,
+                   gate_slope_bars: int = 0, stop_fuse: tuple[int, int] | None = None) -> dict[str, Any]:
     out_dir = Path(run_dir).parent
     out_dir.mkdir(parents=True, exist_ok=True)
     runner = ha.BotRunner(cfg, run_dir=str(out_dir / "ledger"))
@@ -126,41 +127,65 @@ def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig
     bar_ns = int(cfg.bar_seconds() * _NS)
     _orig_check_exits = runner.risk.check_exits
 
-    # ---- BTC-regime pool gate (v0, pre-registered): no NEW entries while the
-    # last COMPLETED BTC bar's close is below its EMA(n) on the same timeframe.
-    # Exits always pass. EMA is fed only by closed bars (prefix array => the
-    # value used at global bar g is EMA over closes[0..g-1]: no lookahead).
+    # ---- Pool-level entry gates (pre-registered v0/v1/v2). Exits always pass.
+    # v0: BTC last-completed close < BTC EMA(n)  [btc_gate_bars]
+    # v1: v0 AND EMA(n) fell over the last `gate_slope_bars` bars
+    # v2: >= stop_fuse[0] STOP exits within the last stop_fuse[1] bars
+    # All conditions use only completed history at decision time (no lookahead).
     gate_closed_bars = 0
     gate_eval_bars = 0
-    if btc_gate_bars > 0:
-        btc_closes = [float(k[4]) for k in per_symbol_klines["BTCUSDT"]]
-        ema_pref = _ema_prefix(btc_closes, btc_gate_bars)
-        state = {"g": -1}
+    fuse_active_bars = 0
+    stop_events: list[int] = []
+    state = {"g": -1}
+    need_wrapper = btc_gate_bars > 0 or stop_fuse is not None
+    if need_wrapper:
+        if btc_gate_bars > 0:
+            btc_closes = [float(k[4]) for k in per_symbol_klines["BTCUSDT"]]
+            ema_pref = _ema_prefix(btc_closes, btc_gate_bars)
 
         def _gate_note_bar(g: int) -> None:
             state["g"] = g
 
-        def _gate_is_closed() -> bool:
-            g = state["g"]
-            if g < 1:
-                return False
-            e = ema_pref[g] if g < len(ema_pref) else None
-            return e is not None and btc_closes[g - 1] < e
+        def _gate_is_closed(ts_ns: int) -> str | None:
+            if btc_gate_bars > 0:
+                g = state["g"]
+                if g < 1:
+                    return None
+                e = ema_pref[g] if g < len(ema_pref) else None
+                if e is None or btc_closes[g - 1] >= e:
+                    return None
+                if gate_slope_bars > 0:
+                    j = g - gate_slope_bars
+                    past = ema_pref[j] if 0 <= j < len(ema_pref) else None
+                    if past is not None and e >= past:
+                        return None  # EMA rising: bounce phase, gate open
+                return "btc-regime gate closed"
+            return None
+
+        def _fuse_is_closed(ts_ns: int) -> str | None:
+            if stop_fuse is None:
+                return None
+            count, window_bars = stop_fuse
+            lo = ts_ns - window_bars * bar_ns
+            recent = sum(1 for e in stop_events if e > lo)
+            return "stop-fuse active" if recent >= count else None
 
         _orig_evaluate = runner.risk.evaluate
 
         def _evaluate(signal, portfolio, mark_px, ts_ns):
-            nonlocal gate_closed_bars, gate_eval_bars
+            nonlocal gate_closed_bars, gate_eval_bars, fuse_active_bars
             if signal.action is not SignalAction.EXIT:
                 gate_eval_bars += 1
-                if _gate_is_closed():
-                    gate_closed_bars += 1
-                    return RiskDecision(False, None, "btc-regime gate closed")
+                reason = _gate_is_closed(ts_ns) or _fuse_is_closed(ts_ns)
+                if reason is not None:
+                    if reason == "stop-fuse active":
+                        fuse_active_bars += 1
+                    else:
+                        gate_closed_bars += 1
+                    return RiskDecision(False, None, reason)
             return _orig_evaluate(signal, portfolio, mark_px, ts_ns)
 
         runner.risk.evaluate = _evaluate  # type: ignore[method-assign]
-    else:
-        _gate_note_bar = lambda g: None  # noqa: E731
 
     def _check_exits(portfolio, ts_ns):
         orders = _orig_check_exits(portfolio, ts_ns)
@@ -174,7 +199,9 @@ def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig
             if o.intent is OrderIntent.STOP and ha._grace_exempt(
                 pos.entry_ts_ns, ts_ns, bar_ns, entry_grace_bars
             ):
-                continue
+                continue  # mechanical stop suppressed during entry grace
+            if stop_fuse is not None and o.intent is OrderIntent.STOP:
+                stop_events.append(ts_ns)  # actual emitted stop exit
             runner.ledger.exit_levels.append((pos.stop_px, pos.tp_px))  # type: ignore[attr-defined]
             out.append(o)
         return out
@@ -379,10 +406,12 @@ def simulate_multi(per_symbol_klines: dict[str, list[list[Any]]], cfg: BotConfig
         "avg_hold_bars": round(sum(hold_bars) / len(hold_bars), 2) if hold_bars else 0.0,
         "rejects": dict(Counter(r for _, r in dummy.rejects)),
         "warmup": {"bars": warmup_bars, "trades": warmup_trades},
-        "gate": ({"bars": btc_gate_bars,
+        "gate": ({"bars": btc_gate_bars, "slope_bars": gate_slope_bars,
+                  "stop_fuse": stop_fuse,
                   "entry_decisions": gate_eval_bars,
-                  "entry_decisions_gated": gate_closed_bars}
-                 if btc_gate_bars > 0 else None),
+                  "entry_decisions_gated": gate_closed_bars,
+                  "entry_decisions_fuse_blocked": fuse_active_bars}
+                 if need_wrapper else None),
     }
     return report
 
@@ -429,6 +458,14 @@ def main() -> None:
                          "last completed BTC close < BTC EMA(n) on the same "
                          "timeframe (0 = off). Exits always pass. Pre-registered "
                          "v0 rule — do not tune N on the evaluation windows.")
+    ap.add_argument("--gate-slope-bars", type=int, default=0,
+                    help="v1: additionally require the EMA to have FALLEN over "
+                         "this many bars for the gate to stay closed (0 = off, "
+                         "v0 behaviour)")
+    ap.add_argument("--gate-stop-fuse", default="",
+                    help="v2: 'COUNT:WINDOW_BARS' — no new entries after COUNT "
+                         "stop exits within the last WINDOW_BARS bars "
+                         "(e.g. '3:192'; empty = off)")
     ap.add_argument("--skip-fetch", action="store_true")
     args = ap.parse_args()
 
@@ -454,15 +491,23 @@ def main() -> None:
         per_symbol = {r: v[-n:] for r, v in per_symbol.items()}
 
     cfg = build_cfg(raws, args, out_dir)
+    fuse = None
+    if args.gate_stop_fuse:
+        c, w = args.gate_stop_fuse.split(":")
+        fuse = (int(c), int(w))
     report = simulate_multi(per_symbol, cfg, run_dir=str(out_dir / "ledger"),
                             warmup_bars=args.warmup_bars,
                             entry_grace_bars=args.entry_grace_bars, raws=raws,
-                            btc_gate_bars=args.btc_ema_gate)
+                            btc_gate_bars=args.btc_ema_gate,
+                            gate_slope_bars=args.gate_slope_bars,
+                            stop_fuse=fuse)
     report["config"] = {
         "symbols": raws, "interval": ha.INTERVAL, "bars": args.bars,
         "warmup_bars": args.warmup_bars,
         "end_date": args.end_date, "starting_cash": args.cash,
         "btc_ema_gate": args.btc_ema_gate,
+        "gate_slope_bars": args.gate_slope_bars,
+        "gate_stop_fuse": args.gate_stop_fuse,
         "risk": {
             "per_trade_pct": args.per_trade_pct,
             "max_concurrent": args.max_concurrent,
@@ -493,8 +538,12 @@ def main() -> None:
         g = report["gate"]
         pct = (g["entry_decisions_gated"] / g["entry_decisions"] * 100.0
                if g["entry_decisions"] else 0.0)
-        print(f"btc gate     : EMA({g['bars']}) — {g['entry_decisions_gated']}/{g['entry_decisions']} "
-              f"entry decisions gated ({pct:.1f}%)")
+        fpct = (g["entry_decisions_fuse_blocked"] / g["entry_decisions"] * 100.0
+                if g["entry_decisions"] else 0.0)
+        print(f"gate         : EMA({g['bars']}) slope={g['slope_bars']} "
+              f"fuse={g['stop_fuse']} — {g['entry_decisions_gated']}/"
+              f"{g['entry_decisions']} gated ({pct:.1f}%), fuse-blocked "
+              f"{g['entry_decisions_fuse_blocked']} ({fpct:.1f}%)")
     print(f"report       : {out_dir / 'report.json'}")
 
 
