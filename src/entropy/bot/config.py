@@ -138,6 +138,9 @@ class MarketCostConfig(msgspec.Struct, frozen=True):
 
 #: RiskOverrides fields consumed by the runner directly, never handed to
 #: make_custom() via active() (they are not RiskProfile overrides).
+#: WARNING: active() is LOSSY for these fields — they are never returned even
+#: when non-default, so callers that need the barrier mode must read
+#: ``risk_overrides.stop_mode`` (etc.) directly, as the runner does.
 _RISK_BARRIER_FIELDS = frozenset({"stop_mode", "stop_sigma_mult", "tp_sigma_mult"})
 
 
@@ -149,7 +152,8 @@ class RiskOverrides(msgspec.Struct, frozen=True):
 
     Barrier-mode fields (``stop_mode`` and the sigma multipliers) are NOT risk
     preset overrides — they are consumed by :class:`~entropy.bot.runner.BotRunner`
-    directly and are therefore excluded from :meth:`active`.
+    directly and are therefore excluded from :meth:`active`. That makes
+    ``active()`` lossy for them: read them off the struct itself when needed.
     """
 
     per_trade_pct: float | None = None
