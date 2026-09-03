@@ -1,0 +1,51 @@
+[entropy-multi] BTCUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] ETHUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] SOLUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] BNBUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] XRPUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] DOGEUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] ADAUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] LINKUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] AVAXUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] LTCUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] ATOMUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] FILUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] ETCUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] XLMUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] HBARUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] UNIUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] NEARUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] APTUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] ARBUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] OPUSDT: 2980 bars (2026-07-03 23:00 -> 2026-08-03 23:59 UTC)
+[entropy-multi] warmup: feeding 8000 ticks ...
+[entropy-multi] feeding 230400 evaluated ticks ...
+
+=== ENTROPY MULTI-SYMBOL — BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT,AVAXUSDT,LTCUSDT,ATOMUSDT,FILUSDT,ETCUSDT,XLMUSDT,HBARUSDT,UNIUSDT,NEARUSDT,APTUSDT,ARBUSDT,OPUSDT 15m (real Binance data) ===
+final equity : $93.71  (return -6.29%)
+accuracy     : win rate 73.1%  (245 closed trades)
+quality      : profit factor 0.59, sharpe -2.63
+risk         : max DD 12.43%, max exposure 90.4%, max open 6, halted=False
+by symbol    :
+  binance-spot:ADAUSDT           14t  WR  85.7%  pnl $-0.86
+  binance-spot:APTUSDT           12t  WR  83.3%  pnl $+0.75
+  binance-spot:ARBUSDT           13t  WR  53.8%  pnl $-2.83
+  binance-spot:ATOMUSDT          12t  WR  58.3%  pnl $-1.16
+  binance-spot:AVAXUSDT          14t  WR  50.0%  pnl $-2.40
+  binance-spot:BNBUSDT           14t  WR  64.3%  pnl $-1.06
+  binance-spot:BTCUSDT           13t  WR  61.5%  pnl $-1.66
+  binance-spot:DOGEUSDT          13t  WR  76.9%  pnl $+0.22
+  binance-spot:ETCUSDT            7t  WR  85.7%  pnl $+0.27
+  binance-spot:ETHUSDT           15t  WR  80.0%  pnl $+0.41
+  binance-spot:FILUSDT            9t  WR  66.7%  pnl $-1.07
+  binance-spot:HBARUSDT          10t  WR  40.0%  pnl $-2.50
+  binance-spot:LINKUSDT          18t  WR 100.0%  pnl $+1.75
+  binance-spot:LTCUSDT           12t  WR  66.7%  pnl $-1.12
+  binance-spot:NEARUSDT          18t  WR  83.3%  pnl $-1.00
+  binance-spot:OPUSDT             6t  WR  66.7%  pnl $-1.12
+  binance-spot:SOLUSDT            8t  WR 100.0%  pnl $+0.66
+  binance-spot:UNIUSDT           16t  WR  75.0%  pnl $-1.32
+  binance-spot:XLMUSDT           10t  WR  60.0%  pnl $-1.16
+  binance-spot:XRPUSDT           11t  WR  90.9%  pnl $+0.33
+exits        : {'take_profit': 179, 'close': 42, 'stop': 24}  (avg hold 65.14 bars)
+report       : C:\Users\KULLAN~1\AppData\Local\Temp\entropy_sept4\pool30daug4_s20\report.json
