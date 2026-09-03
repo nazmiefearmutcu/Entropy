@@ -45,3 +45,12 @@ Last visited: 2026-08-03T00:00:00Z
 - [x] Post-ship verification run (no overrides, 30d ending 2026-09-03): WR 75.0% (24t), +1.41%, PF 1.45, max DD 0.46% — matches the OOS battery H row.
 - [x] Documented in PROJECT.md ("Win rate > 60% OOS (2026-09-03, shipped)"); honest caveats: ETH fails, bear-regime fails, 7d PF 0.56 on 7t, Wilson CI wide.
 - [x] tests/bot + tests/strategy: 355 passed.
+
+## Round 2 — ETH fixed (2026-09-03, shipped as s20)
+- [x] Wave-4 ETH train sweep (120d ending 2026-08-03, 1152 combos x adaptive/trend, warmup 100): 0 eligible both modes; trend dominates (top-WR 56.8% vs 53.4%).
+- [x] OOS battery picked s20 (K=6 families + f04 + stop ladder 8→20σ): vote trend + stop 20σ/TP 4σ + hold 192 + db 20 + grace 3 + long_only, shipped GLOBALLY (BTC also improves; per-symbol map stays in code unused by default).
+- [x] New defaults: ConsensusConfig (vote_mode trend, max_hold_bars 192), RiskOverrides (stop_sigma_mult 20.0), harness CLI (--vote-mode trend, --stop-sigma-mult 20, --max-hold-bars 192, --entry-grace-bars 3; simulate() default stays 0).
+- [x] Gate parity: build_ship_default_cfg == new shipped default + new --stop-sigma-mult/--tp-sigma-mult/--max-hold-bars/--direction-bars flags; 1:1 contract test runs both mains stubbed.
+- [x] Post-ship verification (no overrides): ETH 30d WR 76.7% (30t) +1.77% PF 1.35 gate PASS; BTC 30d WR 81.1% (37t) +1.52% PF 1.55 gate PASS.
+- [x] Standing risk: 20σ stop almost never fires (exits = TP/time/score); 60d PF 0.90 soft — rolling gate is the monitor.
+- [x] Documented in PROJECT.md ("Round 2 — ETH fixed"); full suite green except the known env perf flake.
