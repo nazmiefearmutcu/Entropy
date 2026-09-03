@@ -18,7 +18,7 @@ import random
 
 import pytest
 
-from entropy.bot.config import BotConfig, build_strategies
+from entropy.bot.config import BotConfig, build_strategies, validate
 from entropy.bot.costs import CostModel
 from entropy.bot.signals import SignalAction
 from entropy.bot.strategies.consensus import (
@@ -880,6 +880,24 @@ def test_config_wiring_long_only_and_max_hold_bars():
     strat = build_strategies(cfg)[0]
     assert strat.long_only is True
     assert strat.max_hold_bars == 9
-    # defaults stay no-ops
+    # defaults ship the verified "H" config (PROJECT.md, WR > 60% OOS):
+    # long_only on, 96-bar time stop, 20-bar direction filter
     dflt = build_strategies(BotConfig())[0]
-    assert dflt.long_only is False and dflt.max_hold_bars == 0
+    assert dflt.long_only is True and dflt.max_hold_bars == 96
+    assert dflt.direction_bars == 20
+
+
+def test_default_config_is_shipped_h():
+    """The bare BotConfig() default IS the shipped "H" configuration verified
+    OOS on 2026-09-03 (long_only + direction_bars=20 + max_hold_bars=96 +
+    sigma 5.0/4.0 barriers) — see PROJECT.md "Win rate > 60% OOS"."""
+    cfg = BotConfig()
+    c = cfg.consensus
+    assert (c.long_only, c.direction_bars, c.max_hold_bars) == (True, 20, 96)
+    assert c.exit_mode == "trail" and c.trail_pct == 0.3
+    assert c.threshold == 0.5 and c.confirm_bars == 2
+    assert c.min_hold_bars == 5 and c.cooldown_bars == 4
+    assert c.move_floor == 0.0003 and cfg.cost_edge_mult == 1.0
+    ro = cfg.risk_overrides
+    assert (ro.stop_mode, ro.stop_sigma_mult, ro.tp_sigma_mult) == ("sigma", 5.0, 4.0)
+    assert validate(cfg) == []

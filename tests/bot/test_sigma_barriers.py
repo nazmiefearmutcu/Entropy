@@ -63,10 +63,10 @@ def test_risk_overrides_barriers_validate_at_construction():
         RiskOverrides(stop_sigma_mult=0.0)
     with pytest.raises(ValueError):
         RiskOverrides(tp_sigma_mult=-1.0)
-    # defaults are the no-op percent shape
+    # defaults ship the verified "H" sigma shape (PROJECT.md, WR > 60% OOS)
     ro = RiskOverrides()
-    assert ro.stop_mode == "percent"
-    assert (ro.stop_sigma_mult, ro.tp_sigma_mult) == (1.5, 1.2)
+    assert ro.stop_mode == "sigma"
+    assert (ro.stop_sigma_mult, ro.tp_sigma_mult) == (5.0, 4.0)
     # barrier fields are never handed to make_custom (they are not profile
     # fields) — cfg.profile() must keep working with sigma mode on
     cfg = BotConfig(risk_overrides=RiskOverrides(stop_mode="sigma"))
@@ -122,12 +122,13 @@ _FILL = 100.0 * (1 + 2.0 / 10_000.0)
 
 
 def test_runner_sigma_mode_anchors_barriers_from_entry_sigma(tmp_path):
-    # sigma = 0.002 clears the sigma-mode cost gate (stop 0.3% -> cost-to-stop
-    # 0.08/0.3 = 0.27 <= 0.5, tp 24 bps > 8 bps RT) and anchors at the multipliers
+    # sigma = 0.002 clears the sigma-mode cost gate (stop 1.0% -> cost-to-stop
+    # 0.04/1.0 = 0.04 <= 0.5, tp 80 bps > 8 bps RT) and anchors at the shipped
+    # default multipliers (5.0 / 4.0 — the "H" config)
     runner, pos = _run_one_entry(tmp_path, "sigma", sigma=0.002)
-    # stop = 1.5 * 0.002 = 0.3% below the fill, tp = 1.2 * 0.002 = 0.24% above
-    assert pos.stop_px == pytest.approx(_FILL * (1 - 0.003))
-    assert pos.tp_px == pytest.approx(_FILL * (1 + 0.0024))
+    # stop = 5.0 * 0.002 = 1.0% below the fill, tp = 4.0 * 0.002 = 0.8% above
+    assert pos.stop_px == pytest.approx(_FILL * (1 - 0.01))
+    assert pos.tp_px == pytest.approx(_FILL * (1 + 0.008))
     # the stash is consumed: nothing left behind for a later unrelated entry
     assert runner._entry_sigma == {}
 
@@ -206,8 +207,8 @@ def test_sigma_mode_cost_gate_still_allows_viable_sigma():
 
 
 def test_percent_mode_cost_gate_ignores_sigma():
-    """Percent mode (the default) gates on the profile's percents exactly as
-    before, whatever sigma the signal carries."""
+    """Percent mode (the legacy shape) gates on the profile's percents exactly
+    as before, whatever sigma the signal carries."""
     rm = _gate_manager("percent")
     p = Portfolio(100_000.0)
     sig = Signal(symbol="SPY", action=SignalAction.ENTER_LONG, strength=1.0,
@@ -234,10 +235,11 @@ def test_runner_plumbs_barrier_mode_into_risk_and_hot_apply(tmp_path):
     runner = BotRunner(cfg, run_dir=str(tmp_path))
     assert runner.risk.stop_mode == "sigma"
     assert (runner.risk.stop_sigma_mult, runner.risk.tp_sigma_mult) == (2.0, 1.0)
-    # hot-apply a percent config: the risk layer's gate must follow
+    # hot-apply an explicit percent config: the risk layer's gate must follow
     cfg2 = BotConfig(
         enable_crypto=False, enable_equities=False,
-        risk_overrides=RiskOverrides(),
+        risk_overrides=RiskOverrides(stop_mode="percent",
+                                     stop_sigma_mult=1.5, tp_sigma_mult=1.2),
     )
     assert runner.apply_config(cfg2) == []
     assert runner.risk.stop_mode == "percent"

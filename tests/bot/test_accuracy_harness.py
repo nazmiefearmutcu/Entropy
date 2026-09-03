@@ -97,6 +97,11 @@ def _base_klines() -> list[list[Any]]:
 
 def _cfg(fee_bps: float = 10.0, slip_bps: float = 3.0,
          sl_pct: float = 1.5, tp_pct: float = 1.2) -> BotConfig:
+    # These tests exercise harness MECHANICS on synthetic klines (including the
+    # short side), so they pin the legacy no-op shape explicitly — the shipped
+    # BotConfig default is the verified "H" config (long_only, direction
+    # filter, time stop, sigma barriers), which would change trade outcomes
+    # here for reasons unrelated to what each test checks.
     return BotConfig(
         mode="paper", starting_cash=100.0, strategies=("consensus",),
         symbols=(SYMBOL,), ema_symbol=SYMBOL, ema_fast=9, ema_slow=21,
@@ -108,9 +113,11 @@ def _cfg(fee_bps: float = 10.0, slip_bps: float = 3.0,
         consensus=ConsensusConfig(
             exit_mode="hold", min_hold_bars=0, move_floor=0.0003,
             confirm_bars=2, cooldown_bars=2,
+            direction_bars=0, max_hold_bars=0, long_only=False,
         ),
         risk_overrides=RiskOverrides(
             stop_loss_pct=sl_pct, take_profit_pct=tp_pct, vol_window_s=30.0,
+            stop_mode="percent", stop_sigma_mult=1.5, tp_sigma_mult=1.2,
         ),
         console_log_path="/tmp/entropy_harness_test/console.log",
         trade_csv_path="/tmp/entropy_harness_test/trades.csv",

@@ -66,7 +66,10 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
     trend_er: float = 0.35
     regime_window: int = 20
     slope_lookback: int = 5
-    direction_bars: int = 0
+    #: Trend filter: only enter in the direction of the slow EMA's slope over
+    #: this many bars (0 = off). Shipped default 20 is the verified "H"
+    #: configuration (see PROJECT.md, "Win rate > 60% OOS").
+    direction_bars: int = 20
     direction_min_slope: float = 0.00002
     confirm_bars: int = 2
     trail_pct: float = 0.3
@@ -77,10 +80,13 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
     exit_mode: str = "trail"             # score | trend_flip | either | hold | trail
     #: Time stop: exit after this many completed bars in the trade regardless
     #: of score/trend/trail (0 = off; must be 0 or >= min_hold_bars).
-    max_hold_bars: int = 0
+    #: Shipped default 96 (24h on 15m bars) is part of the verified "H"
+    #: configuration (see PROJECT.md, "Win rate > 60% OOS").
+    max_hold_bars: int = 96
     #: Never emit ENTER_SHORT (spot shorts are not executable live, so the
-    #: short leg's measured accuracy is not deployable).
-    long_only: bool = False
+    #: short leg's measured accuracy is not deployable). Shipped default True
+    #: is part of the verified "H" configuration.
+    long_only: bool = True
 
     def weights(self) -> dict[str, float]:
         return {
@@ -170,12 +176,14 @@ class RiskOverrides(msgspec.Struct, frozen=True):
     #: per-bar return RMS carried by the entry signal (falls back to percent
     #: when the signal carries no usable sigma). Barriers are anchored ONCE at
     #: open and never re-anchored — see the harness `_BarrierLedger` invariant.
-    stop_mode: str = "percent"
+    #: Shipped default "sigma" is part of the verified "H" configuration
+    #: (see PROJECT.md, "Win rate > 60% OOS").
+    stop_mode: str = "sigma"
     #: sigma multipliers: stop distance = stop_sigma_mult * sigma, TP distance
-    #: = tp_sigma_mult * sigma (as fractions of entry; defaults mirror the
-    #: shipped 1.5% / 1.2% shape at sigma ~ 0.001).
-    stop_sigma_mult: float = 1.5
-    tp_sigma_mult: float = 1.2
+    #: = tp_sigma_mult * sigma (as fractions of entry). Shipped defaults 5.0/4.0
+    #: are the verified "H" configuration; the legacy percent shape was 1.5/1.2.
+    stop_sigma_mult: float = 5.0
+    tp_sigma_mult: float = 4.0
 
     def __post_init__(self) -> None:
         if self.stop_mode not in ("percent", "sigma"):

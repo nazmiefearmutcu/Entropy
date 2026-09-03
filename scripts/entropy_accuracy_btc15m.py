@@ -39,11 +39,14 @@ rate versus the original harness — that is the point):
     evaluated tick. ``--warmup-bars 0`` restores the old cold-start behavior.
   * Long-only metrics (``win_rate_long_only``) report the spot-deployable
     subset alongside the total.
-  * Accuracy levers, all default-off/percent (behavior preserved):
-    ``--long-only`` makes the strategy never emit ENTER_SHORT (spot shorts are
-    not executable live), ``--max-hold-bars N`` adds a time stop, and
-    ``--stop-mode sigma`` anchors stop/TP at ``--stop-sigma-mult``/``--tp-sigma-mult``
-    times the entry bar's per-bar return RMS instead of the fixed percents.
+  * Accuracy levers; the defaults ARE the shipped configuration (verified "H",
+    see PROJECT.md "Win rate > 60% OOS"): ``--long-only`` makes the strategy
+    never emit ENTER_SHORT (spot shorts are not executable live),
+    ``--max-hold-bars N`` adds a time stop, and ``--stop-mode sigma`` anchors
+    stop/TP at ``--stop-sigma-mult``/``--tp-sigma-mult`` times the entry bar's
+    per-bar return RMS instead of the fixed percents. Pass
+    ``--stop-mode percent --max-hold-bars 0 --direction-bars 0`` (and no
+    ``--long-only``) to reproduce the pre-H legacy behavior.
 """
 
 from __future__ import annotations
@@ -508,20 +511,25 @@ def main() -> None:
     ap.add_argument("--vote-mode", default="adaptive")
     ap.add_argument("--normalize", default="total")
     ap.add_argument("--min-participation", type=float, default=0.5)
-    ap.add_argument("--direction-bars", type=int, default=0)
+    ap.add_argument("--direction-bars", type=int, default=20,
+                    help="trend filter: enter only in the slow-EMA slope "
+                         "direction over this many bars (0 = off)")
     ap.add_argument("--confirm-bars", type=int, default=2)
     ap.add_argument("--trail-pct", type=float, default=0.3)
-    ap.add_argument("--long-only", action="store_true",
-                    help="never emit ENTER_SHORT (spot-deployable subset only)")
-    ap.add_argument("--max-hold-bars", type=int, default=0,
+    ap.add_argument("--long-only", action="store_true", default=True,
+                    help="never emit ENTER_SHORT (default on: spot-deployable "
+                         "subset only; pass --allow-short to disable)")
+    ap.add_argument("--allow-short", dest="long_only", action="store_false",
+                    help="re-enable the short leg (legacy behavior)")
+    ap.add_argument("--max-hold-bars", type=int, default=96,
                     help="time stop: exit after N completed bars in a trade "
                          "(0 = off; must be 0 or >= --min-hold-bars)")
-    ap.add_argument("--stop-mode", choices=("percent", "sigma"), default="percent",
-                    help="barrier anchoring: fixed percents (default) or "
-                         "sigma-scaled from the entry bar's return RMS")
-    ap.add_argument("--stop-sigma-mult", type=float, default=1.5,
+    ap.add_argument("--stop-mode", choices=("percent", "sigma"), default="sigma",
+                    help="barrier anchoring: sigma-scaled from the entry bar's "
+                         "return RMS (default) or fixed percents (legacy)")
+    ap.add_argument("--stop-sigma-mult", type=float, default=5.0,
                     help="stop distance = mult * sigma (sigma mode only)")
-    ap.add_argument("--tp-sigma-mult", type=float, default=1.2,
+    ap.add_argument("--tp-sigma-mult", type=float, default=4.0,
                     help="take-profit distance = mult * sigma (sigma mode only)")
     ap.add_argument("--strategy", action="append", default=None,
                     help="strategy name (repeatable); default consensus")
