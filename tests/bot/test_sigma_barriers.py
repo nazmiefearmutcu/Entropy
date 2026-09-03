@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from entropy.bot.config import BotConfig, ConsensusConfig, RiskOverrides, validate
-from entropy.bot.portfolio import PositionSide
+from entropy.bot.portfolio import Portfolio, PositionSide
 from entropy.bot.risk.manager import RiskManager
 from entropy.bot.risk.profiles import MEDIUM
 from entropy.bot.runner import BotRunner
@@ -122,10 +122,12 @@ _FILL = 100.0 * (1 + 2.0 / 10_000.0)
 
 
 def test_runner_sigma_mode_anchors_barriers_from_entry_sigma(tmp_path):
-    runner, pos = _run_one_entry(tmp_path, "sigma", sigma=0.001)
-    # stop = 1.5 * 0.001 = 0.15% below the fill, tp = 1.2 * 0.001 = 0.12% above
-    assert pos.stop_px == pytest.approx(_FILL * (1 - 0.0015))
-    assert pos.tp_px == pytest.approx(_FILL * (1 + 0.0012))
+    # sigma = 0.002 clears the sigma-mode cost gate (stop 0.3% -> cost-to-stop
+    # 0.08/0.3 = 0.27 <= 0.5, tp 24 bps > 8 bps RT) and anchors at the multipliers
+    runner, pos = _run_one_entry(tmp_path, "sigma", sigma=0.002)
+    # stop = 1.5 * 0.002 = 0.3% below the fill, tp = 1.2 * 0.002 = 0.24% above
+    assert pos.stop_px == pytest.approx(_FILL * (1 - 0.003))
+    assert pos.tp_px == pytest.approx(_FILL * (1 + 0.0024))
     # the stash is consumed: nothing left behind for a later unrelated entry
     assert runner._entry_sigma == {}
 
@@ -154,3 +156,89 @@ def test_runner_percent_mode_ignores_entry_sigma(tmp_path):
     runner, pos = _run_one_entry(tmp_path, "percent", sigma=0.001)
     assert pos.stop_px == pytest.approx(_FILL * (1 - MEDIUM.stop_loss_pct / 100))
     assert pos.tp_px == pytest.approx(_FILL * (1 + MEDIUM.take_profit_pct / 100))
+
+
+# ---- round 1: the entry cost gate must judge the sigma barriers -------------
+
+
+def _gate_manager(stop_mode: str) -> RiskManager:
+    from entropy.bot.costs import CostModel
+
+    return RiskManager(
+        MEDIUM,
+        cost_model=CostModel(flat_fee_bps=10.0, flat_slippage_bps=3.0),  # 26 bps RT
+        stop_mode=stop_mode,
+    )
+
+
+def test_barrier_pcts_helper():
+    rm = _gate_manager("sigma")
+    assert rm.barrier_pcts(0.0011) == pytest.approx((0.165, 0.132))
+    assert rm.barrier_pcts(None) is None
+    assert rm.barrier_pcts(0.0) is None
+    pct_rm = _gate_manager("percent")
+    assert pct_rm.barrier_pcts(0.0011) is None
+
+
+def test_sigma_mode_cost_gate_rejects_cost_dead_entries():
+    """sigma ~ 0.0011 (BTC-15m-like) anchors a ~13 bps TP — below the 26 bps
+    round trip. Under percent-barrier judging (2% TP = 200 bps) this entry was
+    approved despite being guaranteed cost-dead; the gate must now judge the
+    sigma barriers and reject."""
+    rm = _gate_manager("sigma")
+    p = Portfolio(100_000.0)
+    sig = Signal(symbol="SPY", action=SignalAction.ENTER_LONG, strength=1.0,
+                 reason="t", ts_ns=1, strategy="s", sigma=0.0011)
+    d = rm.evaluate(sig, p, mark_px=100.0, ts_ns=1)
+    assert not d.approved
+    assert d.reason == "take-profit below round-trip cost"
+
+
+def test_sigma_mode_cost_gate_still_allows_viable_sigma():
+    """sigma = 0.005 -> TP = 0.6% = 60 bps > 26 bps RT and cost-to-stop
+    26/75 = 0.35 <= 0.5: the sigma-mode gate must approve."""
+    rm = _gate_manager("sigma")
+    p = Portfolio(100_000.0)
+    sig = Signal(symbol="SPY", action=SignalAction.ENTER_LONG, strength=1.0,
+                 reason="t", ts_ns=1, strategy="s", sigma=0.005)
+    d = rm.evaluate(sig, p, mark_px=100.0, ts_ns=1)
+    assert d.approved
+
+
+def test_percent_mode_cost_gate_ignores_sigma():
+    """Percent mode (the default) gates on the profile's percents exactly as
+    before, whatever sigma the signal carries."""
+    rm = _gate_manager("percent")
+    p = Portfolio(100_000.0)
+    sig = Signal(symbol="SPY", action=SignalAction.ENTER_LONG, strength=1.0,
+                 reason="t", ts_ns=1, strategy="s", sigma=0.0011)
+    assert rm.evaluate(sig, p, mark_px=100.0, ts_ns=1).approved
+
+
+def test_sigma_mode_missing_sigma_gates_on_percent_fallback():
+    """No usable sigma on the signal: the gate (like the open path) falls back
+    to the profile's percent barriers."""
+    rm = _gate_manager("sigma")
+    p = Portfolio(100_000.0)
+    sig = Signal(symbol="SPY", action=SignalAction.ENTER_LONG, strength=1.0,
+                 reason="t", ts_ns=1, strategy="s", sigma=None)
+    assert rm.evaluate(sig, p, mark_px=100.0, ts_ns=1).approved
+
+
+def test_runner_plumbs_barrier_mode_into_risk_and_hot_apply(tmp_path):
+    cfg = BotConfig(
+        enable_crypto=False, enable_equities=False,
+        risk_overrides=RiskOverrides(stop_mode="sigma", stop_sigma_mult=2.0,
+                                     tp_sigma_mult=1.0),
+    )
+    runner = BotRunner(cfg, run_dir=str(tmp_path))
+    assert runner.risk.stop_mode == "sigma"
+    assert (runner.risk.stop_sigma_mult, runner.risk.tp_sigma_mult) == (2.0, 1.0)
+    # hot-apply a percent config: the risk layer's gate must follow
+    cfg2 = BotConfig(
+        enable_crypto=False, enable_equities=False,
+        risk_overrides=RiskOverrides(),
+    )
+    assert runner.apply_config(cfg2) == []
+    assert runner.risk.stop_mode == "percent"
+    assert runner.risk.barrier_pcts(0.0011) is None

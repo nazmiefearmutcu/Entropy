@@ -37,10 +37,20 @@ class RiskManager:
         profile: RiskProfile,
         cost_model: CostModel | None = None,
         max_cost_to_stop: float = 0.5,
+        stop_mode: str = "percent",
+        stop_sigma_mult: float = 1.5,
+        tp_sigma_mult: float = 1.2,
     ) -> None:
         self.profile = profile
         self.cost_model = cost_model
         self.max_cost_to_stop = max_cost_to_stop
+        # Barrier anchoring mode (mirrors RiskOverrides.stop_mode): "sigma" makes
+        # BOTH the anchored barriers (open path) and this gate's cost checks use
+        # sigma-scaled distances, so the gate judges the barriers the position
+        # will actually get.
+        self.stop_mode = stop_mode
+        self.stop_sigma_mult = stop_sigma_mult
+        self.tp_sigma_mult = tp_sigma_mult
         self.halted = False
         self.circuit_tripped = False
         self._cooldown_until: dict[str, int] = {}
@@ -49,6 +59,30 @@ class RiskManager:
 
     def set_profile(self, profile: RiskProfile) -> None:
         self.profile = profile
+
+    def set_barrier_mode(self, stop_mode: str, stop_sigma_mult: float,
+                         tp_sigma_mult: float) -> None:
+        """Swap the sigma barrier mode in place (hot-apply path)."""
+        self.stop_mode = stop_mode
+        self.stop_sigma_mult = stop_sigma_mult
+        self.tp_sigma_mult = tp_sigma_mult
+
+    def barrier_pcts(
+        self, sigma: float | None
+    ) -> tuple[float, float] | None:
+        """Sigma-scaled (stop_pct, tp_pct) for an entry signal's sigma, or None.
+
+        None means "no sigma override": percent mode, or the signal carries no
+        usable sigma — callers fall back to the profile's percent barriers.
+        Shared by the entry cost gate (evaluate) and the runner's open path so
+        a position is gated and anchored on the SAME barrier distances.
+        """
+        if self.stop_mode == "sigma" and sigma is not None and sigma > 0.0:
+            return (
+                self.stop_sigma_mult * sigma * 100.0,
+                self.tp_sigma_mult * sigma * 100.0,
+            )
+        return None
 
     def update_cost_model(
         self, cost_model: CostModel | None, max_cost_to_stop: float
@@ -243,7 +277,16 @@ class RiskManager:
                 if signal.action is SignalAction.ENTER_LONG
                 else PositionSide.SHORT
             )
-            stop_px, tp_px = self.stop_tp_prices(side, mark_px, signal.symbol)
+            # Judge the barriers the position will actually get: in sigma mode
+            # the sigma-scaled distances, else the profile's percents (the same
+            # choice the runner's open path makes when anchoring).
+            pcts = self.barrier_pcts(signal.sigma)
+            if pcts is not None:
+                stop_px, tp_px = self.stop_tp_prices(
+                    side, mark_px, signal.symbol, stop_pct=pcts[0], tp_pct=pcts[1]
+                )
+            else:
+                stop_px, tp_px = self.stop_tp_prices(side, mark_px, signal.symbol)
             stop_bps = abs(mark_px - stop_px) / mark_px * 10_000.0
             tp_bps = abs(tp_px - mark_px) / mark_px * 10_000.0
             round_trip_bps = self.cost_model.round_trip_bps(signal.symbol)
