@@ -84,11 +84,23 @@ def gate_verdict(win_rate: float, trades: int, profit_factor: float,
     return (not failed, failed)
 
 
-def build_ship_default_cfg(cash: float, symbol: str, out_dir: Path) -> BotConfig:
+def build_ship_default_cfg(cash: float, symbol: str, out_dir: Path, *,
+                         vote_mode: str = "adaptive",
+                         risk_trail_pct: float = 0.0) -> BotConfig:
     """The exact configuration scripts/entropy_accuracy_btc15m.py builds from
     its CLI defaults — which since 2026-09-03 ARE the shipped "H" config.
     Kept 1:1 with that script so the gate measures precisely what the
-    scheduled accuracy runs measure (see the T5 brief / PROJECT.md)."""
+    scheduled accuracy runs measure (see the T5 brief / PROJECT.md).
+
+    Round-2 levers (T9a — gate parity with what T9 ships):
+      * vote_mode -> ConsensusConfig.vote_mode (the gate runs one symbol at
+        a time like the harness, so a single mode per run).
+      * risk_trail_pct -> RiskOverrides.risk_trail_pct (0.0 = off).
+      * entry_grace_bars is NOT a cfg field: simulate() takes it as a
+        top-level kwarg (see entropy_accuracy_btc15m.simulate), so it is
+        forwarded at the simulate() call site in main(), not here.
+    With all three at their defaults the returned cfg is field-identical to
+    the harness's CLI-default cfg."""
     return BotConfig(
         mode="paper",
         starting_cash=cash,
@@ -110,7 +122,7 @@ def build_ship_default_cfg(cash: float, symbol: str, out_dir: Path) -> BotConfig
             min_hold_bars=5,
             cooldown_bars=4,
             move_floor=0.0003,
-            vote_mode="adaptive",
+            vote_mode=vote_mode,
             normalize="total",
             min_participation=0.5,
             direction_bars=20,
@@ -132,6 +144,7 @@ def build_ship_default_cfg(cash: float, symbol: str, out_dir: Path) -> BotConfig
             stop_mode="sigma",
             stop_sigma_mult=5.0,
             tp_sigma_mult=4.0,
+            risk_trail_pct=risk_trail_pct,
         ),
         console_log_path=str(out_dir / "console.log"),
         trade_csv_path=str(out_dir / "trades.csv"),
@@ -161,6 +174,17 @@ def main() -> int:
     ap.add_argument("--end-date", default="now",
                     help="window end ('now' or ISO-8601, e.g. 2026-09-03T00:00:00Z)")
     ap.add_argument("--cash", type=float, default=100.0)
+    ap.add_argument("--vote-mode", default="adaptive",
+                    choices=("adaptive", "trend", "mean_revert", "legacy"),
+                    help="consensus vote mode for this gate run (single mode "
+                         "per run — the gate gates one symbol at a time)")
+    ap.add_argument("--risk-trail-pct", type=float, default=0.0,
+                    help="risk-trail stop ratchet as a fraction of the TP "
+                         "distance at open (0 = off)")
+    ap.add_argument("--entry-grace-bars", type=int, default=0,
+                    help="suppress the MECHANICAL stop for the entry bar + "
+                         "N-1 following completed bars of each position "
+                         "(0 = off; forwarded to simulate(), not via cfg)")
     ap.add_argument("--out", default="/tmp/entropy_wr_gate",
                     help="output dir (klines cache + report.json land here)")
     args = ap.parse_args()
@@ -179,10 +203,13 @@ def main() -> int:
         print("[wr-gate] FAIL: no klines fetched")
         return 1
 
-    cfg = build_ship_default_cfg(args.cash, symbol, out_dir)
+    cfg = build_ship_default_cfg(args.cash, symbol, out_dir,
+                                   vote_mode=args.vote_mode,
+                                   risk_trail_pct=args.risk_trail_pct)
     report = simulate(klines, cfg, run_dir=str(out_dir / "ledger"),
                       trade_csv=str(out_dir / "trades.csv"), symbol=symbol,
-                      warmup_bars=args.warmup_bars)
+                      warmup_bars=args.warmup_bars,
+                      entry_grace_bars=args.entry_grace_bars)
     m = report["metrics"]
 
     win_rate = m["win_rate"]
@@ -201,6 +228,9 @@ def main() -> int:
     print(f"trades           : {trades}")
     print(f"profit_factor    : {pf:.2f}")
     print(f"total_return_pct : {ret:+.2f}%")
+    print(f"levers           : vote_mode={args.vote_mode}, "
+          f"risk_trail_pct={args.risk_trail_pct:g}, "
+          f"entry_grace_bars={args.entry_grace_bars}")
     print(f"thresholds       : WR > {MIN_WIN_RATE:.2f}, trades >= {MIN_TRADES}, "
           f"PF >= {MIN_PROFIT_FACTOR:.2f}, return >= {MIN_RETURN_PCT:.2f}%")
     for reason in failed:
@@ -223,6 +253,9 @@ def main() -> int:
             "bars": args.bars,
             "warmup_bars": args.warmup_bars,
             "end_ms": end_ms,
+            "vote_mode": args.vote_mode,
+            "risk_trail_pct": args.risk_trail_pct,
+            "entry_grace_bars": args.entry_grace_bars,
         },
         "exit_breakdown": report["exit_breakdown"],
     }, indent=2))

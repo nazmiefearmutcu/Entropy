@@ -199,3 +199,148 @@ def test_wins_of_counts_strictly_positive_pnl():
     assert mod.wins_of({"trades": [
         {"pnl": 1.0}, {"pnl": -0.5}, {"pnl": 0.0}, {"pnl": 0.01},
     ]}) == 2
+
+
+# ---- Round-2 levers (T9a gate parity) ----------------------------------------
+
+
+def _fake_klines(n: int = 4) -> list[list]:
+    """Minimal klines: main() only touches k[0]/k[6] timestamps (end_utc)."""
+    base_ms = 1_786_000_000_000
+    return [
+        [base_ms + i * 900_000, "100", "101", "99", "100.5", "10",
+         base_ms + i * 900_000 + 899_999]
+        for i in range(n)
+    ]
+
+
+def _fake_passing_report() -> dict:
+    return {
+        "metrics": {
+            "win_rate": 0.75, "total_trades": 24,
+            "profit_factor": 1.45, "total_return_pct": 1.44,
+        },
+        "trades": [{"pnl": 1.0}] * 18 + [{"pnl": -1.0}] * 6,
+        "exit_breakdown": {"take_profit": 18, "stop": 6},
+    }
+
+
+def _run_main(monkeypatch, tmp_path, *extra_argv: str):
+    """Run the gate's main() with fetch/simulate stubbed (no network)."""
+    import json as _json
+
+    captured: dict = {}
+
+    def _fake_fetch(*args, **kwargs):
+        captured["fetch_args"] = args
+        return _fake_klines()
+
+    def _fake_simulate(klines, cfg, **kwargs):
+        captured["cfg"] = cfg
+        captured.update(kwargs)
+        return _fake_passing_report()
+
+    monkeypatch.setattr(mod, "fetch_klines", _fake_fetch)
+    monkeypatch.setattr(mod, "simulate", _fake_simulate)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["entropy_wr_gate.py", "--out", str(tmp_path),
+         "--end-date", "2026-09-03T00:00:00Z", *extra_argv],
+    )
+    rc = mod.main()
+    report = _json.loads((tmp_path / "report.json").read_text())
+    return rc, captured, report
+
+
+class TestRound2Levers:
+    def test_builder_forwards_vote_mode_and_risk_trail(self):
+        """Non-default levers land in the cfg subtrees they belong to."""
+        from pathlib import Path as _P
+
+        cfg = mod.build_ship_default_cfg(
+            100.0, "binance-spot:BTCUSDT", _P("/tmp/wr_gate_t9a"),
+            vote_mode="trend", risk_trail_pct=0.5)
+        assert cfg.consensus.vote_mode == "trend"
+        assert cfg.risk_overrides.risk_trail_pct == 0.5
+
+    def test_builder_defaults_match_harness_cli_defaults(self):
+        """1:1 contract: with defaults, the gate cfg is field-identical to
+        the accuracy harness's CLI-default cfg — including the Round-2
+        levers (harness: --vote-mode adaptive, --risk-trail-pct 0.0,
+        --entry-grace-bars 0)."""
+        import inspect
+        from pathlib import Path as _P
+
+        acc = sys.modules["entropy_accuracy_btc15m"]
+        gate_cfg = mod.build_ship_default_cfg(
+            100.0, acc.SYMBOL, _P("/tmp/wr_gate_t9a"))
+        # The harness defaults, pinned here next to the assertion that uses
+        # them (same style as the pre-T9a parity test above).
+        assert gate_cfg.consensus.vote_mode == "adaptive"
+        assert gate_cfg.risk_overrides.risk_trail_pct == 0.0
+        assert gate_cfg.risk_overrides == acc.RiskOverrides(
+            per_trade_pct=10.0, max_concurrent=4, stop_loss_pct=1.5,
+            take_profit_pct=1.2, max_total_exposure_pct=40.0,
+            max_daily_loss_pct=40.0, cooldown_s=180.0,
+            min_volatility_pct=0.05, vol_window_s=900.0,
+            stop_mode="sigma", stop_sigma_mult=5.0, tp_sigma_mult=4.0,
+            risk_trail_pct=0.0,
+        )
+        # entry_grace_bars lives on simulate(), not on cfg: the gate's CLI
+        # default must equal the harness simulate() default (both off).
+        assert inspect.signature(acc.simulate).parameters[
+            "entry_grace_bars"].default == 0
+        assert inspect.signature(
+            mod.build_ship_default_cfg).parameters[
+            "vote_mode"].default == "adaptive"
+        assert inspect.signature(
+            mod.build_ship_default_cfg).parameters[
+            "risk_trail_pct"].default == 0.0
+
+    def test_main_forwards_entry_grace_to_simulate_and_echoes_config(
+            self, tmp_path, monkeypatch, capsys):
+        """--vote-mode/--risk-trail-pct/--entry-grace-bars reach the builder
+        and simulate(); report.json + console echo all three."""
+        import json as _json
+
+        rc, captured, report = _run_main(
+            monkeypatch, tmp_path,
+            "--vote-mode", "trend",
+            "--risk-trail-pct", "0.5",
+            "--entry-grace-bars", "2")
+        assert rc == 0
+        assert captured["entry_grace_bars"] == 2
+        assert captured["cfg"].consensus.vote_mode == "trend"
+        assert captured["cfg"].risk_overrides.risk_trail_pct == 0.5
+        assert report["config"]["vote_mode"] == "trend"
+        assert report["config"]["risk_trail_pct"] == 0.5
+        assert report["config"]["entry_grace_bars"] == 2
+        out = capsys.readouterr().out
+        assert "vote_mode=trend" in out
+        assert "risk_trail_pct=0.5" in out
+        assert "entry_grace_bars=2" in out
+
+    def test_main_defaults_keep_old_behavior(self, tmp_path, monkeypatch,
+                                             capsys):
+        """No new flags: simulate() gets entry_grace_bars=0, cfg carries the
+        old H values, and the echo shows the defaults (byte-identical runs)."""
+        rc, captured, report = _run_main(monkeypatch, tmp_path)
+        assert rc == 0
+        assert captured["entry_grace_bars"] == 0
+        assert captured["cfg"].consensus.vote_mode == "adaptive"
+        assert captured["cfg"].risk_overrides.risk_trail_pct == 0.0
+        assert report["config"]["vote_mode"] == "adaptive"
+        assert report["config"]["risk_trail_pct"] == 0.0
+        assert report["config"]["entry_grace_bars"] == 0
+        out = capsys.readouterr().out
+        assert "vote_mode=adaptive" in out
+        assert "entry_grace_bars=0" in out
+
+    def test_invalid_vote_mode_rejected(self, monkeypatch, tmp_path):
+        """--vote-mode is restricted to the four consensus modes."""
+        monkeypatch.setattr(
+            sys, "argv",
+            ["entropy_wr_gate.py", "--out", str(tmp_path),
+             "--vote-mode", "momentum"])
+        with pytest.raises(SystemExit):
+            mod.main()
