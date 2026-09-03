@@ -40,6 +40,7 @@ class RiskManager:
         stop_mode: str = "percent",
         stop_sigma_mult: float = 1.5,
         tp_sigma_mult: float = 1.2,
+        risk_trail_pct: float = 0.0,
     ) -> None:
         self.profile = profile
         self.cost_model = cost_model
@@ -51,6 +52,11 @@ class RiskManager:
         self.stop_mode = stop_mode
         self.stop_sigma_mult = stop_sigma_mult
         self.tp_sigma_mult = tp_sigma_mult
+        # Risk-trail ratchet (T7): fraction of the TP distance at which the stop
+        # starts ratcheting toward the TP (0.0 = off). Plumbed from
+        # RiskOverrides.risk_trail_pct by the runner; hot-applied via
+        # set_risk_trail().
+        self.risk_trail_pct = risk_trail_pct
         self.halted = False
         self.circuit_tripped = False
         self._cooldown_until: dict[str, int] = {}
@@ -66,6 +72,10 @@ class RiskManager:
         self.stop_mode = stop_mode
         self.stop_sigma_mult = stop_sigma_mult
         self.tp_sigma_mult = tp_sigma_mult
+
+    def set_risk_trail(self, risk_trail_pct: float) -> None:
+        """Swap the risk-trail ratchet fraction in place (hot-apply path)."""
+        self.risk_trail_pct = risk_trail_pct
 
     def barrier_pcts(
         self, sigma: float | None
@@ -323,10 +333,37 @@ class RiskManager:
         return Order(id=self._next_id(), symbol=pos.symbol, side=side, intent=intent,
                      qty=pos.qty, price=mark_px, ts_ns=ts_ns, strategy=strategy)
 
+    def _ratchet_stop(self, pos: PositionState, mark_px: float) -> None:
+        """Monotonic risk-trail stop ratchet (T7, default off).
+
+        Runs BEFORE stop/TP hit-checking on the same tick: the stop level a
+        tick sees is the level AFTER any ratchet that tick triggers.
+
+        ``risk_trail_pct`` is a FRACTION of the position's TP distance at open:
+        when the mark crosses ``entry ± pct * tp_dist`` the stop ratchets
+        toward the TP to ``entry ± max(pct - 1.0, 0.0) * tp_dist`` (0 < pct < 1
+        -> breakeven at entry; pct >= 1 -> profit slice). Never loosens: a long
+        stop only rises, a short stop only falls, both capped at the target.
+        """
+        pct = self.risk_trail_pct
+        if pct <= 0.0:
+            return
+        if pos.side is PositionSide.LONG:
+            tp_dist = pos.tp_px - pos.entry_px
+            if tp_dist > 0.0 and mark_px >= pos.entry_px + pct * tp_dist:
+                target = pos.entry_px + max(pct - 1.0, 0.0) * tp_dist
+                pos.stop_px = max(pos.stop_px, target)
+        else:
+            tp_dist = pos.entry_px - pos.tp_px
+            if tp_dist > 0.0 and mark_px <= pos.entry_px - pct * tp_dist:
+                target = pos.entry_px - max(pct - 1.0, 0.0) * tp_dist
+                pos.stop_px = min(pos.stop_px, target)
+
     def check_exits(self, portfolio: Portfolio, ts_ns: int) -> list[Order]:
         out: list[Order] = []
         for pos in list(portfolio.positions.values()):
             mk = portfolio.mark_of(pos.symbol)
+            self._ratchet_stop(pos, mk)
             if pos.side is PositionSide.LONG:
                 hit_stop, hit_tp = mk <= pos.stop_px, mk >= pos.tp_px
             else:

@@ -140,7 +140,7 @@ def combo_key(c: dict[str, Any]) -> str:
                      "sl", "tp"))
 
 
-def build_cfg(c: dict[str, Any]) -> BotConfig:
+def build_cfg(c: dict[str, Any], *, risk_trail_pct: float = 0.0) -> BotConfig:
     return BotConfig(
         mode="paper",
         starting_cash=100.0,
@@ -181,6 +181,7 @@ def build_cfg(c: dict[str, Any]) -> BotConfig:
             stop_mode=c.get("stop_mode", "percent"),
             stop_sigma_mult=c.get("stop_sigma_mult", 1.5),
             tp_sigma_mult=c.get("tp_sigma_mult", 1.2),
+            risk_trail_pct=risk_trail_pct,
         ),
         console_log_path=f"/tmp/entropy_accuracy/_wr/console-{os.getpid()}.log",
         trade_csv_path=f"/tmp/entropy_accuracy/_wr/trades-{os.getpid()}.csv",
@@ -258,6 +259,10 @@ def main() -> None:
                     help="wave3 guard: maximum max-drawdown %%")
     ap.add_argument("--limit", type=int, default=0, help="debug: only first N combos")
     ap.add_argument("--space", choices=("full", "wave2", "wave3"), default="full")
+    ap.add_argument("--risk-trail-pct", type=float, default=0.0,
+                    help="T7 risk-trail stop ratchet as a FRACTION of the TP "
+                         "distance at open, applied to EVERY combo (0 = off; "
+                         "0<pct<1 = breakeven; pct>=1 = profit slice)")
     args = ap.parse_args()
 
     klines = json.loads(Path(args.klines).read_text())["klines"][-args.bars:]
@@ -270,7 +275,8 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     t0 = time.perf_counter()
     for i, c in enumerate(mine, 1):
-        r = simulate(klines, build_cfg(c), run_dir=f"/tmp/entropy_accuracy/_wr/ledger-{os.getpid()}",
+        r = simulate(klines, build_cfg(c, risk_trail_pct=args.risk_trail_pct),
+                     run_dir=f"/tmp/entropy_accuracy/_wr/ledger-{os.getpid()}",
                      trade_csv=f"/tmp/entropy_accuracy/_wr/trades-{os.getpid()}.csv")
         rows.append(build_row(c, r))
         if i % 25 == 0:

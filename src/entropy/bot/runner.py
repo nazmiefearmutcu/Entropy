@@ -99,6 +99,7 @@ class BotRunner:
             stop_mode=config.risk_overrides.stop_mode,
             stop_sigma_mult=config.risk_overrides.stop_sigma_mult,
             tp_sigma_mult=config.risk_overrides.tp_sigma_mult,
+            risk_trail_pct=config.risk_overrides.risk_trail_pct,
         )
         self.executor = _make_executor(config)
         self.strategies = build_strategies(config)
@@ -283,12 +284,14 @@ class BotRunner:
 
         self.config = cfg
         # Barrier mode rides on risk_overrides; the risk layer gates entries on
-        # the same sigma-scaled distances it anchors at open.
+        # the same sigma-scaled distances it anchors at open. The risk-trail
+        # ratchet fraction follows the same hot-apply path.
         self.risk.set_barrier_mode(
             cfg.risk_overrides.stop_mode,
             cfg.risk_overrides.stop_sigma_mult,
             cfg.risk_overrides.tp_sigma_mult,
         )
+        self.risk.set_risk_trail(cfg.risk_overrides.risk_trail_pct)
         profile = cfg.profile()
         if profile != self.risk.profile:
             self.risk.set_profile(profile)

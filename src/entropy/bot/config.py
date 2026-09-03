@@ -145,9 +145,11 @@ class MarketCostConfig(msgspec.Struct, frozen=True):
 #: RiskOverrides fields consumed by the runner directly, never handed to
 #: make_custom() via active() (they are not RiskProfile overrides).
 #: WARNING: active() is LOSSY for these fields — they are never returned even
-#: when non-default, so callers that need the barrier mode must read
-#: ``risk_overrides.stop_mode`` (etc.) directly, as the runner does.
-_RISK_BARRIER_FIELDS = frozenset({"stop_mode", "stop_sigma_mult", "tp_sigma_mult"})
+#: when non-default, so callers that need the barrier mode / risk trail must
+#: read ``risk_overrides.stop_mode`` (etc.) directly, as the runner does.
+_RISK_BARRIER_FIELDS = frozenset({
+    "stop_mode", "stop_sigma_mult", "tp_sigma_mult", "risk_trail_pct",
+})
 
 
 class RiskOverrides(msgspec.Struct, frozen=True):
@@ -184,6 +186,16 @@ class RiskOverrides(msgspec.Struct, frozen=True):
     #: are the verified "H" configuration; the legacy percent shape was 1.5/1.2.
     stop_sigma_mult: float = 5.0
     tp_sigma_mult: float = 4.0
+    #: Risk-trail ratchet (T7, Round 2; 0.0 = off, default). A FRACTION of the
+    #: position's TP distance at open (``tp_px - entry_px`` long / the mirror
+    #: short): once the mark crosses ``entry ± risk_trail_pct * tp_dist`` the
+    #: stop ratchets monotonically toward the TP:
+    #:   * ``0 < pct < 1`` -> breakeven: stop moves to entry;
+    #:   * ``pct >= 1``   -> profit slice: stop moves to
+    #:     ``entry ± (pct - 1.0) * tp_dist`` (1.0 -> entry, 1.5 -> half way to TP).
+    #: The ratchet is per-tick, runs BEFORE stop/TP hit-checking, and never
+    #: loosens. Barriers anchored at open are untouched until the ratchet fires.
+    risk_trail_pct: float = 0.0
 
     def __post_init__(self) -> None:
         if self.stop_mode not in ("percent", "sigma"):
@@ -192,6 +204,8 @@ class RiskOverrides(msgspec.Struct, frozen=True):
             )
         if self.stop_sigma_mult <= 0.0 or self.tp_sigma_mult <= 0.0:
             raise ValueError("sigma multipliers must be > 0")
+        if self.risk_trail_pct < 0.0:
+            raise ValueError("risk_trail_pct must be >= 0 (0 = off)")
 
     def active(self) -> dict[str, object]:
         return {
@@ -368,6 +382,8 @@ def validate(cfg: BotConfig) -> list[str]:
         problems.append(f"risk stop_mode must be 'percent' or 'sigma', got {ro.stop_mode!r}")
     if ro.stop_sigma_mult <= 0.0 or ro.tp_sigma_mult <= 0.0:
         problems.append("risk sigma multipliers must be > 0")
+    if ro.risk_trail_pct < 0.0:
+        problems.append("risk risk_trail_pct must be >= 0 (0 = off)")
     if cfg.mode == "live" and not cfg.live.acknowledged_risk:
         problems.append("live mode requires the risk acknowledgement")
     return problems
@@ -467,6 +483,14 @@ def warnings(cfg: BotConfig) -> list[str]:
         return out
     if profile is None:
         return out
+    ro = cfg.risk_overrides
+    if ro.risk_trail_pct > 0.0 and ro.stop_mode != "sigma":
+        out.append(
+            f"risk_trail_pct {ro.risk_trail_pct:g} with stop_mode "
+            f"{ro.stop_mode!r}: the trail fraction is of the {ro.stop_mode} TP "
+            "distance (percent barriers still work, the ratchet just anchors on "
+            "the percent TP level)"
+        )
     overruns = _cost_gate_overruns(cfg, profile)
     if not overruns or len(overruns) == len(_active_markets(cfg)):
         return out

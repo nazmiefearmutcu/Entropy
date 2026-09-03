@@ -166,6 +166,17 @@ def utc_day(ts_ns: int) -> str:
     return datetime.fromtimestamp(ts_ns / _NS, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
+def _grace_exempt(entry_ts_ns: int, ts_ns: int, bar_ns: int, grace_bars: int) -> bool:
+    """T6 entry-bar grace: is a position (opened at ``entry_ts_ns``) still
+    stop-exempt at tick ``ts_ns``? The entry bar itself (the bar whose O tick
+    opened the position) counts as bar 0, so ``grace_bars=1`` suppresses the
+    mechanical stop for the entry bar only, ``grace_bars=2`` for the entry bar
+    + the next completed bar, and so on. ``grace_bars=0`` is off. The grace is
+    a no-op for the barrier VALUES — only the stop's hit TIMING is affected.
+    """
+    return grace_bars > 0 and (ts_ns - entry_ts_ns) // bar_ns < grace_bars
+
+
 class _BarrierLedger(DummyLedger):
     """DummyLedger that remembers the stop/take-profit levels the risk layer
     anchored at each open fill.
@@ -178,10 +189,14 @@ class _BarrierLedger(DummyLedger):
     the anchoring math is mirrored exactly, and the pairing step in
     :func:`simulate` can clamp mechanical exit fills back to the barrier.
 
-    INVARIANT: barrier levels are immutable after open. The risk layer has no
-    trailing stop and never re-anchors stop/TP while a position is open, which
-    is the only reason capturing once at open is valid — if re-anchoring or a
-    risk-layer trail is ever added, this capture must move to per-exit time.
+    INVARIANT: barrier levels captured once at open are the TP-anchoring math
+    exactly — but the risk layer's T7 risk-trail ratchet can MOVE the stop
+    after open, so the pairing step reads the per-exit levels
+    (``exit_levels``, recorded by the harness's check_exits wrapper at
+    order-emission time) for mechanical exits: the stop level a tick sees is
+    the level AFTER any ratchet that tick triggered. The TP is never ratcheted,
+    so its open-captured level equals its exit level. If any future re-anchoring
+    is added, this capture must keep moving to per-exit time.
     """
 
     def __init__(self, runner: BotRunner) -> None:
@@ -191,6 +206,10 @@ class _BarrierLedger(DummyLedger):
         # self.fills (a symbol-keyed dict would be overwritten by later
         # trades before the pairing walk ever reads it)
         self.open_levels: list[tuple[float, float] | None] = []
+        # symbol -> (stop_px, tp_px) at mechanical exit order-emission time
+        # (the position is still open then, so the stop reflects any T7
+        # ratchet; the pairing walk pops it at the close fill)
+        self.exit_levels: dict[str, tuple[float, float]] = {}
 
     def record_fill(self, fill: Any, intent: Any) -> None:
         levels: tuple[float, float] | None = None
@@ -236,7 +255,8 @@ def _liquidate_open_positions(runner: BotRunner, ledger: DummyLedger, ts_ns: int
 def simulate(klines: list[list[Any]], cfg: BotConfig,
              run_dir: str = "/tmp/entropy_accuracy/_sim/ledger",
              trade_csv: str = "/tmp/entropy_accuracy/_sim/trades.csv",
-             symbol: str = SYMBOL, warmup_bars: int = 0) -> dict[str, Any]:
+             symbol: str = SYMBOL, warmup_bars: int = 0,
+             entry_grace_bars: int = 0) -> dict[str, Any]:
     """Feed real 15m klines through the final-state BotRunner and compute the
     full accuracy report. Mirrors the metric math of calibration.run_backtest
     (end-of-test liquidation, paired fills, costs).
@@ -245,6 +265,13 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
     without counting their trades (strategy/risk state carries into the
     evaluated window; positions open at the window start are liquidated at the
     window's first tick). ``warmup_bars=0`` is the legacy cold start.
+
+    ``entry_grace_bars`` (T6, default 0 = off) suppresses the risk layer's
+    MECHANICAL stop for the entry bar + the following ``N-1`` completed bars of
+    each position (TP stays live; the strategy's own exits are untouched;
+    barrier values are not re-anchored). Implemented by wrapping the runner's
+    ``risk.check_exits`` so the suppression happens exactly where stop/TP hits
+    are resolved per tick.
     """
     out_dir = Path(run_dir).parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +279,34 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
     warm_ledger = _BarrierLedger(runner)
     dummy = _BarrierLedger(runner)
     runner.ledger = warm_ledger  # type: ignore[assignment]
+
+    entry_grace_bars = max(0, entry_grace_bars)
+    bar_ns = int(cfg.bar_seconds() * _NS)
+    _orig_check_exits = runner.risk.check_exits
+
+    def _check_exits(portfolio, ts_ns):
+        """T6 grace filter + T7 exit-level capture around the risk layer's
+        per-tick stop/TP resolution. Runs on the same ticks that resolve
+        stops: the stop level a tick sees is the level AFTER any ratchet that
+        tick triggered (the risk layer ratchets inside check_exits), and the
+        exit levels captured here therefore reflect the ratcheted stop."""
+        orders = _orig_check_exits(portfolio, ts_ns)
+        if not orders:
+            return orders
+        out: list[Any] = []
+        for o in orders:
+            pos = portfolio.positions.get(o.symbol)
+            if pos is None:
+                continue
+            if o.intent is OrderIntent.STOP and _grace_exempt(
+                pos.entry_ts_ns, ts_ns, bar_ns, entry_grace_bars
+            ):
+                continue  # mechanical stop suppressed during entry grace
+            runner.ledger.exit_levels[o.symbol] = (pos.stop_px, pos.tp_px)  # type: ignore[attr-defined]
+            out.append(o)
+        return out
+
+    runner.risk.check_exits = _check_exits  # type: ignore[method-assign]
 
     # Split into warmup and evaluated slices (keep at least one evaluated bar).
     warmup_bars = max(0, min(warmup_bars, len(klines) - 1)) if klines else 0
@@ -369,21 +424,29 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
             exit_px = fill.price
             close_fee = fill.fee
             levels = trade_levels.pop(fill.symbol, None)
-            if intent.value in ("stop", "take_profit") and levels is not None:
-                # Level fills, not bar extremes: clamp mechanical stop/TP exit
-                # fills to the barrier level the risk layer anchored at entry,
-                # taking the WORSE of the level fill and the actual fill (both
-                # carry the adverse close-side slippage). Strategy exits and
-                # the end-of-test liquidation (intent "close") are untouched.
-                stop_px, tp_px = levels
-                level = stop_px if intent.value == "stop" else tp_px
-                if fill.side.value == "sell":  # closing a long: worse = lower
-                    exit_px = min(level * (1.0 - slip_bps / 10_000.0), fill.price)
-                else:                          # closing a short: worse = higher
-                    exit_px = max(level * (1.0 + slip_bps / 10_000.0), fill.price)
-                # the recorded fee was charged on the actual (extreme) fill
-                # notional; re-price it at the clamped exit price
-                close_fee = abs(exit_px * fill.qty) * (fee_bps_close / 10_000.0)
+            if intent.value in ("stop", "take_profit"):
+                # T7: a ratcheted stop fires at its ratcheted level, not the
+                # level anchored at open — the check_exits wrapper recorded the
+                # position's live barriers at order-emission time; prefer them
+                # (the TP is never ratcheted, so its exit level == open level).
+                exit_lv = dummy.exit_levels.pop(fill.symbol, None)
+                if exit_lv is not None:
+                    levels = exit_lv
+                if levels is not None:
+                    # Level fills, not bar extremes: clamp mechanical stop/TP
+                    # exit fills to the barrier level, taking the WORSE of the
+                    # level fill and the actual fill (both carry the adverse
+                    # close-side slippage). Strategy exits and the end-of-test
+                    # liquidation (intent "close") are untouched.
+                    stop_px, tp_px = levels
+                    level = stop_px if intent.value == "stop" else tp_px
+                    if fill.side.value == "sell":  # closing a long: worse = lower
+                        exit_px = min(level * (1.0 - slip_bps / 10_000.0), fill.price)
+                    else:                          # closing a short: worse = higher
+                        exit_px = max(level * (1.0 + slip_bps / 10_000.0), fill.price)
+                    # the recorded fee was charged on the actual (extreme) fill
+                    # notional; re-price it at the clamped exit price
+                    close_fee = abs(exit_px * fill.qty) * (fee_bps_close / 10_000.0)
             qty = fill.qty
             side_str = "LONG" if entry.side.value == "buy" else "SHORT"
             if side_str == "LONG":
@@ -474,6 +537,7 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
         "avg_hold_bars": round(sum(hold_bars) / len(hold_bars), 2) if hold_bars else 0.0,
         "rejects": dict(Counter(r for _, r in dummy.rejects)),
         "warmup": {"bars": warmup_bars, "trades": warmup_trades},
+        "entry_grace_bars": entry_grace_bars,
     }
     return report
 
@@ -531,6 +595,15 @@ def main() -> None:
                     help="stop distance = mult * sigma (sigma mode only)")
     ap.add_argument("--tp-sigma-mult", type=float, default=4.0,
                     help="take-profit distance = mult * sigma (sigma mode only)")
+    ap.add_argument("--entry-grace-bars", type=int, default=0,
+                    help="T6: suppress the MECHANICAL stop for the entry bar + "
+                         "N-1 following completed bars of each position (TP stays "
+                         "live, barriers unchanged; 0 = off)")
+    ap.add_argument("--risk-trail-pct", type=float, default=0.0,
+                    help="T7: risk-trail stop ratchet as a FRACTION of the TP "
+                         "distance at open (0 = off; 0<pct<1 = breakeven at "
+                         "entry once the mark crosses pct*tp_dist; pct>=1 keeps "
+                         "a profit slice at (pct-1)*tp_dist)")
     ap.add_argument("--strategy", action="append", default=None,
                     help="strategy name (repeatable); default consensus")
     args = ap.parse_args()
@@ -597,6 +670,7 @@ def main() -> None:
             stop_mode=args.stop_mode,
             stop_sigma_mult=args.stop_sigma_mult,
             tp_sigma_mult=args.tp_sigma_mult,
+            risk_trail_pct=args.risk_trail_pct,
         ),
         console_log_path=str(out_dir / "console.log"),
         trade_csv_path=str(out_dir / "trades.csv"),
@@ -604,7 +678,8 @@ def main() -> None:
 
     report = simulate(klines, cfg, run_dir=str(out_dir / "ledger"),
                       trade_csv=str(out_dir / "trades.csv"), symbol=symbol,
-                      warmup_bars=args.warmup_bars)
+                      warmup_bars=args.warmup_bars,
+                      entry_grace_bars=args.entry_grace_bars)
     report["config"] = {
         "symbol": symbol, "interval": INTERVAL, "bars": len(eval_klines),
         "warmup_bars": warmup_bars,
@@ -623,6 +698,8 @@ def main() -> None:
             "stop_mode": args.stop_mode,
             "stop_sigma_mult": args.stop_sigma_mult,
             "tp_sigma_mult": args.tp_sigma_mult,
+            "entry_grace_bars": args.entry_grace_bars,
+            "risk_trail_pct": args.risk_trail_pct,
         },
         "long_only": args.long_only,
         "max_hold_bars": args.max_hold_bars,
@@ -641,7 +718,9 @@ def main() -> None:
     print(f"levers       : long_only={args.long_only}, max_hold_bars={args.max_hold_bars}, "
           f"stop_mode={args.stop_mode}"
           + (f" (stop {args.stop_sigma_mult}x / tp {args.tp_sigma_mult}x sigma)"
-             if args.stop_mode == "sigma" else ""))
+             if args.stop_mode == "sigma" else "")
+          + f", entry_grace_bars={args.entry_grace_bars}, "
+          f"risk_trail_pct={args.risk_trail_pct:g}")
     print(f"final equity : ${m['final_equity']:.2f}  (return {m['total_return_pct']:+.2f}%)")
     print(f"accuracy     : win rate {m['win_rate']*100:.1f}%  ({m['total_trades']} closed trades, "
           f"win = pnl > 0)")
