@@ -39,6 +39,11 @@ rate versus the original harness — that is the point):
     evaluated tick. ``--warmup-bars 0`` restores the old cold-start behavior.
   * Long-only metrics (``win_rate_long_only``) report the spot-deployable
     subset alongside the total.
+  * Accuracy levers, all default-off/percent (behavior preserved):
+    ``--long-only`` makes the strategy never emit ENTER_SHORT (spot shorts are
+    not executable live), ``--max-hold-bars N`` adds a time stop, and
+    ``--stop-mode sigma`` anchors stop/TP at ``--stop-sigma-mult``/``--tp-sigma-mult``
+    times the entry bar's per-bar return RMS instead of the fixed percents.
 """
 
 from __future__ import annotations
@@ -506,6 +511,18 @@ def main() -> None:
     ap.add_argument("--direction-bars", type=int, default=0)
     ap.add_argument("--confirm-bars", type=int, default=2)
     ap.add_argument("--trail-pct", type=float, default=0.3)
+    ap.add_argument("--long-only", action="store_true",
+                    help="never emit ENTER_SHORT (spot-deployable subset only)")
+    ap.add_argument("--max-hold-bars", type=int, default=0,
+                    help="time stop: exit after N completed bars in a trade "
+                         "(0 = off; must be 0 or >= --min-hold-bars)")
+    ap.add_argument("--stop-mode", choices=("percent", "sigma"), default="percent",
+                    help="barrier anchoring: fixed percents (default) or "
+                         "sigma-scaled from the entry bar's return RMS")
+    ap.add_argument("--stop-sigma-mult", type=float, default=1.5,
+                    help="stop distance = mult * sigma (sigma mode only)")
+    ap.add_argument("--tp-sigma-mult", type=float, default=1.2,
+                    help="take-profit distance = mult * sigma (sigma mode only)")
     ap.add_argument("--strategy", action="append", default=None,
                     help="strategy name (repeatable); default consensus")
     args = ap.parse_args()
@@ -556,6 +573,8 @@ def main() -> None:
             direction_bars=args.direction_bars,
             confirm_bars=args.confirm_bars,
             trail_pct=args.trail_pct,
+            max_hold_bars=args.max_hold_bars,
+            long_only=args.long_only,
         ),
         risk_overrides=RiskOverrides(
             per_trade_pct=args.per_trade_pct,
@@ -567,6 +586,9 @@ def main() -> None:
             cooldown_s=args.cooldown_s,
             min_volatility_pct=args.min_volatility_pct,
             vol_window_s=args.vol_window_s,
+            stop_mode=args.stop_mode,
+            stop_sigma_mult=args.stop_sigma_mult,
+            tp_sigma_mult=args.tp_sigma_mult,
         ),
         console_log_path=str(out_dir / "console.log"),
         trade_csv_path=str(out_dir / "trades.csv"),
@@ -590,7 +612,12 @@ def main() -> None:
             "max_total_exposure_pct": args.max_total_exposure_pct,
             "max_daily_loss_pct": args.max_daily_loss_pct,
             "cooldown_s": args.cooldown_s,
+            "stop_mode": args.stop_mode,
+            "stop_sigma_mult": args.stop_sigma_mult,
+            "tp_sigma_mult": args.tp_sigma_mult,
         },
+        "long_only": args.long_only,
+        "max_hold_bars": args.max_hold_bars,
     }
     (out_dir / "report.json").write_text(json.dumps(report, indent=2))
 
@@ -603,6 +630,10 @@ def main() -> None:
     print(f"costs        : Binance spot {report['config']['market_costs']}")
     print(f"risk         : {args.per_trade_pct}%/trade, max {args.max_concurrent} open, "
           f"exposure <= {args.max_total_exposure_pct}%, daily loss <= {args.max_daily_loss_pct}%")
+    print(f"levers       : long_only={args.long_only}, max_hold_bars={args.max_hold_bars}, "
+          f"stop_mode={args.stop_mode}"
+          + (f" (stop {args.stop_sigma_mult}x / tp {args.tp_sigma_mult}x sigma)"
+             if args.stop_mode == "sigma" else ""))
     print(f"final equity : ${m['final_equity']:.2f}  (return {m['total_return_pct']:+.2f}%)")
     print(f"accuracy     : win rate {m['win_rate']*100:.1f}%  ({m['total_trades']} closed trades, "
           f"win = pnl > 0)")
