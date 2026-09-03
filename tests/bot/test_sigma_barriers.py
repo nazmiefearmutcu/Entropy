@@ -63,10 +63,11 @@ def test_risk_overrides_barriers_validate_at_construction():
         RiskOverrides(stop_sigma_mult=0.0)
     with pytest.raises(ValueError):
         RiskOverrides(tp_sigma_mult=-1.0)
-    # defaults ship the verified "H" sigma shape (PROJECT.md, WR > 60% OOS)
+    # defaults ship the Round-2 winner s20 sigma shape (PROJECT.md,
+    # "Round 2 — ETH fixed")
     ro = RiskOverrides()
     assert ro.stop_mode == "sigma"
-    assert (ro.stop_sigma_mult, ro.tp_sigma_mult) == (5.0, 4.0)
+    assert (ro.stop_sigma_mult, ro.tp_sigma_mult) == (20.0, 4.0)
     # barrier fields are never handed to make_custom (they are not profile
     # fields) — cfg.profile() must keep working with sigma mode on
     cfg = BotConfig(risk_overrides=RiskOverrides(stop_mode="sigma"))
@@ -105,9 +106,13 @@ class _SigmaStub:
 
 
 def _run_one_entry(tmp_path, stop_mode: str, sigma: float | None):
+    # Pin the H-era multipliers explicitly: this test checks the anchoring
+    # MATH, not the ship default (now s20's 20.0/4.0 — see
+    # test_risk_overrides_barriers_validate_at_construction).
     cfg = BotConfig(
         starting_cash=100_000.0, enable_crypto=False, enable_equities=False,
-        risk_overrides=RiskOverrides(stop_mode=stop_mode),
+        risk_overrides=RiskOverrides(stop_mode=stop_mode,
+                                     stop_sigma_mult=5.0, tp_sigma_mult=4.0),
     )
     runner = BotRunner(cfg, run_dir=str(tmp_path))
     runner.strategies = [_SigmaStub(sigma)]

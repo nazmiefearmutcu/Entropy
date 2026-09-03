@@ -41,8 +41,10 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
     #: symbol ("BTCUSDT") -> mode. A plain string applies to every symbol; a
     #: dict overrides the strategy's fallback (``adaptive`` when the map form
     #: is used) per symbol — the Round-2 fix for ETH's regime misclassification
-    #: without regressing BTC (see the Round-2 design doc).
-    vote_mode: str | dict[str, str] = "adaptive"
+    #: without regressing BTC (see the Round-2 design doc). Shipped default is
+    #: the global "trend" (Round-2 winner s20 improves BOTH symbols, so no
+    #: per-symbol map is needed for the default; the map stays for future use).
+    vote_mode: str | dict[str, str] = "trend"
     normalize: str = "total"             # participating | total
     min_participation: float = 0.5
     w_ema: float = 0.35
@@ -85,9 +87,9 @@ class ConsensusConfig(msgspec.Struct, frozen=True):
     exit_mode: str = "trail"             # score | trend_flip | either | hold | trail
     #: Time stop: exit after this many completed bars in the trade regardless
     #: of score/trend/trail (0 = off; must be 0 or >= min_hold_bars).
-    #: Shipped default 96 (24h on 15m bars) is part of the verified "H"
-    #: configuration (see PROJECT.md, "Win rate > 60% OOS").
-    max_hold_bars: int = 96
+    #: Shipped default 192 (48h on 15m bars) is the Round-2 winner s20
+    #: (see PROJECT.md, "Round 2 — ETH fixed").
+    max_hold_bars: int = 192
     #: Never emit ENTER_SHORT (spot shorts are not executable live, so the
     #: short leg's measured accuracy is not deployable). Shipped default True
     #: is part of the verified "H" configuration.
@@ -187,9 +189,11 @@ class RiskOverrides(msgspec.Struct, frozen=True):
     #: (see PROJECT.md, "Win rate > 60% OOS").
     stop_mode: str = "sigma"
     #: sigma multipliers: stop distance = stop_sigma_mult * sigma, TP distance
-    #: = tp_sigma_mult * sigma (as fractions of entry). Shipped defaults 5.0/4.0
-    #: are the verified "H" configuration; the legacy percent shape was 1.5/1.2.
-    stop_sigma_mult: float = 5.0
+    #: = tp_sigma_mult * sigma (as fractions of entry). Shipped defaults
+    #: 20.0/4.0 are the Round-2 winner s20 (the 20σ stop almost never fires —
+    #: exits are TP/time-stop/score; see the standing risk note in PROJECT.md).
+    #: The H config was 5.0/4.0, the legacy percent shape 1.5/1.2.
+    stop_sigma_mult: float = 20.0
     tp_sigma_mult: float = 4.0
     #: Risk-trail ratchet (T7, Round 2; 0.0 = off, default). A FRACTION of the
     #: position's TP distance at open (``tp_px - entry_px`` long / the mirror
