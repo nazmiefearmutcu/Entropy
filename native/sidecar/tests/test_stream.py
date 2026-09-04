@@ -368,3 +368,27 @@ async def test_chart_warmup_is_skipped_when_no_provider_serves_the_width(offline
     await asyncio.sleep(0)
     await src._tasks["chart_warmup"]
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_stop_bot_flattens_open_positions(offline_source, tmp_path):
+    """A stopped bot never reaches check_exits again, so stop must close any
+    open position instead of stranding it without stop/TP/time-stop."""
+    from entropy.bot.portfolio import PositionSide
+
+    bot_cfg = BotConfig(warmup=False, trade_csv_path=str(tmp_path / "trades.csv"))
+    src = offline_source(bot_cfg=bot_cfg)
+    await src.start_bot()
+    bot = src.bot
+    assert bot is not None
+
+    bot.portfolio.open("AAPL", PositionSide.LONG, 1.0,
+                       entry_px=100.0, stop_px=90.0, tp_px=120.0, ts_ns=0, fee=0.0)
+    assert len(bot.portfolio.positions) == 1
+
+    ok, message, _problems = src.stop_bot()
+    assert ok is True and "1 position(s) closed" in message
+    assert bot.portfolio.positions == {}
+    # the breaker is NOT tripped by a plain stop: entries stay eligible
+    assert bot.risk.circuit_tripped is False
+    await src.stop_feeds()

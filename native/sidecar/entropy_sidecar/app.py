@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -33,7 +34,13 @@ _ALLOWED_ORIGINS = [
     "tauri://localhost",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://tauri.localhost",   # Tauri v2 + WebView2 serves the app from here
+    "https://tauri.localhost",
 ]
+
+# Sentinel a GET /api/settings client sees instead of live API credentials;
+# a PUT carrying it back is dropped before the merge (write-only secrets).
+REDACTED_SECRET = "\ufffdredacted"
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -75,12 +82,38 @@ def _result(ok: bool, message: str, problems: list[str] | None = None) -> dict[s
     return {"ok": ok, "message": message, "problems": problems or []}
 
 
+def _install_auth(app: FastAPI, auth_token: str) -> None:
+    """Require the per-process token on every /api route (401 otherwise).
+
+    CORS alone cannot stop cross-site "simple requests" (POSTs without a
+    preflight), so any webpage in any browser could previously drive the bot;
+    with a token the drive-by request cannot carry the secret. /health stays
+    open (no data). The Tauri shell prints and injects the token; it is not
+    accepted from the URL on HTTP routes (never logged, never in history)."""
+    import hmac
+
+    from fastapi.responses import JSONResponse
+
+    @app.middleware("http")
+    async def _require_token(request: Request, call_next):
+        if request.url.path.startswith("/api/"):
+            supplied = request.headers.get("x-sidecar-token", "")
+            if not hmac.compare_digest(supplied, auth_token):
+                return JSONResponse(
+                    {"ok": False, "message": "unauthorized",
+                     "problems": ["missing or invalid sidecar token"]},
+                    status_code=401,
+                )
+        return await call_next(request)
+
+
 def _from_tuple(res: tuple[bool, str, list[str]]) -> dict[str, Any]:
     ok, message, problems = res
     return _result(ok, message, problems)
 
 
-def create_app(*, source: SnapshotSource | None = None, tick_hz: float = 10.0) -> FastAPI:
+def create_app(*, source: SnapshotSource | None = None, tick_hz: float = 10.0,
+               auth_token: str | None = None) -> FastAPI:
     src = source or SnapshotSource()
 
     @asynccontextmanager
@@ -99,6 +132,8 @@ def create_app(*, source: SnapshotSource | None = None, tick_hz: float = 10.0) -
         CORSMiddleware, allow_origins=_ALLOWED_ORIGINS,
         allow_methods=["*"], allow_headers=["*"],
     )
+    if auth_token:
+        _install_auth(app, auth_token)
     app.state.source = src
     interval = 1.0 / tick_hz
 
@@ -121,6 +156,18 @@ def create_app(*, source: SnapshotSource | None = None, tick_hz: float = 10.0) -
 
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket) -> None:
+        # Browser clients always carry an Origin header: it must be the app's
+        # own. Non-browser loopback clients (tests, TUI probes) send none —
+        # they pass via the per-process token instead.
+        origin = ws.headers.get("origin")
+        if origin is not None and origin not in _ALLOWED_ORIGINS:
+            await ws.close(code=1008)
+            return
+        if auth_token and not hmac.compare_digest(
+            ws.query_params.get("token", ""), auth_token
+        ):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         try:
             while True:
@@ -154,11 +201,24 @@ def create_app(*, source: SnapshotSource | None = None, tick_hz: float = 10.0) -
 
     # --- settings -------------------------------------------------------------
 
+    def _redact_live(cfg: BotConfig) -> dict[str, Any]:
+        """Strip exchange credentials from the wire. Keys are write-only via
+        the API: a client that echoes the redacted value back has it dropped
+        on PUT, so no round trip can leak or wipe the stored secret."""
+        out = msgspec.to_builtins(cfg)
+        live = out.get("live")
+        if isinstance(live, dict):
+            if live.get("api_key"):
+                live["api_key"] = REDACTED_SECRET
+            if live.get("api_secret"):
+                live["api_secret"] = REDACTED_SECRET
+        return out
+
     @app.get("/api/settings")
     async def get_settings() -> dict[str, Any]:
         return {
             "app": msgspec.to_builtins(app.state.source.cfg),
-            "bot": msgspec.to_builtins(app.state.source.bot_cfg),
+            "bot": _redact_live(app.state.source.bot_cfg),
         }
 
     @app.put("/api/settings")
@@ -179,6 +239,13 @@ def create_app(*, source: SnapshotSource | None = None, tick_hz: float = 10.0) -
             except msgspec.ValidationError as exc:
                 problems.append(f"app: {exc}")
         if patch.bot is not None:
+            live_patch = patch.bot.get("live")
+            if isinstance(live_patch, dict):
+                # A redacted secret echoed back means "unchanged": drop it so
+                # the merge can never overwrite the stored credential.
+                for field in ("api_key", "api_secret"):
+                    if live_patch.get(field) == REDACTED_SECRET:
+                        del live_patch[field]
             current = msgspec.to_builtins(s.bot_cfg)
             problems.extend(f"bot: unknown field {k!r}"
                             for k in _unknown_keys(current, patch.bot, ""))

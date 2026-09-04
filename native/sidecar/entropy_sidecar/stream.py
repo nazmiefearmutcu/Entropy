@@ -430,22 +430,33 @@ class SnapshotSource:
     async def _drain(self) -> None:
         q = self._sink.q
         drained = 0
+        dropped = 0
         while True:
             r = await q.get()
-            if isinstance(r, Trade):
-                self.engine.on_trade(r.symbol, r.price, r.amount, r.side.value, r.local_ts)
-                self._last_ts_ns = r.local_ts
-                if r.symbol == self._focus:
-                    self._focus_candles.add(r.local_ts, r.price, r.amount)
-                bot = self.bot
-                if bot is not None and self._bot_running:
-                    try:
-                        bot.on_trade(r.symbol, r.price, r.amount, r.side.value, r.local_ts)
-                    except Exception as exc:
-                        # A strategy/risk bug must degrade the bot, not the tape:
-                        # record it and keep draining for everything else.
-                        self._feed_detail = f"bot error on {r.symbol}: {exc}"
-                        log.debug("bot on_trade failed", exc_info=True)
+            try:
+                if isinstance(r, Trade):
+                    self.engine.on_trade(r.symbol, r.price, r.amount, r.side.value, r.local_ts)
+                    self._last_ts_ns = r.local_ts
+                    if r.symbol == self._focus:
+                        self._focus_candles.add(r.local_ts, r.price, r.amount)
+            except Exception as exc:
+                # An engine/candle bug must degrade the tape, not kill the
+                # drain: this task also drives the bot's on_trade below, so
+                # its death silently disarms every open position's exits.
+                dropped += 1
+                self._feed_detail = f"engine error on {getattr(r, 'symbol', '?')}: {exc}"
+                log.debug("engine on_trade failed", exc_info=True)
+                if dropped % 100 == 1:
+                    log.warning("engine on_trade failures: {}", dropped)
+            bot = self.bot
+            if bot is not None and self._bot_running:
+                try:
+                    bot.on_trade(r.symbol, r.price, r.amount, r.side.value, r.local_ts)
+                except Exception as exc:
+                    # A strategy/risk bug must degrade the bot, not the tape:
+                    # record it and keep draining for everything else.
+                    self._feed_detail = f"bot error on {r.symbol}: {exc}"
+                    log.debug("bot on_trade failed", exc_info=True)
             # Under sustained load q.get() never suspends; hand back periodically
             # so the WS send loop isn't starved.
             drained += 1
@@ -529,7 +540,14 @@ class SnapshotSource:
             return False, "bot is not running", []
         self._bot_running = False
         self._cancel("bot_equity")
-        return True, "bot stopped", []
+        bot = self.bot
+        detail = ""
+        if bot.portfolio.positions:
+            # A stopped runner no longer reaches check_exits: leaving positions
+            # open strands them without stop/TP/time-stop. Flatten instead.
+            closed = bot.flatten_positions("sidecar_stop")
+            detail = f"; {closed} position(s) closed"
+        return True, f"bot stopped{detail}", []
 
     def set_bot_paused(self, paused: bool) -> tuple[bool, str, list[str]]:
         if self.bot is None:

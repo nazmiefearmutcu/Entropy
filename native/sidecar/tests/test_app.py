@@ -264,3 +264,59 @@ def test_symbol_search_accepts_the_long_coin_name_and_a_pair_query(client):
     assert by_abbrev[0]["symbol"] == "binance-spot:ETHUSDT"
     assert by_name[0]["symbol"] == "binance-spot:ETHUSDT"
     assert by_pair[0]["symbol"] == "coinbase:ETH-USD"
+
+
+def test_settings_get_redacts_live_secrets_and_put_echo_is_ignored(client):
+    src = client.app.state.source
+    bot_cfg = src.bot_cfg
+    armed = bot_cfg.__class__(**{
+        **{f: getattr(bot_cfg, f) for f in bot_cfg.__struct_fields__ if f != "live"},
+        "live": bot_cfg.live.__class__(enabled=True, acknowledged_risk=True,
+                                       api_key="secret-key", api_secret="secret-secret"),
+    })
+    src.apply_bot(armed)
+
+    r = client.get("/api/settings")
+    assert r.status_code == 200
+    live = r.json()["bot"]["live"]
+    assert live["api_key"] != "secret-key" and live["api_secret"] != "secret-secret"
+
+    # Echoing the redacted sentinel back must neither wipe nor change the keys.
+    r = client.put("/api/settings", json={"bot": {"live": {
+        "enabled": True, "acknowledged_risk": True,
+        "api_key": live["api_key"], "api_secret": live["api_secret"],
+    }}})
+    assert r.status_code == 200, r.text
+    stored = src.bot_cfg.live
+    assert stored.api_key == "secret-key" and stored.api_secret == "secret-secret"
+
+
+def test_auth_token_enforced_on_api_and_ws(offline_source):
+    """With a token provisioned (as __main__ always does), /api routes need the
+    header, drive-by POSTs die at 401, and the WS takes ?token= (+ Origin
+    allowlist for browser clients). Without a token nothing changes."""
+    from fastapi.testclient import TestClient
+
+    from entropy_sidecar.app import create_app
+
+    src = offline_source()
+    src.engine.on_trade("AAPL", 100.0, 1.0, "buy", 0)
+    app = create_app(source=src, auth_token="sekret", tick_hz=500)
+    c = TestClient(app)
+
+    assert c.get("/health").status_code == 200                    # open: no data
+    assert c.get("/api/settings").status_code == 401              # no header
+    assert c.post("/api/bot/start").status_code == 401            # drive-by POST dies
+    assert c.get("/api/settings", headers={"x-sidecar-token": "sekret"}).status_code == 200
+    assert c.get("/api/settings", headers={"x-sidecar-token": "wrong"}).status_code == 401
+
+    with c.websocket_connect("/ws/live?token=sekret") as ws:
+        assert ws.receive_json()["type"] == "snapshot"
+    with pytest.raises(Exception):
+        with c.websocket_connect("/ws/live?token=nope"):
+            pass
+
+    # unprovisioned sidecars keep the legacy open behaviour
+    open_app = create_app(source=offline_source(), tick_hz=500)
+    open_c = TestClient(open_app)
+    assert open_c.get("/api/settings").status_code == 200
