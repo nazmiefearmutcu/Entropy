@@ -326,9 +326,19 @@ class SettingsScreen(ModalScreen[None]):
         yield _text_row("Momentum Min %:", "bot-momentum", bot.momentum_min_pct)
 
         yield Static("Signal Logic", classes="settings-section")
-        yield _row("Vote Mode:", Select(
-            options=_VOTE_MODE_OPTIONS, value=c.vote_mode, id="bot-vote-mode", allow_blank=False
-        ))
+        if isinstance(c.vote_mode, dict):
+            # A per-symbol map cannot round-trip through a single-string Select:
+            # rendering it crashes (unhashable dict) and saving would silently
+            # flatten the map. Show a read-only note; _collect_bot carries the
+            # map through untouched.
+            yield _row("Vote Mode:", Static(
+                f"per-symbol map ({len(c.vote_mode)} symbols) — edit in settings.json",
+                id="bot-vote-mode-map",
+            ))
+        else:
+            yield _row("Vote Mode:", Select(
+                options=_VOTE_MODE_OPTIONS, value=c.vote_mode, id="bot-vote-mode", allow_blank=False
+            ))
         yield _row("Normalize Over:", Select(
             options=_NORMALIZE_OPTIONS, value=c.normalize, id="bot-normalize", allow_blank=False
         ))
@@ -463,7 +473,11 @@ class SettingsScreen(ModalScreen[None]):
         self.query_one("#bot-live-ack", Switch).value = bot.live.acknowledged_risk
         self.query_one("#bot-risk", Select).value = bot.risk_profile
         self.query_one("#bot-timeframe", Select).value = bot.timeframe
-        self.query_one("#bot-vote-mode", Select).value = c.vote_mode
+        vote_widget = next(iter(self.query("#bot-vote-mode")), None)
+        if isinstance(vote_widget, Select) and isinstance(c.vote_mode, str):
+            # dict vote_mode renders a read-only note instead of a Select —
+            # nothing to populate (and a dict would raise unhashable here).
+            vote_widget.value = c.vote_mode
         self.query_one("#bot-normalize", Select).value = c.normalize
         self.query_one("#bot-exit-mode", Select).value = c.exit_mode
         for name in STRATEGY_NAMES:
@@ -505,11 +519,18 @@ class SettingsScreen(ModalScreen[None]):
         ema_symbol = text("#bot-ema-sym").strip()
         if not ema_symbol:
             raise ValueError("Bot EMA symbol must not be empty")
+        # A dict vote_mode has no Select on screen — carry it through verbatim
+        # so a save can never silently flatten the per-symbol map to one string.
+        vote_widget = next(iter(self.query("#bot-vote-mode")), None)
+        vote_mode = (
+            str(vote_widget.value)
+            if isinstance(vote_widget, Select) else current.consensus.vote_mode
+        )
         consensus = ConsensusConfig(
             threshold=_as_float(text("#bot-threshold"), "Signal threshold",
                                 positive=True, maximum=1.0),
             min_bars=current.consensus.min_bars,
-            vote_mode=str(self.query_one("#bot-vote-mode", Select).value),
+            vote_mode=vote_mode,
             normalize=str(self.query_one("#bot-normalize", Select).value),
             min_participation=_as_float(text("#bot-min-part"), "Min participation",
                                         minimum=0.0, maximum=1.0),

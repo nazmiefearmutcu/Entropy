@@ -53,7 +53,7 @@ async def test_board_renders_quotes_and_sparkline(tmp_path):
     app = _app(tmp_path)
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        now = time.clock_gettime_ns(time.CLOCK_REALTIME)
+        now = time.time_ns()  # clock_gettime_ns is POSIX-only; Windows CPython lacks it
         app.engine.on_trade("AAPL", 100.0, 1.0, "buy", now)
         app.engine.on_trade("AAPL", 101.0, 1.0, "buy", now + 1_000_000)
         app.sample_snapshot()

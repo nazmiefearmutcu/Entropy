@@ -11,6 +11,33 @@ from textual_plotext import PlotextPlot
 _NS_PER_HOUR = 3_600 * 1_000_000_000
 _NS_PER_DAY = 24 * _NS_PER_HOUR
 
+
+def _patch_plotext_windows_dates() -> None:
+    """plotext 5.3.2 renders date axes via ``datetime.fromtimestamp(t + time0)``.
+
+    Its default ``time0`` is 01/01/1900, so sub-day axis ticks carry negative
+    timestamps and ``fromtimestamp`` raises ``OSError [Errno 22]`` on Windows
+    (localtime cannot represent pre-epoch values there). Raised inside a
+    Textual render pass that is fatal for the whole app. plotext's own import
+    comment points at the fix: build from the epoch arithmetic instead.
+    """
+    try:
+        from plotext import _date as _plotext_date
+    except Exception:  # pragma: no cover - plotext ships with the UI env
+        return
+
+    epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+
+    def _time_to_string(self, time, output_form=None):  # noqa: ANN001, A002
+        return self.datetime_to_string(
+            epoch + dt.timedelta(seconds=time + self.time0), output_form
+        )
+
+    _plotext_date.date_class.time_to_string = _time_to_string
+
+
+_patch_plotext_windows_dates()
+
 # Second-scale bars: default for charts whose owner never sets a timeframe
 # (bare widgets in tests / legacy call sites).
 _LEGACY_BAR_NS = 1_000_000_000
@@ -171,6 +198,16 @@ class PriceChart(PlotextPlot):
         self.replot()
 
     def replot(self) -> None:
+        try:
+            self._draw()
+        except Exception:
+            # A render failure inside a reactive watcher is fatal in Textual;
+            # degrade to a blank chart instead of taking the app down.
+            with suppress(Exception):
+                self.plt.clear_data()
+            self.refresh()
+
+    def _draw(self) -> None:
         self.plt.clear_data()
         if self.title:
             self.plt.title(self.title)
@@ -229,7 +266,16 @@ class VolumeChart(PlotextPlot):
     def watch_bars(self, _old: list[tuple[int, float]], new: list[tuple[int, float]]) -> None:
         if new:
             self.replot()
+
     def replot(self) -> None:
+        try:
+            self._draw()
+        except Exception:
+            with suppress(Exception):
+                self.plt.clear_data()
+            self.refresh()
+
+    def _draw(self) -> None:
         self.plt.clear_data()
         date_form, fmt = _axis_formats(self.bar_ns, self.chart_bars)
         self.plt.date_form(date_form)

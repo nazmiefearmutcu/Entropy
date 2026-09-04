@@ -791,19 +791,29 @@ class EntropyApp(App[None]):
     async def run_drain(self) -> None:
         q = self._sink.q
         drained = 0
+        dropped = 0
         while True:
             r = await q.get()  # returns WITHOUT yielding while the queue is backed up
-            if isinstance(r, Trade):
-                evs = self.engine.on_trade(r.symbol, r.price, r.amount, r.side.value, r.local_ts)
-                for e in evs:
-                    kn = type(e).__name__
-                    if kn == "Spike":
-                        self._spikes += 1
-                    elif kn == "SnapDrop":
-                        self._snap_drops += 1
-                if r.symbol in (self.cfg.strategy_symbol, self.cfg.crypto_strategy_symbol):
-                    self._on_strategy(r)
-                self._route_candle(r)
+            try:
+                if isinstance(r, Trade):
+                    evs = self.engine.on_trade(r.symbol, r.price, r.amount, r.side.value, r.local_ts)
+                    for e in evs:
+                        kn = type(e).__name__
+                        if kn == "Spike":
+                            self._spikes += 1
+                        elif kn == "SnapDrop":
+                            self._snap_drops += 1
+                    if r.symbol in (self.cfg.strategy_symbol, self.cfg.crypto_strategy_symbol):
+                        self._on_strategy(r)
+                    self._route_candle(r)
+            except Exception:
+                # One malformed record must degrade the tape, not the app:
+                # worker exceptions are fatal in Textual by default.
+                dropped += 1
+                if dropped == 1 or dropped % 100 == 0:
+                    self._push_info(
+                        f"bad market record dropped ({dropped} total)", "red"
+                    )
             # Under sustained load q.get() never suspends, which starves the 10 Hz
             # UI timers: hand the loop back every 200 records.
             drained += 1
@@ -895,7 +905,15 @@ class EntropyApp(App[None]):
                     task.cancel()
                 return
         self._feed_status("equities: source=sim")
-        await self._equity.run()
+        try:
+            await self._equity.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Sim feed death must not kill the worker (same policy as the
+            # crypto path); the dots flip and the console records why.
+            self._feed_status(f"equities: sim feed stopped ({exc})", "red")
+            self._error_text = f"equity feed: {exc}"
 
     @work(exclusive=True, group="crypto_feed")
     async def _run_crypto_feed(self) -> None:
