@@ -99,3 +99,24 @@ def test_config_applied_payload_tracks_cost_settings(tmp_path: Path):
     applied = [ev for ev in events if ev["kind"] == "config_applied"]
     assert applied and applied[-1]["cost_aware"] is True
     assert applied[-1]["cost_edge_mult"] == 3.0
+
+
+def test_apply_config_rejects_mode_change_and_keeps_executor(tmp_path: Path):
+    from msgspec import structs as ms_structs
+
+    from entropy.bot.config import LiveConfig
+    from entropy.bot.execution.paper import PaperExecutor
+
+    bot = BotRunner(BotConfig(risk_profile="extreme"), run_dir=str(tmp_path))
+    live_cfg = ms_structs.replace(
+        bot.config,
+        mode="live",
+        live=LiveConfig(enabled=True, acknowledged_risk=True,
+                        api_key="k", api_secret="s"),
+    )
+
+    problems = bot.apply_config(live_cfg)
+
+    assert problems and "restart" in problems[0]
+    assert type(bot.executor) is PaperExecutor
+    assert bot.config.mode == "paper"

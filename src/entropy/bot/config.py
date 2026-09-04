@@ -156,6 +156,7 @@ class MarketCostConfig(msgspec.Struct, frozen=True):
 #: read ``risk_overrides.stop_mode`` (etc.) directly, as the runner does.
 _RISK_BARRIER_FIELDS = frozenset({
     "stop_mode", "stop_sigma_mult", "tp_sigma_mult", "risk_trail_pct",
+    "entry_grace_bars",
 })
 
 
@@ -205,6 +206,15 @@ class RiskOverrides(msgspec.Struct, frozen=True):
     #: The ratchet is per-tick, runs BEFORE stop/TP hit-checking, and never
     #: loosens. Barriers anchored at open are untouched until the ratchet fires.
     risk_trail_pct: float = 0.0
+    #: T6 entry-bar grace (shipped 3, previously harness-only): mechanical
+    #: STOP orders are suppressed while the position is younger than this many
+    #: bars (the entry bar itself counts as bar 0). Take-profit is never
+    #: suppressed and the barrier VALUES are untouched — only the stop's hit
+    #: timing. ``0`` disables. Enforced natively by ``RiskManager.check_exits``
+    #: since the grace-to-bot port; the accuracy harness carries its own
+    #: identical filter (suppressing twice is idempotent), so harness evidence
+    #: and live behaviour now agree by construction.
+    entry_grace_bars: int = 3
 
     def __post_init__(self) -> None:
         if self.stop_mode not in ("percent", "sigma"):
@@ -215,6 +225,8 @@ class RiskOverrides(msgspec.Struct, frozen=True):
             raise ValueError("sigma multipliers must be > 0")
         if self.risk_trail_pct < 0.0:
             raise ValueError("risk_trail_pct must be >= 0 (0 = off)")
+        if self.entry_grace_bars < 0:
+            raise ValueError("entry_grace_bars must be >= 0 (0 = off)")
 
     def active(self) -> dict[str, object]:
         return {

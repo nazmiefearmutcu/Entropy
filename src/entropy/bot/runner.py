@@ -100,6 +100,8 @@ class BotRunner:
             stop_sigma_mult=config.risk_overrides.stop_sigma_mult,
             tp_sigma_mult=config.risk_overrides.tp_sigma_mult,
             risk_trail_pct=config.risk_overrides.risk_trail_pct,
+            entry_grace_bars=config.risk_overrides.entry_grace_bars,
+            bar_s=config.bar_seconds(),
         )
         self.executor = _make_executor(config)
         self.strategies = build_strategies(config)
@@ -236,6 +238,22 @@ class BotRunner:
         for order in orders:
             self._execute(order)
 
+    def flatten_positions(self, reason: str) -> int:
+        """Close every open position at the current mark, WITHOUT tripping the
+        circuit breaker (entries stay eligible after a restart).
+
+        For orchestration stop paths: a stopped runner no longer reaches
+        ``check_exits``, so positions left open would sit there with no stop,
+        no take-profit and no time stop. Returns the number of close orders
+        issued."""
+        ts_ns = self._last_ts_ns if self._last_ts_ns > 0 else int(time.time() * _NS_PER_S)
+        orders = self.risk.close_all_positions(self.portfolio, ts_ns)
+        for order in orders:
+            self._execute(order)
+        if orders:
+            self.ledger.record_event("flatten", {"reason": reason, "orders": len(orders)})
+        return len(orders)
+
     # ---- control --------------------------------------------------------------
     def set_risk_profile(self, name: str) -> RiskProfile:
         old = self.risk.profile.name
@@ -257,6 +275,15 @@ class BotRunner:
         problems = validate(cfg)
         if problems:
             return problems
+        if cfg.mode != self.config.mode:
+            # Docstring contract, enforced: mode is not hot-readable. Swapping
+            # the executor under a running portfolio routes every order —
+            # including mechanical stop/TP exits — to a different executor
+            # mid-trade, so blocked orders leave positions unmanaged.
+            return [
+                f"mode change ({self.config.mode} -> {cfg.mode}) requires a "
+                "restart; start the bot with the new mode instead"
+            ]
 
         tf_changed = cfg.timeframe != self.config.timeframe
         bar_changed = cfg.bar_seconds() != self.config.bar_seconds()
@@ -292,11 +319,26 @@ class BotRunner:
             cfg.risk_overrides.tp_sigma_mult,
         )
         self.risk.set_risk_trail(cfg.risk_overrides.risk_trail_pct)
+        # Grace rides the risk layer too; bar_s re-passed so a timeframe
+        # hot-apply keeps the bar arithmetic aligned with the strategy buckets.
+        self.risk.set_entry_grace(
+            cfg.risk_overrides.entry_grace_bars, cfg.bar_seconds()
+        )
         profile = cfg.profile()
         if profile != self.risk.profile:
             self.risk.set_profile(profile)
             self.ledger.record_risk_change(old_profile, profile.name)
-        self.executor = _make_executor(cfg)
+        # Same selection input as the mode guard above: with mode frozen the
+        # rebuild is a same-type no-op, but keep the type check so a future
+        # executor-selection field can't hot-swap mid-trade either.
+        executor = _make_executor(cfg)
+        if type(executor) is not type(self.executor):
+            self.executor = executor
+        elif risk_cost_changed and hasattr(self.executor, "cost_model"):
+            # The executor is no longer rebuilt on every apply; refresh its
+            # cost model in place so paper fills keep pricing on the same
+            # schedule as the risk layer.
+            self.executor.cost_model = cfg.cost_model()
         if risk_cost_changed:
             # Swap the risk layer's cost model in place. A full rebuild would
             # drop cooldown timers, tick history and halt flags; this only

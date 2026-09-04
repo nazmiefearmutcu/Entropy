@@ -217,20 +217,21 @@ def test_build_strategies_string_form_has_empty_map():
 
 def test_warmup_then_per_symbol_modes_still_diverge():
     """Warmup-chained state must not flatten the per-symbol vote mode: after
-    seeding both symbols from the same warmup bars, the legacy symbol stays
-    trend-blind while the adaptive symbol rides the trend — i.e. _evaluate
-    resolves _mode_for(symbol) at evaluation time, not at warmup time."""
+    seeding, the legacy symbol stays trend-blind while the adaptive symbol
+    rides the trend — i.e. _evaluate resolves _mode_for(symbol) at evaluation
+    time, not at warmup time. The seed goes to its OWNER only: a multi-symbol
+    config must not copy one instrument's price history into the others."""
     from entropy.strategy.engine import Bar
 
     closes = path_trend(42, direction=1)
     strat = ConsensusStrategy(symbols=("A", "B"),
-                              vote_mode_for={"A": "legacy", "B": "adaptive"})
+                              vote_mode_for={"A": "legacy", "B": "adaptive"},
+                              warmup_symbol="B")
     seed = [Bar(ts_ns=(i + 1) * _BAR_NS, close=c) for i, c in enumerate(closes[:40])]
     strat.warmup(seed)
-    # both symbols adopted the same seeded closes; the mode must still
-    # diverge at evaluation
-    assert list(strat._states["A"].closes) == list(strat._states["B"].closes)
+    # only the owner symbol is seeded; the unrelated symbol starts cold
+    assert "B" in strat._states and "A" not in strat._states
     a_events = [a for _, a in feed_bars(strat, "A", closes[40:], start_bucket=41)]
     b_events = [a for _, a in feed_bars(strat, "B", closes[40:], start_bucket=41)]
-    assert SignalAction.ENTER_LONG not in a_events    # legacy: trend-blind
+    assert SignalAction.ENTER_LONG not in a_events    # legacy: trend-blind + cold
     assert SignalAction.ENTER_LONG in b_events        # adaptive: rides the trend

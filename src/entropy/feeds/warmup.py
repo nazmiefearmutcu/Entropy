@@ -66,7 +66,10 @@ async def warmup_klines(symbol_raw: str, interval: str = "1m", limit: int = 200)
 
     from crocodile.crypto.exchanges.binance.backfill import make_live_backfill
     bf = make_live_backfill()
-    now = time.clock_gettime_ns(time.CLOCK_REALTIME)
+    # time.clock_gettime_ns(CLOCK_REALTIME) is POSIX-only; Windows CPython has
+    # neither, which made every warmup_klines call raise and all callers
+    # silently degrade to an unwarmed start. time_ns() is the same wall clock.
+    now = time.time_ns()
     # Window must span `limit` bars of the ACTUAL interval: a fixed 60s-per-bar
     # window served ~13 bars of history on 15m (EMA21 never seeded) and <=3 on 1h.
     start = now - limit * _interval_ns(interval)

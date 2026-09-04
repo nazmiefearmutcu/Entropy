@@ -393,10 +393,13 @@ class ConsensusStrategy:
     def warmup(self, bars: Sequence[Bar]) -> None:
         """Seed bar closes so live ticks are immediately eligible for signals.
 
-        ``Bar`` carries no symbol. With an explicit ``symbols`` tuple (or a
-        ``warmup_symbol``) the attribution is unambiguous; with neither, the
-        seed is adopted by whichever symbol ticks first — best effort, and the
-        reason the runner passes a ``warmup_symbol``.
+        ``Bar`` carries no symbol, so the seed is attributed to
+        ``warmup_symbol`` (the runner fetches warmup history for the
+        ``ema_symbol`` only); a single configured symbol may adopt it too.
+        With multiple configured symbols and no owner the state is left cold —
+        copying the series into every symbol made each non-owner evaluate
+        indicators against a foreign instrument's price history. With neither,
+        the seed is adopted by whichever symbol ticks first — best effort.
         """
         if not bars:
             return
@@ -408,7 +411,12 @@ class ConsensusStrategy:
         proto.bucket = bars[-1].ts_ns // self._bar_ns
         proto.bar_close = float(bars[-1].close)
         proto.pending = False
-        targets = self.symbols or ((self.warmup_symbol,) if self.warmup_symbol else ())
+        if self.warmup_symbol:
+            targets: tuple[str, ...] = (self.warmup_symbol,)
+        elif self.symbols is not None and len(self.symbols) == 1:
+            targets = self.symbols
+        else:
+            targets = ()
         if targets:
             for sym in targets:
                 self._states[sym] = _SymbolState(

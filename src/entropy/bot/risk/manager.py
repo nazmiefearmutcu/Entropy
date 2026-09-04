@@ -41,6 +41,8 @@ class RiskManager:
         stop_sigma_mult: float = 1.5,
         tp_sigma_mult: float = 1.2,
         risk_trail_pct: float = 0.0,
+        entry_grace_bars: int = 0,
+        bar_s: float = 0.0,
     ) -> None:
         self.profile = profile
         self.cost_model = cost_model
@@ -57,6 +59,13 @@ class RiskManager:
         # RiskOverrides.risk_trail_pct by the runner; hot-applied via
         # set_risk_trail().
         self.risk_trail_pct = risk_trail_pct
+        # T6 entry-bar grace (grace-to-bot port): mechanical STOP orders are
+        # suppressed while a position is younger than entry_grace_bars bars
+        # (the entry bar counts as bar 0). TP is never suppressed and barrier
+        # values are untouched. Requires bar_s > 0 to have bar semantics;
+        # grace 0 / bar_s 0 = off (legacy behaviour, byte-compatible).
+        self.entry_grace_bars = max(0, int(entry_grace_bars))
+        self._bar_ns = int(bar_s * _NS_PER_S) if bar_s and bar_s > 0 else 0
         self.halted = False
         self.circuit_tripped = False
         self._cooldown_until: dict[str, int] = {}
@@ -76,6 +85,28 @@ class RiskManager:
     def set_risk_trail(self, risk_trail_pct: float) -> None:
         """Swap the risk-trail ratchet fraction in place (hot-apply path)."""
         self.risk_trail_pct = risk_trail_pct
+
+    def set_entry_grace(self, entry_grace_bars: int, bar_s: float | None = None) -> None:
+        """Swap the entry-bar grace in place (hot-apply path).
+
+        ``bar_s`` is re-passed so a timeframe hot-apply keeps the bar arithmetic
+        in sync with the strategy's bucket length."""
+        self.entry_grace_bars = max(0, int(entry_grace_bars))
+        if bar_s is not None:
+            self._bar_ns = int(bar_s * _NS_PER_S) if bar_s and bar_s > 0 else 0
+
+    def _grace_exempt(self, entry_ts_ns: int, ts_ns: int) -> bool:
+        """T6 entry-bar grace: is a position (opened at ``entry_ts_ns``) still
+        stop-exempt at tick ``ts_ns``? The entry bar itself counts as bar 0, so
+        ``grace_bars=1`` suppresses the mechanical stop for the entry bar only,
+        ``grace_bars=2`` for the entry bar + the next completed bar, and so on.
+        Identical arithmetic to the harness ``_grace_exempt`` (which wraps this
+        method in evidence runs, so suppression is idempotent there)."""
+        return (
+            self.entry_grace_bars > 0
+            and self._bar_ns > 0
+            and (ts_ns - entry_ts_ns) // self._bar_ns < self.entry_grace_bars
+        )
 
     def barrier_pcts(
         self, sigma: float | None
@@ -369,7 +400,12 @@ class RiskManager:
             else:
                 hit_stop, hit_tp = mk >= pos.stop_px, mk <= pos.tp_px
             if hit_stop:
-                out.append(self._close_order(pos, mk, ts_ns, "risk", OrderIntent.STOP))
+                # stop-first precedence is preserved even while suppressed:
+                # during grace a same-tick TP does NOT exit (matches the
+                # harness filter exactly — suppression removes the order, it
+                # does not fall through to the TP branch).
+                if not self._grace_exempt(pos.entry_ts_ns, ts_ns):
+                    out.append(self._close_order(pos, mk, ts_ns, "risk", OrderIntent.STOP))
             elif hit_tp:
                 out.append(self._close_order(pos, mk, ts_ns, "risk", OrderIntent.TAKE_PROFIT))
         return out

@@ -101,7 +101,12 @@ def fetch_klines(bars: int, end_ms: int, cache: Path | None = None,
                  raw: str = RAW) -> list[list[Any]]:
     if cache is not None and cache.exists():
         data = json.loads(cache.read_text())
-        if data.get("meta", {}).get("bars") == bars:
+        meta = data.get("meta", {})
+        # Validate the full key, not just `bars`: otherwise a later --end-date
+        # (the rolling-gate use case) or a different --symbol silently replays
+        # the cached window and the gate re-verifies a stale verdict forever.
+        if meta.get("bars") == bars and meta.get("end_ms") == end_ms \
+                and meta.get("raw", RAW) == raw:
             return data["klines"]
     start_ms = end_ms - bars * BAR_MS
     got: list[list[Any]] = []
@@ -133,7 +138,8 @@ def fetch_klines(bars: int, end_ms: int, cache: Path | None = None,
     keep = closed[-bars:]
     if cache is not None:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps({"meta": {"bars": bars, "end_ms": end_ms},
+        cache.write_text(json.dumps({"meta": {"bars": bars, "end_ms": end_ms,
+                                             "raw": raw},
                                      "klines": keep}))
     return keep
 
@@ -280,6 +286,17 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
     """
     out_dir = Path(run_dir).parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    # The entry_grace_bars ARGUMENT is the single grace authority in evidence
+    # runs: neutralize the config's native RiskOverrides field so the harness
+    # filter and the risk layer cannot compound, and grace=0 stays a true
+    # byte-identical no-op regardless of cfg defaults.
+    from msgspec import structs as ms_structs
+
+    cfg = ms_structs.replace(
+        cfg,
+        risk_overrides=ms_structs.replace(
+            cfg.risk_overrides, entry_grace_bars=0),
+    )
     runner = BotRunner(cfg, run_dir=str(out_dir / "ledger"))
     warm_ledger = _BarrierLedger(runner)
     dummy = _BarrierLedger(runner)
@@ -514,11 +531,19 @@ def simulate(klines: list[list[Any]], cfg: BotConfig,
     )
     final_equity = snap.equity
     total_return = (final_equity / cfg.starting_cash - 1.0) * 100.0
+    # Honest, gate-grade return: the sum of the SAME per-trade PnLs that feed
+    # WR/PF — level-clamped mechanical exits, eval window only (warmup trades
+    # and the boundary liquidation land in the warm ledger). The equity-based
+    # total_return above is a headline mixing unclamped extreme fills with
+    # warmup PnL; on gap bars the two diverge (see MASTER-REVIEW H8).
+    trade_return = (sum(closed_pnls) / cfg.starting_cash * 100.0
+                    if cfg.starting_cash else 0.0)
 
     report = {
         "metrics": {
             "final_equity": round(final_equity, 4),
             "total_return_pct": round(total_return, 4),
+            "trade_weighted_return_pct": round(trade_return, 4),
             "total_trades": total_trades,
             "win_rate": round(win_rate, 4),
             "win_definition": "pnl > 0",

@@ -238,7 +238,11 @@ def main() -> int:
     win_rate = m["win_rate"]
     trades = m["total_trades"]
     pf = m["profit_factor"]
-    ret = m["total_return_pct"]
+    # Gate on the trade-weighted return (same clamped per-trade PnLs that feed
+    # WR/PF, eval window only). Falls back to the equity headline for reports
+    # produced before that field existed.
+    ret = m.get("trade_weighted_return_pct", m["total_return_pct"])
+    eq_ret = m["total_return_pct"]
     lo, hi = wilson_interval(wins_of(report), trades)
 
     passed, failed = gate_verdict(win_rate, trades, pf, ret)
@@ -250,7 +254,7 @@ def main() -> int:
           f"(Wilson 95% CI [{lo * 100:.1f}%, {hi * 100:.1f}%])")
     print(f"trades           : {trades}")
     print(f"profit_factor    : {pf:.2f}")
-    print(f"total_return_pct : {ret:+.2f}%")
+    print(f"return (trades)  : {ret:+.2f}%  (equity-basis {eq_ret:+.2f}%)")
     print(f"levers           : vote_mode={args.vote_mode}, "
           f"risk_trail_pct={args.risk_trail_pct:g}, "
           f"entry_grace_bars={args.entry_grace_bars}, "
