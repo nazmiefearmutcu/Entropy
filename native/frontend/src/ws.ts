@@ -15,16 +15,26 @@ export class StreamClient {
   private port: number
   private handlers: StreamHandlers
   private factory: WSFactory
+  private token: string
   private timer: ReturnType<typeof setTimeout> | null = null
-  constructor(port: number, handlers: StreamHandlers, factory: WSFactory = (u) => new WebSocket(u)) {
+  constructor(
+    port: number,
+    handlers: StreamHandlers,
+    factory: WSFactory = (u) => new WebSocket(u),
+    token = '',
+  ) {
     this.port = port
     this.handlers = handlers
     this.factory = factory
+    this.token = token
   }
 
   connect() {
     this.stopped = false
-    const ws = this.factory(`ws://127.0.0.1:${this.port}/ws/live`)
+    // Browsers cannot set custom headers on WS: the sidecar accepts the token
+    // as a query param on the handshake instead.
+    const q = this.token ? `?token=${encodeURIComponent(this.token)}` : ''
+    const ws = this.factory(`ws://127.0.0.1:${this.port}/ws/live${q}`)
     this.ws = ws
     ws.onopen = () => {
       this.backoff = 500

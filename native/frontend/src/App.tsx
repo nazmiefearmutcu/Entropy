@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getMeta, getSettings, postCommand, setFocus } from './api'
+import { getMeta, getSettings, postCommand, setFocus, setSidecarToken } from './api'
 import { mockEnabled, startMock } from './mock'
-import { PortContext, resolvePort } from './port'
+import { PortContext, resolvePort, resolveToken } from './port'
 import { setConfig, setConnected, setSnap, useConnected, useHasSnapshot } from './store'
 import { reportAck } from './toast'
 import {
@@ -98,6 +98,9 @@ function Workspace({ onFocus }: { onFocus: (symbol: string) => void }) {
 
 export default function App() {
   const [port] = useState(resolvePort)
+  // Resolve once at module boot so every api/ws call carries the token.
+  const [token] = useState(resolveToken)
+  setSidecarToken(token)
   const ui = useUi()
   const connected = useConnected()
   const ready = useHasSnapshot()
@@ -108,10 +111,10 @@ export default function App() {
       onSnapshot: setSnap,
       onStatus: setConnected,
       onError: (m) => setConfig({ error: m }),
-    })
+    }, undefined, token)
     client.connect()
     return () => client.stop()
-  }, [port])
+  }, [port, token])
 
   useEffect(() => {
     if (mockEnabled()) return

@@ -19,6 +19,21 @@ export function apiBase(port: number): string {
   return `http://127.0.0.1:${port}`
 }
 
+/**
+ * Per-process sidecar auth token (see port.ts resolveToken). Module-level so
+ * every mutate/query carries it without threading it through every call site;
+ * App sets it once at boot.
+ */
+let sidecarToken = ''
+
+export function setSidecarToken(token: string): void {
+  sidecarToken = token
+}
+
+function authHeaders(base: Record<string, string> = {}): Record<string, string> {
+  return sidecarToken ? { ...base, 'x-sidecar-token': sidecarToken } : { ...base }
+}
+
 async function readAck(res: Response): Promise<ApiAck> {
   let body: unknown = null
   try {
@@ -58,7 +73,7 @@ async function mutate(
 ): Promise<ApiAck> {
   try {
     const res = await fetch(`${apiBase(port)}${path}`, {
-      headers: { 'content-type': 'application/json' },
+      headers: authHeaders({ 'content-type': 'application/json' }),
       ...init,
     })
     return await readAck(res)
@@ -68,7 +83,7 @@ async function mutate(
 }
 
 async function query<T>(port: number, path: string): Promise<T> {
-  const res = await fetch(`${apiBase(port)}${path}`, { headers: { accept: 'application/json' } })
+  const res = await fetch(`${apiBase(port)}${path}`, { headers: authHeaders({ accept: 'application/json' }) })
   if (!res.ok) throw new Error(`GET ${path} -> HTTP ${res.status}`)
   return (await res.json()) as T
 }

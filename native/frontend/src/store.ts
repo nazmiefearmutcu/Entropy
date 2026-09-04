@@ -209,7 +209,7 @@ export function useFundamentals(): Fundamentals | null {
 const DEFAULT_SETTINGS: SettingsView = {
   timeframe: '',
   chart_interval: '',
-  chart_type: 'candles',
+  chart_type: 'candlestick',
   show_volume: true,
   show_depth: true,
   equity_source: '',

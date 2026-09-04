@@ -130,7 +130,7 @@ export const MOCK_APP_CONFIG: AppConfigJSON = {
   strategy_symbol: 'AAPL',
   crypto_strategy_symbol: 'BTC/USDT',
   theme: 'terminal',
-  chart_type: 'candles',
+  chart_type: 'candlestick',
   show_volume: true,
   show_depth: true,
   depth_bins: 12,
@@ -365,7 +365,7 @@ export function makeSnapshot(tick = 0, overrides: Partial<SnapshotMessage> = {})
     settings: {
       timeframe: '15m',
       chart_interval: '',
-      chart_type: 'candles',
+      chart_type: 'candlestick',
       show_volume: true,
       show_depth: true,
       equity_source: 'yahoo',

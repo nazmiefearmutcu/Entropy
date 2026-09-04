@@ -387,23 +387,34 @@ export function BotSettings({
           title="Advanced — signal logic"
           caption="how votes become a decision"
         >
-          <SelectField
-            label="Vote mode"
-            value={c.vote_mode}
-            options={(meta?.vote_modes ?? ['adaptive', 'trend', 'mean_revert', 'legacy']).map(
-              (m) => ({
-                value: m,
-                label: m === 'legacy' ? 'legacy — deprecated, trend-blind' : m,
-              }),
-            )}
-            onChange={(v) => setConsensus({ vote_mode: v })}
-            hint={VOTE_MODE_HELP[c.vote_mode] ?? 'Regime handling for indicator votes.'}
-            error={
-              c.vote_mode === 'legacy'
-                ? 'legacy is the old, known-broken mapping: it ignores regime entirely. Keep it only to reproduce past runs.'
-                : undefined
-            }
-          />
+          {typeof c.vote_mode === 'string' ? (
+            <SelectField
+              label="Vote mode"
+              value={c.vote_mode}
+              options={(meta?.vote_modes ?? ['adaptive', 'trend', 'mean_revert', 'legacy']).map(
+                (m) => ({
+                  value: m,
+                  label: m === 'legacy' ? 'legacy — deprecated, trend-blind' : m,
+                }),
+              )}
+              onChange={(v) => setConsensus({ vote_mode: v })}
+              hint={VOTE_MODE_HELP[c.vote_mode] ?? 'Regime handling for indicator votes.'}
+              error={
+                c.vote_mode === 'legacy'
+                  ? 'legacy is the old, known-broken mapping: it ignores regime entirely. Keep it only to reproduce past runs.'
+                  : undefined
+              }
+            />
+          ) : (
+            <p
+              className="rounded border border-warn bg-warn/10 px-3 py-2 text-xs leading-relaxed text-ink-dim"
+              role="note"
+            >
+              Vote mode is a per-symbol map ({Object.keys(c.vote_mode).length} symbols) — edit it in
+              the settings file. The selector is hidden so a save cannot flatten the map; the map is
+              carried through untouched.
+            </p>
+          )}
           <Row2>
             <SelectField
               label="Normalize"

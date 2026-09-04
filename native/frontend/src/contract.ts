@@ -261,7 +261,10 @@ export interface RiskOverridesJSON {
 export interface ConsensusConfigJSON {
   threshold: number
   min_bars: number
-  vote_mode: string
+  /** Global mode, or a per-symbol map ({ "BTCUSDT": "trend", ... }) that the
+   * backend validates and the UIs must carry through untouched (a save that
+   * round-trips a single-string Select would silently flatten the map). */
+  vote_mode: string | Record<string, string>
   normalize: string
   min_participation: number
   w_ema: number

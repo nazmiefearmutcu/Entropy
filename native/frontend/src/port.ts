@@ -13,6 +13,7 @@ export function usePort(): number {
 declare global {
   interface Window {
     __SIDECAR_PORT__?: number
+    __SIDECAR_TOKEN__?: string
   }
 }
 
@@ -23,4 +24,19 @@ export function resolvePort(): number {
     if (Number.isFinite(n)) return n
   }
   return window.__SIDECAR_PORT__ ?? 8000
+}
+
+/**
+ * Per-process sidecar auth token, injected by the Tauri shell next to the
+ * port. Every /api route and the WS handshake must carry it. Dev escape
+ * hatch: `localStorage.setItem('entropy_sidecar_token', <TOKEN= line>)` when
+ * driving a manually-launched sidecar from the vite dev server.
+ */
+export function resolveToken(): string {
+  if (window.__SIDECAR_TOKEN__) return window.__SIDECAR_TOKEN__
+  try {
+    return window.localStorage.getItem('entropy_sidecar_token') ?? ''
+  } catch {
+    return ''
+  }
 }

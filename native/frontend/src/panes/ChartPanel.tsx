@@ -12,7 +12,7 @@ import { FocusChart } from './FocusChart'
 import { CadenceControls } from './IntervalControls'
 
 const CHART_TYPES = [
-  { value: 'candles', label: 'Candles' },
+  { value: 'candlestick', label: 'Candles' },
   { value: 'line', label: 'Line' },
 ]
 

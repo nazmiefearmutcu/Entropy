@@ -250,7 +250,7 @@ export function SettingsDrawer({ tab, onClose }: { tab: SettingsTab; onClose: ()
                           label="Chart type"
                           value={app.chart_type}
                           options={[
-                            { value: 'candles', label: 'candles' },
+                            { value: 'candlestick', label: 'candlestick' },
                             { value: 'line', label: 'line' },
                           ]}
                           onChange={(v) => void apply({ app: { chart_type: v } })}
