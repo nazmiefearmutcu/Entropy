@@ -32,18 +32,22 @@ fn sidecar_command() -> Command {
     c
 }
 
-fn spawn_sidecar() -> Option<(Child, u16)> {
+fn spawn_sidecar() -> Option<(Child, u16, String)> {
     let mut child = sidecar_command().stdout(Stdio::piped()).spawn().ok()?;
     let stdout = child.stdout.take()?;
     let mut reader = BufReader::new(stdout);
     let mut port: u16 = 0;
+    let mut token = String::new();
     let mut line = String::new();
     loop {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {
-                if let Some(rest) = line.trim().strip_prefix("PORT=") {
+                // TOKEN= is printed before PORT= so both are in hand at break.
+                if let Some(rest) = line.trim().strip_prefix("TOKEN=") {
+                    token = rest.trim().to_string();
+                } else if let Some(rest) = line.trim().strip_prefix("PORT=") {
                     port = rest.parse().unwrap_or(0);
                     break;
                 }
@@ -59,7 +63,7 @@ fn spawn_sidecar() -> Option<(Child, u16)> {
             sink.clear();
         }
     });
-    Some((child, port))
+    Some((child, port, token))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -73,19 +77,24 @@ pub fn run() {
                         .build(),
                 )?;
             }
-            let port = match spawn_sidecar() {
-                Some((child, port)) => {
+            let (port, token) = match spawn_sidecar() {
+                Some((child, port, token)) => {
                     app.manage(SidecarGuard(Mutex::new(Some(child))));
-                    port
+                    (port, token)
                 }
                 None => {
                     app.manage(SidecarGuard(Mutex::new(None)));
-                    0
+                    (0, String::new())
                 }
             };
-            // Inject the sidecar port BEFORE the frontend's own scripts run, so
-            // App.tsx's resolvePort() picks it up from window.__SIDECAR_PORT__.
-            let init = format!("window.__SIDECAR_PORT__ = {};", port);
+            // Inject the sidecar port + per-process auth token BEFORE the
+            // frontend's own scripts run, so App.tsx's resolvePort() and
+            // resolveToken() pick them up. `{:?}` yields a quoted, escaped
+            // string literal — valid JS for the token's ASCII alphabet.
+            let init = format!(
+                "window.__SIDECAR_PORT__ = {}; window.__SIDECAR_TOKEN__ = {:?};",
+                port, token
+            );
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Entropy")
                 .inner_size(1280.0, 820.0)
