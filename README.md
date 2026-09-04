@@ -122,7 +122,9 @@ cleared the 0.50 entry threshold. Measured on synthetic paths: a clean +44% tren
 produced **zero** signals, while 200 bars of flat chop produced **36** (18 round trips). Silent in
 trends, hyperactive in chop — precisely inverted.
 
-`vote_mode` now defaults to `adaptive`: a Kaufman efficiency ratio classifies the bar as trending or
+`vote_mode` shipped as `adaptive` in Round 1 and defaults to `trend` since Round 2 (the
+per-symbol dict form — `{"BTCUSDT": "trend", ...}` — is also valid; see
+`src/entropy/bot/config.py`): a Kaufman efficiency ratio classifies the bar as trending or
 ranging, the oscillators are read for momentum confirmation in the former and mean-reversion in the
 latter, and the weights tilt toward whichever block carries the information. On the same paths that
 becomes 1 entry that rides the trend, and 3 signals across trend/chop/reversal instead of 38.
@@ -180,11 +182,15 @@ tick stream, including the FROSTY+spot control where the cost-to-stop guard bloc
 
 Accuracy is measured on real data, not synthetic paths: `scripts/entropy_accuracy_btc15m.py`
 replays the bot on Binance spot BTCUSDT 15m bars with $100 paper and full 26 bps round-trip
-costs (10 bps fee + 3 bps slippage per side). The shipped consensus defaults are tuned
-against it — a trailing exit (`exit_mode="trail"`, `trail_pct=0.3`), no direction filter
-(`direction_bars=0`), `min_hold_bars=5`, and an asymmetric stop profile (SL 1.5% / TP 1.2%,
-i.e. TP < SL: smaller, more frequent wins). See `src/entropy/bot/config.py`
-(`ConsensusConfig`) and the accuracy script defaults.
+costs (10 bps fee + 3 bps slippage per side). The consensus defaults were tuned against it
+in two rounds. **Round 2 (current ship, "s20")**: `vote_mode="trend"`, sigma-scaled
+barriers (stop 20σ / TP 4σ via `stop_mode="sigma"`), `max_hold_bars=192`,
+`direction_bars=20`, `long_only=True`, `risk_trail_pct=0.0`, entry-grace 3 bars.
+Round 1 ("H", kept here for the historical record): a trailing exit
+(`exit_mode="trail"`, `trail_pct=0.3`), no direction filter (`direction_bars=0`),
+`min_hold_bars=5`, and an asymmetric stop profile (SL 1.5% / TP 1.2%). Current numbers
+and honest caveats live in PROJECT.md ("Win rate > 60% OOS"); see `src/entropy/bot/config.py`
+(`ConsensusConfig`, `RiskOverrides`) for the authoritative defaults.
 
 ```bash
 uv run python scripts/entropy_accuracy_btc15m.py --bars 2880 --out /tmp/entropy_accuracy/repro_30d
@@ -193,8 +199,9 @@ uv run python scripts/entropy_accuracy_btc15m.py --bars 2880 --out /tmp/entropy_
 Win rate was swept with `scripts/entropy_wr_sweep.py` (knob sweep over
 exit/trail/confirm/direction/hold/cooldown/SL/TP — 1,728 combos, shardable with
 `--shard` / `--shard-total`) and verified out-of-sample with `scripts/entropy_wr_verify.py`
-(30d window + 4 walk-forward folds, chained OOS). The OOS winner — trail /
-trail_pct 0.3 / confirm 2 / direction 0 / hold 5 / cooldown 4 / SL 1.5 / TP 1.2 — is what ships:
+(30d window + 4 walk-forward folds, chained OOS). The Round-1 OOS winner — trail /
+trail_pct 0.3 / confirm 2 / direction 0 / hold 5 / cooldown 4 / SL 1.5 / TP 1.2 — shipped
+first (superseded by Round-2 s20, see above):
 
 | Run | 30d win rate | Detail |
 |---|---|---|

@@ -141,16 +141,22 @@ qualifies on the accuracy metric without destroying capital.
 
 ### Reproduce
 ```bash
-.venv/bin/python scripts/entropy_accuracy_btc15m.py --bars 2880 --out /tmp/entropy_accuracy/repro_30d
-.venv/bin/python scripts/entropy_accuracy_btc15m.py --bars 672 --out /tmp/entropy_accuracy/repro_7d
-.venv/bin/python scripts/entropy_accuracy_btc15m.py --bars 96 --end-date 2026-08-01T23:59:59.999000+00:00 --out /tmp/entropy_accuracy/repro_1d
-.venv/bin/python scripts/entropy_grid_search.py   # 512-combo grid (train on first 2000 bars)
-.venv/bin/python scripts/entropy_walk_forward.py --klines /tmp/entropy_accuracy/120d_btc/klines.json --fold 0 --out /tmp/entropy_accuracy/wf/fold0
-.venv/bin/python scripts/entropy_accuracy_btc15m.py --symbol ETHUSDT --bars 2880 --out /tmp/entropy_accuracy/repro_eth_30d
+.venv/Scripts/python scripts/entropy_accuracy_btc15m.py --bars 2880 --out /tmp/entropy_accuracy/repro_30d
+.venv/Scripts/python scripts/entropy_accuracy_btc15m.py --bars 672 --out /tmp/entropy_accuracy/repro_7d
+.venv/Scripts/python scripts/entropy_accuracy_btc15m.py --bars 96 --end-date 2026-08-01T23:59:59.999000+00:00 --out /tmp/entropy_accuracy/repro_1d
+.venv/Scripts/python scripts/entropy_grid_search.py --klines /tmp/entropy_accuracy/repro_30d/klines.json --out /tmp/entropy_accuracy/grid   # 512-combo grid (train on first 2000 bars)
+.venv/Scripts/python scripts/entropy_walk_forward.py --klines /tmp/entropy_accuracy/120d_btc/klines.json --fold 0 --out /tmp/entropy_accuracy/wf/fold0
+.venv/Scripts/python scripts/entropy_accuracy_btc15m.py --symbol ETHUSDT --bars 2880 --out /tmp/entropy_accuracy/repro_eth_30d
 ```
-`entropy_accuracy_btc15m.py --symbol` accepts any Binance spot pair (e.g.
-ETHUSDT). Each run writes `report.json`, `trades.csv` and `console.log` into
-`--out`; klines are cached. Full test suite (746 tests) passes.
+(POSIX checkouts use `.venv/bin/python` instead of `.venv/Scripts/python`.
+Note: `entropy_walk_forward.py` predates the sigma-barrier ship — its
+"ship defaults" are the legacy percent shape, so fold output is NOT
+comparable to the s20 evidence.) `--symbol` accepts any Binance spot pair
+(e.g. ETHUSDT). Each run writes `report.json`, `trades.csv` and
+`console.log` into `--out`; klines are cached (the cache key includes the
+window end and symbol). Full test suite passes — run
+`.venv/Scripts/python -m pytest` for the current count (the historical
+"746 tests" figure predates Round 2; the suite has grown since).
 
 ### Win rate > 60% OOS (2026-09-03, shipped)
 Design: `docs/superpowers/specs/2026-09-03-winrate-over-60-design.md`; ledger:
@@ -201,6 +207,9 @@ Honest caveats (documented, not hidden):
 - The 7d tail has PF 0.56 on only 7 trades — small samples are meaningless.
 - Wilson 95% CI on the 24-trade OOS run is ≈ [55.1%, 88.0%] — wide. The >60%
   claim rests on the 60d sample too (43t, 74.4%, CI ≈ [59.8%, 85.1%]).
+  † That 60d window overlaps the 120d train by ~30d (train ends 08-03,
+  60d starts 07-05) — it is tuning-adjacent evidence, not pure OOS, exactly
+  like the Round-2 60d row below.
 - Post-ship verification run (rolling "now" window 08-04 02:30 → 09-03 02:14
   UTC, identical config): WR 75.0% (24t), +1.41%, PF 1.45, max DD 0.46% —
   matches the battery row to the return's 0.03pp window-shift.
@@ -208,7 +217,11 @@ Honest caveats (documented, not hidden):
 Continuous verification: `scripts/entropy_wr_gate.py` re-runs the ship-default
 gate on the rolling 30d window (or `--end-date`), PASS iff WR > 0.60 AND
 trades >= 20 AND PF >= 1.0 AND return >= 0; prints the Wilson 95% CI and exits
-0/1 so it can be scheduled.
+0/1 so it can be scheduled. Since 2026-09-04 the gate's `return` leg reads the
+trade-weighted return (the same level-clamped, eval-window-only per-trade PnLs
+that feed WR/PF, reported as `trade_weighted_return_pct`) instead of the
+equity-basis headline, which mixed unclamped extreme fills with warmup PnL;
+the equity figure is still printed alongside for comparison.
 
 ### Reproduce (2026-09-03 shipped defaults)
 ```bash
