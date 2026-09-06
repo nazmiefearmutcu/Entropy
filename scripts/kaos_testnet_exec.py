@@ -28,6 +28,10 @@ HOST_DEFAULT = "https://testnet.binancefuture.com"
 _TIMEOUT_S = 8
 _RECV_WINDOW = 10000
 _KEY_MASK = "****"
+# futures exchangeInfo filtresi "MINNOTIONAL" (spot'taki gibi "MIN_NOTIONAL"
+# DEĞİL) — iki ad da okunur; filtre hiç gelirse emin taban (testnet sert
+# sınırı, -4164) devreye girer:
+_MIN_NOTIONAL_FLOOR = 20.0
 
 
 class ExecutorError(Exception):
@@ -74,27 +78,40 @@ class TestnetExecutor:
         self._lot_loaded = False
 
     # ---- low level ------------------------------------------------------
-    def _request(self, method: str, path: str, params: dict) -> Any:
-        query, sig = signed_query(params, self.api_secret, int(time.time() * 1000))
-        url = f"{self.host}{path}?{query}&signature={sig}"
-        req = urllib.request.Request(url, headers={
-            "X-MBX-APIKEY": self.api_key,
-            "User-Agent": "kaos-live-paper/1.0",
-        }, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
+    def _request(self, method: str, path: str, params: dict,
+                 tries: int = 2) -> Any:
+        """İmzalı istek. Ağ kopukluklarında (URLError/timeout) 1 kez yeniden
+        dener — 2026-09-06: testnet hostuna aralıklı kopukluklar mirror
+        emirlerini sessizce düşürüyor, paper-borsa uyumsuzluğu yaratıyordu.
+        HTTPError (Binance cevap verdi) retry EDİLMEZ: protokol hatasıdır."""
+        last_exc: Exception | None = None
+        for attempt in range(max(1, tries)):
+            query, sig = signed_query(params, self.api_secret,
+                                      int(time.time() * 1000))
+            url = f"{self.host}{path}?{query}&signature={sig}"
+            req = urllib.request.Request(url, headers={
+                "X-MBX-APIKEY": self.api_key,
+                "User-Agent": "kaos-live-paper/1.0",
+            }, method=method)
             try:
-                payload = json.loads(body)
-            except ValueError:
-                payload = {}
-            msg = mask_key(str(payload.get("msg") or body[:200]), self.api_key)
-            raise ExecutorError(payload.get("code"), msg) from None
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise ExecutorError(None,
-                                f"network unreachable: {type(exc).__name__}") from exc
+                with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                try:
+                    payload = json.loads(body)
+                except ValueError:
+                    payload = {}
+                msg = mask_key(str(payload.get("msg") or body[:200]),
+                               self.api_key)
+                raise ExecutorError(payload.get("code"), msg) from None
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_exc = exc
+                if attempt + 1 < tries:
+                    time.sleep(1.5)
+        raise ExecutorError(
+            None, f"network unreachable: {type(last_exc).__name__}"
+        ) from last_exc
 
     # ---- public API -----------------------------------------------------
     def get_balance(self) -> dict:
@@ -124,11 +141,12 @@ class TestnetExecutor:
                 for f in s.get("filters") or []:
                     if not isinstance(f, dict):
                         continue
-                    if f.get("filterType") == "LOT_SIZE":
+                    ftype = f.get("filterType")
+                    if ftype == "LOT_SIZE":
                         step = float(f.get("stepSize") or 0.0)
                         if step > 0:
                             self._lot_step[str(s.get("symbol"))] = step
-                    elif f.get("filterType") == "MIN_NOTIONAL":
+                    elif ftype in ("MIN_NOTIONAL", "MINNOTIONAL"):
                         self._min_notional[str(s.get("symbol"))] = float(
                             f.get("notional") or 0.0)
         except Exception:
@@ -160,11 +178,20 @@ class TestnetExecutor:
         used_qty, bumped = qty, False
         try:
             self._load_lot_steps()
-            min_notional = self._min_notional.get(sym, 0.0)
-            if not reduce_only and min_notional > 0:
+            # filtre okunamazsa bile testnet sert sınırının (-4164) altına
+            # inme: emin taban her zaman devrede
+            min_notional = max(self._min_notional.get(sym, 0.0),
+                               _MIN_NOTIONAL_FLOOR)
+            if not reduce_only:
                 price = self.get_price(sym)
                 if price > 0 and used_qty * price < min_notional:
-                    used_qty = (min_notional / price) * 1.001  # %0.1 tampon
+                    raw = min_notional / price
+                    # bump'ta YUKARI yuvarla: normal quantize'ın aşağı
+                    # yuvarlaması notional'ı tekrar sınırın altına
+                    # düşürebilir (-4164; 2026-09-06 birim testte yakalandı)
+                    step = self._lot_step.get(sym, 0.0)
+                    used_qty = ((int(raw / step) + 1) * step) if step > 0 \
+                        else raw * 1.001
                     bumped = True
         except Exception:
             pass  # fiyata erişilemezse paper qty ile dene (borsa reddederse
@@ -175,6 +202,9 @@ class TestnetExecutor:
             "type": "MARKET",
             "quantity": self._quantize(sym, used_qty),
             "newOrderRespType": "RESULT",
+            # çift-emir koruması: ağ-retry aynı emri yeniden gönderirse
+            # Binance aynı clientOrderId'yi reddeder (idempotency kalkanı)
+            "newClientOrderId": f"kaosm{int(time.time() * 1000)}",
         }
         if reduce_only:
             params["reduceOnly"] = "true"
