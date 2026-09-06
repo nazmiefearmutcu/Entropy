@@ -235,6 +235,13 @@ class LivePaper:
         self._trades_today_base = 0
         self._trades_today_day: str | None = None
         self.state_path = out_dir / "state.json"
+        # Canli-donem ayristirmasi (denetim notu, 2026-09-06):
+        # replay donemi (warmup+history beslemesi) egriye dahil EDILMEZ;
+        # live_base_equity = canli donemin gercek baslangic sermayesi.
+        self.live_base_equity: float | None = None
+        self.equity_note: str | None = (
+            "Canli donem 2026-09-05 20:39 UTC (temiz restart) itibarindadir; "
+            "oncesi warmup/replay donemidir ve denetimde bir kismi dogrulanamadi.")
         # Run control (gateway AYARLAR writes this file; bot polls it):
         #   schedule.json = {"run_mode":"active|paused|scheduled",
         #                    "utc_start":H,"utc_end":H,"updated_utc":...}
@@ -429,6 +436,8 @@ class LivePaper:
         # restart replays: bars fed during startup (warmup+history) mark trades
         # that must never count as live signals
         self._replay_guard_until_ms = int(time.time() * 1000)
+        # NOT: restore edilen orijinal egri noktalari KORUNUR; yalnizca
+        # replay feed'inin YENI noktalari _append_equity'de bastirilir.
         # evaluated window only from here: cursor skips warmup + boundary fills
         self.cursor = len(self.ledger.fills)
         self.open_fills.clear()
@@ -491,13 +500,29 @@ class LivePaper:
         known equity_usd — logged honestly below."""
         hist = st.get("equity_history")
         if isinstance(hist, list):
+            # Denetim kurali (2026-09-06): egri YALNIZ canli donemi kapsar.
+            # Canli donem baslangici = onceki state'teki live_base_equity
+            # zamanina esit veya sonrasi (ilk nokta canli baslangic equity'si).
+            cut_ms = None
+            for p in hist:
+                try:
+                    if float(p[1]) == float(st.get("live_base_equity") or -1):
+                        cut_ms = float(p[0]); break
+                except (TypeError, ValueError):
+                    continue
             for p in hist[-EQUITY_HISTORY_MAX:]:
                 try:
                     ts, eq = float(p[0]), float(p[1])
                 except (TypeError, ValueError, IndexError):
                     continue
                 if math.isfinite(ts) and math.isfinite(eq):
-                    self.equity_history.append([ts, eq])
+                    if cut_ms is None or ts >= cut_ms:
+                        self.equity_history.append([ts, eq])
+        # Canli-donem muhasebesi (denetim oncesi replay donemi egriden ayrilir):
+        base = st.get("live_base_equity")
+        if base:
+            self.live_base_equity = float(base)
+        self.equity_note = st.get("equity_history_note")
         trades = st.get("closed_trades")
         if isinstance(trades, list):
             for t in trades[-CLOSED_TRADES_MAX:]:
@@ -549,8 +574,14 @@ class LivePaper:
     def _append_equity(self, ts_ms: float, equity: float) -> None:
         """Append one equity point, replacing any earlier point with the same
         timestamp (a restart re-feeds recent bars: the re-evaluated point
-        wins and the series never grows duplicate timestamps)."""
+        wins and the series never grows duplicate timestamps).
+        DENETIM KURALI (2026-09-06): startup replay (guard suresi icindeki
+        barlar) eegriye YAZILMAZ — replay kazancari canli donemle
+        karistirmaz; guard bitince normal ekleme surer."""
         ts_ms = float(ts_ms)
+        guard = getattr(self, "_replay_guard_until_ms", 0)
+        if guard and ts_ms <= guard:
+            return
         self.equity_history = [p for p in self.equity_history if p[0] != ts_ms]
         self.equity_history.append([ts_ms, _f(equity)])
         excess = len(self.equity_history) - EQUITY_HISTORY_MAX
@@ -623,6 +654,10 @@ class LivePaper:
                 1 for t in self.closed_all if t["exit_utc"][:10] == today),
             "positions": positions,
             "equity_history": self.equity_history[-EQUITY_HISTORY_MAX:],
+            "live_base_equity": (
+                _f(self.live_base_equity) if self.live_base_equity is not None
+                else _f(min((e for _, e in self.equity_history), default=100.0))),
+            "equity_history_note": self.equity_note,
             "closed_trades": self.closed_all[-CLOSED_TRADES_MAX:],
         }
 
