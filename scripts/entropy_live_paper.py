@@ -34,6 +34,17 @@ file, not the process. Schema (exact):
 Mark price = the symbol's last closed bar close; unrealized = (mark-entry)*qty
 for longs, (entry-mark)*qty for shorts.
 
+RESTART ACCOUNTING (Z3-1/Z3-4/Z3-7 fix, 2026-09-06): the 300-bar startup
+replay is ACCOUNTING-INERT when a previous state was restored — replayed
+bars rebuild indicator context and re-derive open positions, but their
+closed-PnL is rebased away (portfolio returns exactly to the previous
+equity_usd; state field replay_rebase_usd shows the absorbed delta), their
+records/curve points stay suppressed by the replay barrier (= last replayed
+bar's CLOSE, so the first genuinely-new bar's fills/points ARE booked), and
+day_pnl is re-anchored to the previous in-day value. A CLEAN start (no
+previous state) counts the initial replay once, as the account's opening
+history.
+
 The main loop is crash-resistant: exceptions are caught, logged to stdout
 (flushed) and the loop keeps running. Requires only the repo's existing
 dependencies (urllib/json + src/entropy modules); no pip installs.
@@ -46,6 +57,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import time
@@ -88,6 +100,18 @@ FETCH_BACKOFF_MAX_S = 60.0       # ... capped at 60 s (reset on success)
 FETCH_MAX_ATTEMPTS = 8           # consecutive failures before raising; the
                                  # forever-loop's own retry keeps the bot alive
 HEARTBEAT_S = 3600.0             # hourly "[heartbeat] ..." log cadence
+BALANCE_REFRESH_S = 300.0        # testnet bakiye tazeleme (Z3-5: 60s -> 300s;
+                                 # bakiye bilgilendirme amaçlıdır ve 60s poll
+                                 # IP banına (-1003) katkı vermişti)
+
+_BAN_UNTIL_RE = re.compile(r"banned until (\d{10,16})")
+_IP_RE = re.compile(r"IP\s*\(?\s*\d{1,3}(?:\.\d{1,3}){3}\s*\)?")
+
+
+def _mask_ip(text: str) -> str:
+    """-1003 ban mesajı makinenin GENEL IP'sini içerir (Z4-3 gizlilik notu):
+    state'e/log'a yazmadan önce maskele."""
+    return _IP_RE.sub("IP(<masked>)", str(text))
 
 DEFAULT_SYMBOLS = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"
 
@@ -240,10 +264,31 @@ class LivePaper:
         # Canli-donem ayristirmasi (denetim notu, 2026-09-06):
         # replay donemi (warmup+history beslemesi) egriye dahil EDILMEZ;
         # live_base_equity = canli donemin gercek baslangic sermayesi.
-        self.live_base_equity: float | None = None
+        # Z3-9: temiz start'ta taban yapilandirmadaki baslangic sermayesine
+        # sabitlenir (eskiden her yazida min(equity_history) yeniden
+        # hesaplaniyordu -> taban asagi kayarak "kar"i suni buyutebiliyordu).
+        self.live_base_equity: float | None = cash
         self.equity_note: str | None = (
             "Canli donem 2026-09-05 20:39 UTC (temiz restart) itibarindadir; "
             "oncesi warmup/replay donemidir ve denetimde bir kismi dogrulanamadi.")
+        # ---- restart replay muhasebesi (Z3-1) ------------------------------
+        # Restart'ta prev equity baslangic sermayesi olarak yuklenir ve 300
+        # barlik replay portfolio'da GERCEKTEN isletilir: replay penceresinin
+        # kapali-islem PnL'i equity'ye IKINCI kez isleniyordu (canli kanit:
+        # 3 restart ≈ +$3.4 enflasyon). Fix: restore'lu restartta replay
+        # feed'i bittikten sonra portfolio prev equity tabanina REBASE
+        # edilir (Z3-1 fix'i; _neutralize_replay_accounting) -> replay'in
+        # net equity/cash etkisi sifirlanir; indikator baglami ve yeniden
+        # turetilen acik pozisyonlar KORUNUR. Temiz start'ta replay PnL'i
+        # bir kez sayilir (hesabin acilis gecmisi) -> rebase yok.
+        self._replay_base_equity: float | None = cash
+        self._replay_neutralize: bool = False
+        self._day_anchor_equity: float | None = None   # Z3-7: gun capasi
+        self.replay_rebase_usd: float | None = None
+        # Startup replay bariyeri: son replay barinin KAPANIS ms'si (Z3-4).
+        # Bu ts'den ONCE damgali dolgular replay'e aittir (kayit/egri disi);
+        # bu ts'deki dolgular ILK canli barin tick'leridir -> normal muhasebe.
+        self._replay_guard_until_ms = 0
         # Run control (gateway AYARLAR writes this file; bot polls it):
         #   schedule.json = {"run_mode":"active|paused|scheduled",
         #                    "utc_start":H,"utc_end":H,"updated_utc":...}
@@ -254,15 +299,28 @@ class LivePaper:
         # ---- futures testnet aynalama katmanı (fail-open) -----------------
         # KAOS_EXCHANGE_TESTNET=1 + BINANCE_API_KEY/SECRET env ile açılır;
         # kapalıyken (exec_ is None) davranış bit-özdeş kalır. Yalnız CANLI
-        # döngüde (_mirror_live=True, start() sonunda set edilir) aynalanır —
-        # startup replay'i asla aynalanmaz.
+        # döngüde (_mirror_live=True; start() sonunda, evaluated-replay
+        # feed'i BİTTİKTEN sonra set edilir) aynalanır — startup replay'i
+        # asla aynalanmaz (Z3-2/Z4-1: eski sıralama replay GİRİŞLERİNİ gerçek
+        # testnet emri yapıyordu = yetim fabrikası).
         self.exec_ = make_executor_from_env()
         self._mirror_live = False
         self.open_mirror: dict[str, dict[str, Any]] = {}
+        # Z4-2 PROVENANS: GERÇEKTEN bizim mirror GİRİŞLERİMİZLE açılmış
+        # testnet pozisyonları (çıplak sembol -> {qty, order_id, opened_utc}).
+        # state.json exchange.mirror_open ile restart'lar arası kalıcıdır;
+        # _reconcile_orphans / _startup_flatten YALNIZ bu kümedeki sembolleri
+        # kapatabilir. Küme DIŞINDAKİ semboller (kullanıcının manuel
+        # pozisyonları dâhil) ASLA dokunulmaz — yalnız uyarı loglanır.
+        self.mirror_positions: dict[str, dict[str, Any]] = {}
+        self._warned_untracked: set[str] = set()
         self.exec_stats: dict[str, Any] = {"orders_sent": 0, "orders_failed": 0,
                                            "last_ok_utc": None, "last_error": None}
+        # Z4-8: tek yuvalık last_error yerine küçük hata halkası (son 5).
+        self._exec_errors: deque[str] = deque(maxlen=5)
         self._exec_balance: dict | None = None
         self._last_balance_refresh: float | None = None
+        self.BALANCE_REFRESH_S = BALANCE_REFRESH_S
         # yetim-reconcile: mirror kapanış emri başarısız olan testnet
         # pozisyonları paper tarafı kapandıktan sonra asılı kalıyordu
         # (2026-09-06: XRP/BNB yetimleri). Periyodik düzeltme:
@@ -387,34 +445,90 @@ class LivePaper:
             return res
         except Exception as exc:  # noqa: BLE001 — fail-open katman sınırı
             self.exec_stats["orders_failed"] += 1
-            msg = str(exc)[:200]
+            msg = _mask_ip(str(exc))[:200]
             self.exec_stats["last_error"] = msg
+            ring = getattr(self, "_exec_errors", None)  # stub self'lerde yok
+            if ring is not None:
+                ring.append(msg)   # Z4-8: son-5 hata halkası
             print(f"[kaos-exec] mirror FAILED: {msg}", flush=True)
             return {"ok": False, "order_id": None, "status": "failed",
                     "avg_price": None, "error": msg}
 
+    # ---- mirror yardımcıları (Z4-2 provenans + Z3-5 ban bilinci) -----------
+    @staticmethod
+    def _bare(symbol: str) -> str:
+        """'binance-spot:BTCUSDT' -> 'BTCUSDT' (testnet sembol anahtarı).
+        Eski kod bunu yapmıyordu: paper sembolleri ön ekli, borsa sembolü
+        çıplak -> 'sym in paper' üyelik testi asla tutmuyordu."""
+        return str(symbol).split(":", 1)[-1].upper()
+
+    def _note_exec_error(self, msg: str) -> None:
+        """last_error'u günceller + son 5 hatanın halkasını tutar (Z4-8)."""
+        msg = _mask_ip(msg)[:200]
+        self.exec_stats["last_error"] = msg
+        self._exec_errors.append(msg)
+
+    def _banned_until_ms(self) -> int | None:
+        """Aktif banın bitişi (epoch ms) veya None. Kaynaklar:
+        (a) executor'daki ban-farkında accessor — F5 kaos_testnet_exec'i
+            ban-aware backoff ile donatıyor; burada feature-detect ile
+            (try/AttributeError-güvenli getattr) aranır, yoksa sessiz geçer;
+        (b) son hata mesajındaki '-1003 ... banned until <epoch>' kalıbı
+            (canlı kanıt: IP banı bu mesajla state'e yazılıyor)."""
+        ex = self.exec_
+        if ex is None:
+            return None
+        for name in ("banned_until_ms", "get_banned_until_ms", "banned_until"):
+            v = getattr(ex, name, None)  # yoksa AttributeError yerine None
+            if v is None:
+                continue
+            try:
+                v = v() if callable(v) else v
+                v = int(v)
+            except Exception:  # noqa: BLE001 — accessor sözleşmesi belirsiz
+                continue
+            if v > 0:
+                return v * 1000 if v < 10**12 else v  # sn/ms normalizasyonu
+        m = _BAN_UNTIL_RE.search(str(self.exec_stats.get("last_error") or ""))
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+        return None
+
     def _paper_open_symbols(self) -> set[str]:
-        """Şu an AÇIK kağıt pozisyonlarının sembolleri (restore dâhil;
-        open_fills restore'da temizlendiği için gerçek kaynak portfolio)."""
+        """Şu an AÇIK kağıt pozisyonlarının ÇIPLAK sembolleri (restore dâhil;
+        open_fills restore'da temizlendiği için gerçek kaynak portfolio).
+        Z4-2 uyumu: borsa sembolleriyle aynı formda ('BTCUSDT') kıyas
+        yapılabilmesi için ön ek ('binance-spot:') ayrılır — eski kodda ön ekli
+        anahtarlar olduğu için 'sym in paper' asla tutmuyordu."""
         try:
             pos = self.runner.portfolio.positions
             if isinstance(pos, dict):
-                return {str(s).upper() for s in pos.keys()}
+                return {self._bare(s) for s in pos.keys()}
             if isinstance(pos, (list, tuple)):
                 out = set()
                 for p in pos:
                     sym = getattr(p, "symbol", None)
-                    out.add(str(sym if sym is not None else p).upper())
+                    out.add(self._bare(sym if sym is not None else p))
                 return out
         except Exception:  # noqa: BLE001 — fail-open, aynalamayı etkilemesin
             return set()
         return set()
 
     def _flatten_orphans(self, tag: str) -> None:
-        """Testnet'te açık ama kağıt tarafında karşılığı OLMAYAN pozisyonları
-        kapat (reduce-only). Kağıda eşlik eden pozisyona DOKUNMAZ — aynalama
-        sapması yalnız yetimlerde düzeltilir. Fail-open: hata loglanır,
-        runner'a sıçramaz."""
+        """Testnet'te açık KAĞIT KARŞILIĞI OLMAYAN ve KÖKENİ BİZE AİT olan
+        pozisyonları kapat (reduce-only). Z4-2 provenans kuralı: kapatma
+        adayı YALNIZ `mirror_positions` kümesinde izlenen — yani mirror
+        girişimizle açıldığını state üstünden kanıtladığımız — sembollerdir.
+        İzlenmeyen semboller (kullanıcının MANUEL testnet pozisyonları dâhil)
+        ASLA kapatılmaz; yalnızca bir kez uyarı loglanır. Kalıntı riski:
+        futures pozisyonu sembol bazında NET'tir; bizim izlediğimiz sembolde
+        kullanıcının aynı yönde/ters yönde manuel miktarı varsa kapatma emri
+        tüm net miktarı hedefler (bireysel ayrım borsada mümkün değil) —
+        raporda belgelendi.
+        Fail-open: hata loglanır, runner'a sıçramaz."""
         if self.exec_ is None or not self._mirror_live:
             return
         paper = self._paper_open_symbols()
@@ -424,25 +538,37 @@ class LivePaper:
             print(f"[kaos-exec] {tag} position check FAILED: {exc}", flush=True)
             return
         for pos in positions:
-            sym = str(pos.get("symbol") or "").upper()
+            sym = self._bare(pos.get("symbol") or "")
+            if not sym:
+                continue
             if sym in paper:
                 continue  # canlı kağıt pozisyonunun aynası — bot yönetiyor
+            if sym not in self.mirror_positions:
+                # Z4-2: kökeni kanıtlanamayan pozisyona DOKUNULMAZ
+                if sym not in self._warned_untracked:
+                    self._warned_untracked.add(sym)
+                    print(f"[kaos-exec] {tag}: {sym} izlenmeyen (kanitsiz) "
+                          f"pozisyon — dokunulmuyor, yalniz uyarı", flush=True)
+                continue
             side = "SELL" if pos.get("side") == "long" else "BUY"
             try:
                 self.exec_.place_market_order(sym, side,
                                               pos.get("contracts") or 0.0,
                                               reduce_only=True)
+                self.mirror_positions.pop(sym, None)   # kapanışı izden düş
                 print(f"[kaos-exec] {tag} orphan flatten: {sym} "
-                      f"{pos.get('contracts')} kapatıldı (paper karşılığı yok)",
-                      flush=True)
+                      f"{pos.get('contracts')} kapatıldı (izlenen mirror "
+                      f"pozisyonu, paper karşılığı yok)", flush=True)
             except Exception as exc:  # noqa: BLE001
+                self._note_exec_error(f"{tag} flatten {sym}: {exc}")
                 print(f"[kaos-exec] {tag} orphan flatten FAILED {sym}: {exc}",
                       flush=True)
 
     def _startup_flatten(self) -> None:
-        """Aynalama açılırken testnet'te paper karşılığı olmayan KALINTI
-        pozisyonlar sıfırlanır (paper restart'ta restore edilen açık
-        pozisyonlarının aynalarına dokunulmaz)."""
+        """Aynalama açılırken testnet'teki KALINTI pozisyonlar temizlenir —
+        yalnızca mirror girişimizle açıldığı izlenen (Z4-2 provenans)
+        semboller üzerinde; paper'da karşılığı olanlar bot tarafından
+        yönetilmeye devam ettiği için korunur."""
         self._flatten_orphans("startup")
 
     def _reconcile_orphans(self) -> None:
@@ -462,12 +588,21 @@ class LivePaper:
             fill, intent = fills[i]
             self.cursor += 1
             if getattr(intent, "value", intent) == "open":
-                # canlı giriş dolgusunu testnet'e aynala (yalnız canlı döngüde)
+                # canlı giriş dolgusunu testnet'e aynala (yalnız canlı döngüde;
+                # startup replay'de _mirror_live False -> _mirror None döner,
+                # geçmiş sinyaller asla emre çevrilmez — Z3-2/Z4-1)
                 m_entry = self._mirror(
                     fill.symbol,
                     "BUY" if fill.side.value == "buy" else "SELL", fill.qty)
                 if m_entry is not None:
                     self.open_mirror[fill.symbol] = m_entry
+                    if m_entry.get("ok"):
+                        # Z4-2 provenans: BU emirle açtığımızı izle (kalıcı)
+                        self.mirror_positions[self._bare(fill.symbol)] = {
+                            "qty": _f(fill.qty),
+                            "order_id": m_entry.get("order_id"),
+                            "opened_utc": datetime.now(timezone.utc).isoformat(),
+                        }
                 self.open_fills[fill.symbol] = (i, fill)
                 continue
             got = self.open_fills.pop(fill.symbol, None)
@@ -507,16 +642,21 @@ class LivePaper:
             key = _closed_key(rec)
             if key in self._closed_keys:
                 continue   # regenerated by a restart replay — already persisted
-            # restart sonrası ilk 300 bar REPLAY'tir (warmup+geçmiş); bu
-            # barlardan doğan işlemler canlı sinyal değildir — sayma.
-            if getattr(self, "_replay_guard_until_ms", 0) and                     fill.ts_ns // 10**6 <= self._replay_guard_until_ms:
+            # restart replay bariyeri (Z3-4): guard = son replay barının
+            # KAPANIŞI. Bariyerden ÖNCE damgalı dolgular replay barlarına
+            # aittir -> kayıt yok. Bariyer ts'nin KENDİSİ ilk canlı barın
+            # açılışıdır (tick'ler bar açılışına re-stamp'lenir) -> o bardaki
+            # dolgular normal muhasebeye girer (eski wall-clock guard ilk
+            # canlı barın işlemlerini yutuyordu).
+            guard = getattr(self, "_replay_guard_until_ms", 0)
+            if guard and fill.ts_ns // 1_000_000 < guard:
                 self._closed_keys.add(key)
                 continue
             self._closed_keys.add(key)
             self.closed_all.append(rec)
             # canlı kapanışı testnet'e aynala + borsa kanıtını kayda işle
             # (yalnız aynalama açıksa alanlar eklenir; kapalıyken rec değişmez)
-            if self.exec_ is not None:
+            if self.exec_ is not None and self._mirror_live:
                 m_entry = self.open_mirror.pop(fill.symbol, None)
                 # giriş testnet'te min-notional için BÜYÜTÜLDÜYSE çıkış aynı
                 # boyutta olmalı (artık pozisyon kalmasın)
@@ -529,10 +669,16 @@ class LivePaper:
                 rec["origin"] = "live"
                 rec["exchange_entry_order_id"] = (m_entry or {}).get("order_id")
                 rec["exchange_order_id"] = (m_exit or {}).get("order_id")
+                # giriş kanıtı bu süreçte yoksa (pozisyon restart öncesinde
+                # açıldıysa) doğrulamayı çıkış emri taşır — yanlış "failed"
+                # etiketi yerine dürüst ayrım:
+                entry_ok = None if m_entry is None else bool(m_entry.get("ok"))
                 rec["exchange_verified"] = bool(
-                    (m_exit or {}).get("ok")) and bool(
-                    (m_entry or {}).get("ok"))
+                    (m_exit or {}).get("ok")) and entry_ok is not False
                 notes = []
+                if m_entry is None:
+                    notes.append("giriş aynası önceki süreçte (restart) — bu "
+                                 "kayıtta giriş kanıtı yok")
                 if isinstance(m_entry, dict) and m_entry.get("bumped"):
                     notes.append("testnet emri min notional için "
                                  "%s→%s büyütüldü" % (_f(qty), _f(exit_qty)))
@@ -542,6 +688,9 @@ class LivePaper:
                                  or "mirror failed")
                 if notes:
                     rec["exchange_note"] = "; ".join(notes)
+                if isinstance(m_exit, dict) and m_exit.get("ok"):
+                    # başarılı kapanış: izden düş (reconcile tekrar dokunmasın)
+                    self.mirror_positions.pop(self._bare(fill.symbol), None)
 
     # ---- startup: 300 bars (100 warmup + 200 evaluated) --------------------
     def start(self) -> dict[str, list[list[Any]]]:
@@ -574,19 +723,24 @@ class LivePaper:
                                          notify_reason="warmup_liquidation")
             print("[live-paper] warmup-boundary positions liquidated", flush=True)
         # restart replays: bars fed during startup (warmup+history) mark trades
-        # that must never count as live signals
-        self._replay_guard_until_ms = int(time.time() * 1000)
+        # that must never count as live signals. Z3-4: bariyer duvar saati
+        # DEĞİL, son replay barının KAPANIŞIDIR — duvar saati guard'ı restart
+        # sonrası İLK canlı barın (hâlâ açık olan barın) işlemlerini yutuyordu
+        # (tick'ler bar açılışına re-stamp'lendiği için guard'dan önceye
+        # düşüyordu). Yeni bariyerde: replay dolguları < bariyer, ilk canlı
+        # barın dolguları >= bariyer -> tam bir kez muhasebeleşir.
+        self._replay_guard_until_ms = max(int(v[-1][0]) for v in ev.values()) + BAR_MS
         # NOT: restore edilen orijinal egri noktalari KORUNUR; yalnizca
         # replay feed'inin YENI noktalari _append_equity'de bastirilir.
         # evaluated window only from here: cursor skips warmup + boundary fills
         self.cursor = len(self.ledger.fills)
         self.open_fills.clear()
-        # Aynalama yalnız BURADAN sonra (canlı poll döngüsü) açılır: startup
-        # replay dolguları geçmiş sinyallerdir, şimdi emre çevrilemez. Açılır
-        # açılmaz testnet kalıntısı pozisyonlar da sıfırlanır (paper flat başlar).
-        self._mirror_live = True
-        if self.exec_ is not None:
-            self._startup_flatten()
+        # NOT: aynalama HENÜZ AÇIK DEĞİL. Evaluated pencere (200 tarihî bar)
+        # beslenirken hiçbir sinyal testnete emre çevrilmez (Z3-2/Z4-1:
+        # eski kodda _mirror_live feed'den ÖNCE set edildiği için replay
+        # GİRİŞLERİ gerçek emir oluyor, ÇIKIŞLARI guard'a takıldığı için
+        # aynalanmıyordu = her restartta yetim fabrikası). Aynalama ancak
+        # feed bittikten sonra, aşağıda açılır.
 
         print(f"[live-paper] evaluated: feeding {len(ev[self.order[0]])} bars ...", flush=True)
         ev_by_open = {r: self._bars_by_open(v) for r, v in ev.items()}
@@ -595,8 +749,54 @@ class LivePaper:
             self.collect_closed()
             eq = self.runner.portfolio.snapshot((open_ms + BAR_MS - 1) * 1_000_000).equity
             self._append_equity(open_ms + BAR_MS, eq)
+        # Z3-1: restore'lu restartta replay muhasebesi NÖTRLENİR — portfolio
+        # prev equity tabanına rebase edilir; replay PnL'i equity'ye hiçbir
+        # zaman işlenmez (indikatör bağlamı + türetilen pozisyonlar korunur).
+        if self._replay_neutralize:
+            self._neutralize_replay_accounting()
+        # Aynalama ARTIK açılır: bundan sonraki dolgular canlı poll döngüsüne
+        # aittir. Açılır açılmaz izlenen-kökü olmayan kalıntılar temizlenir
+        # (yalnız Z4-2 provenans kümesindeki sembollere dokunulur).
+        self._mirror_live = True
+        if self.exec_ is not None:
+            self._startup_flatten()
         self.last_fed_open_ms = max(int(v[-1][0]) for v in ev.values())
         return ev
+
+    def _neutralize_replay_accounting(self) -> None:
+        """Z3-1 + Z3-7: restart replay'ini muhasebe-acız yapan fix.
+
+        Neden çift sayılıyordu: main() prev equity_usd'yi başlangıç nakdi
+        olarak yükler ve start() ~300 tarihî barı portfolio'da GERÇEKTEN
+        işletir -> replay penceresindeki kapalı-işlem PnL'i (önceden prev
+        equity'nin içinde) İKİNCİ kez equity'ye eklenirdi (canlı kanıt:
+        2026-09-06'da 3 restart ≈ +$3.4 enflasyon; +$2.16'lık tek-bar
+        sıçrama tüm canlı dönem kârıyla birebir örtüştü).
+
+        Fix: replay feed'i tamamlanınca portfolio RESTORE TABANINA rebase
+        edilir: starting_cash += (taban - mevcut equity). Böylece replay'in
+        net equity/cash etkisi tam sıfırlanır; strateji bağlamı (indikatör
+        serileri, cooldown'lar) ve replay'den yeniden türetilen açık
+        pozisyonlar KORUNUR. Gün çapası da prev state'in gün-içi değerine
+        (aynı UTC günüyse) sabitlenir -> day_pnl yalnız canlı kökenli
+        etkileri sayar (restored kayıtlar portfolio'ya hiç girmez)."""
+        p = self.runner.portfolio
+        base = self._replay_base_equity
+        eq = p.equity()
+        delta = (base - eq) if base is not None else 0.0
+        if abs(delta) > 1e-9:
+            p.starting_cash += delta
+            self.replay_rebase_usd = (self.replay_rebase_usd or 0.0) + delta
+        self.runner.risk.reset_day()   # günlük kill-switch mandalını temizle
+        if self._day_anchor_equity is not None:
+            p.day_start_equity = self._day_anchor_equity
+        else:
+            p.day_start_equity = p.equity()   # gün sınırı aşıldıysa: bugün 0
+        print(f"[live-paper] replay accounting neutralized (Z3-1): "
+              f"post-replay ${eq:.4f} -> ${p.equity():.4f} "
+              f"(base ${base if base is not None else 0.0:.2f}, "
+              f"rebase {delta:+.4f}, day anchor ${p.day_start_equity:.4f})",
+              flush=True)
 
     # ---- live: feed every newly closed bar (catch-up gaps in order) --------
     def poll_bars(self, now_ms: int) -> bool:
@@ -713,20 +913,48 @@ class LivePaper:
         except (TypeError, ValueError):
             eq0 = 0.0
         n_open = len(st.get("positions") or [])
+        # Z3-1: restore VARSA startup replay'in muhasebesi nötrlenecek
+        # (start() sonunda _neutralize_replay_accounting). Temiz start'ta
+        # replay PnL'i bir kez sayılır (hesabın açılış geçmişi) — rebase yok.
+        self._replay_neutralize = True
+        # Z3-7: gün çapası prev state'in gün-İÇİ değerine sabitlenir (aynı
+        # UTC günüyse) -> restart öncesi bugünkü canlı kapanışlar day_pnl'de
+        # kalır; farklı günse çapa restart equity'sidir (bugün 0'dan başlar).
+        if st_day == today:
+            try:
+                d_pnl = _f(st.get("day_pnl_usd"))
+            except (TypeError, ValueError):
+                d_pnl = 0.0
+            self._day_anchor_equity = eq0 - d_pnl
+        # Z4-2: bizim açtığımız mirror pozisyonlarının izi restart'lar arası
+        # kalıcıdır — reconcile/flatten yalnız bunlara dokunabilir.
+        ex_prev = st.get("exchange")
+        if isinstance(ex_prev, dict):
+            mo = ex_prev.get("mirror_open")
+            if isinstance(mo, dict):
+                for k, v in mo.items():
+                    sk = self._bare(k)
+                    if sk and isinstance(v, dict) and v:
+                        self.mirror_positions[sk] = dict(v)
+                if self.mirror_positions:
+                    print(f"[live-paper] mirror provenance restored: "
+                          f"{sorted(self.mirror_positions)}", flush=True)
         print(f"[live-paper] state restored: equity base ${eq0:.2f}, "
               f"{len(self.closed_all)} closed trades, "
               f"{len(self.equity_history)} equity points, "
               f"trades_today base {self._trades_today_base}", flush=True)
         print(f"[live-paper] AÇIK POZİSYONLAR restart'ta sıfırlanır — paper "
-              f"({n_open} pozisyon devralınmadı)", flush=True)
+              f"({n_open} pozisyon devralınmadı); equity prev tabana rebase "
+              f"edilecek (replay nötr)", flush=True)
 
     def _append_equity(self, ts_ms: float, equity: float) -> None:
         """Append one equity point, replacing any earlier point with the same
         timestamp (a restart re-feeds recent bars: the re-evaluated point
         wins and the series never grows duplicate timestamps).
-        DENETIM KURALI (2026-09-06): startup replay (guard suresi icindeki
-        barlar) eegriye YAZILMAZ — replay kazancari canli donemle
-        karistirmaz; guard bitince normal ekleme surer."""
+        DENETİM KURALI (2026-09-06): startup replay (son replay barının
+        KAPANIŞI = guard'a EŞİT ts'li nokta dâhil) eğriye YAZILMAZ — replay
+        kazancı canlı dönemle karışmaz; İLK canlı barın kapanış noktası
+        (guard + BAR_MS) normal eklenir (Z3-4)."""
         ts_ms = float(ts_ms)
         guard = getattr(self, "_replay_guard_until_ms", 0)
         if guard and ts_ms <= guard:
@@ -757,19 +985,26 @@ class LivePaper:
             self._closed_keys = {_closed_key(t) for t in self.closed_all}
 
     def _exchange_section(self) -> dict | None:
-        """state.json 'exchange' bölümü: aynalama durumu + 60 sn'de bir taze
-        bakiye. Fail-open: bakiye hatası bölümü bozmaz (None alanlar)."""
+        """state.json 'exchange' bölümü: aynalama durumu + BALANCE_REFRESH_S
+        (300 sn)'de bir taze bakiye. Z3-5: 60 sn'lik poll IP banına (-1003)
+        katkı vermişti ve ban sürerken istek göndermeye devam ediyordu —
+        artık ban aktifken poll TAMAMEN kesilir (ban süresi uzamasın diye;
+        bakiye bilgilendirme amaçlıdır) ve ban bitişi state'e yazılır.
+        Fail-open: hata bölümü bozmaz."""
         if self.exec_ is None:
             return None
         now = time.time()
-        if (self._last_balance_refresh is None
-                or now - self._last_balance_refresh >= 60.0):
+        banned_ms = self._banned_until_ms()
+        ban_active = bool(banned_ms and now * 1000.0 < banned_ms)
+        if not ban_active and (self._last_balance_refresh is None
+                or now - self._last_balance_refresh >= self.BALANCE_REFRESH_S):
             self._last_balance_refresh = now
             try:
                 self._exec_balance = self.exec_.get_balance()
+                self.exec_stats["last_error"] = None   # başarı -> temiz durum
             except Exception as exc:  # noqa: BLE001
                 self._exec_balance = None
-                self.exec_stats["last_error"] = str(exc)[:200]
+                self._note_exec_error(str(exc))
         bal = self._exec_balance or {}
         return {
             "enabled": True,
@@ -780,6 +1015,14 @@ class LivePaper:
             "orders_failed": int(self.exec_stats["orders_failed"]),
             "last_ok_utc": self.exec_stats["last_ok_utc"],
             "last_error": self.exec_stats["last_error"],
+            "recent_errors": list(self._exec_errors),   # Z4-8: hata halkası
+            "banned_until_utc": (
+                datetime.fromtimestamp(banned_ms / 1000.0, tz=timezone.utc).isoformat()
+                if banned_ms else None),
+            "balance_refresh_s": self.BALANCE_REFRESH_S,
+            # Z4-2: bizim mirror girişlerimizle açtığımız pozisyonların izi
+            # (restart'ta restore edilir; reconcile/flatten yalnız buna dokunur)
+            "mirror_open": {k: dict(v) for k, v in self.mirror_positions.items()},
         }
 
     def build_state(self) -> dict[str, Any]:
@@ -833,6 +1076,9 @@ class LivePaper:
                 _f(self.live_base_equity) if self.live_base_equity is not None
                 else _f(min((e for _, e in self.equity_history), default=100.0))),
             "equity_history_note": self.equity_note,
+            # Z3-1 denetim alanı: restart replay'inde equity'ye işlenmeyip
+            # rebasetopla emilen fark (nötrleme sonrası replay etkisi = 0)
+            "replay_rebase_usd": _f(self.replay_rebase_usd or 0.0),
             "closed_trades": self.closed_all[-CLOSED_TRADES_MAX:],
             "exchange": self._exchange_section(),
         }
