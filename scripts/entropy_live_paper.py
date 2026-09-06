@@ -68,6 +68,8 @@ _spec.loader.exec_module(ha)
 from entropy.bot.config import BotConfig, ConsensusConfig, MarketCostConfig, RiskOverrides
 from entropy.bot.portfolio import PositionSide
 
+from kaos_testnet_exec import make_executor_from_env  # noqa: E402 (futures testnet mirror)
+
 _NS = 1_000_000_000
 BAR_MS = 15 * 60 * 1000
 POST_CLOSE_DELAY_MS = 15_000     # feed a bar ~15 s after its close
@@ -249,6 +251,18 @@ class LivePaper:
         self.schedule_path = out_dir / "schedule.json"
         self._schedule_mtime = 0.0
         self._schedule = {"run_mode": "active", "utc_start": None, "utc_end": None}
+        # ---- futures testnet aynalama katmanı (fail-open) -----------------
+        # KAOS_EXCHANGE_TESTNET=1 + BINANCE_API_KEY/SECRET env ile açılır;
+        # kapalıyken (exec_ is None) davranış bit-özdeş kalır. Yalnız CANLI
+        # döngüde (_mirror_live=True, start() sonunda set edilir) aynalanır —
+        # startup replay'i asla aynalanmaz.
+        self.exec_ = make_executor_from_env()
+        self._mirror_live = False
+        self.open_mirror: dict[str, dict[str, Any]] = {}
+        self.exec_stats: dict[str, Any] = {"orders_sent": 0, "orders_failed": 0,
+                                           "last_ok_utc": None, "last_error": None}
+        self._exec_balance: dict | None = None
+        self._last_balance_refresh: float | None = None
         orig_evaluate = self.runner.risk.evaluate
         def _gated_evaluate(signal, portfolio, mark_px, ts_ns):
             from entropy.bot.signals import SignalAction as _SA
@@ -351,6 +365,51 @@ class LivePaper:
                     (open_ms + BAR_MS - 1) * 1_000_000).equity
                 self._append_equity(open_ms + BAR_MS, eq)
 
+    # ---- futures testnet mirroring (fail-open) -----------------------------
+    def _mirror(self, symbol: str, side: str, qty: float,
+                reduce_only: bool = False) -> dict | None:
+        """Canlı paper dolgusunu futures testnet'te GERÇEK market emri olarak
+        tekrarla. Hata asla runner'a sıçramaz (paper muhasebe doğru kalır);
+        başarısızlık exec_stats'a yazılır ve işlem kaydı exchange_verified=False
+        ile işaretlenir."""
+        if self.exec_ is None or not self._mirror_live:
+            return None
+        try:
+            res = self.exec_.place_market_order(symbol, side, qty,
+                                                reduce_only=reduce_only)
+            self.exec_stats["orders_sent"] += 1
+            self.exec_stats["last_ok_utc"] = datetime.now(timezone.utc).isoformat()
+            return res
+        except Exception as exc:  # noqa: BLE001 — fail-open katman sınırı
+            self.exec_stats["orders_failed"] += 1
+            msg = str(exc)[:200]
+            self.exec_stats["last_error"] = msg
+            print(f"[kaos-exec] mirror FAILED: {msg}", flush=True)
+            return {"ok": False, "order_id": None, "status": "failed",
+                    "avg_price": None, "error": msg}
+
+    def _startup_flatten(self) -> None:
+        """Aynalama açılırken testnet'te KALINTI pozisyon varsa sıfırla
+        (paper restart flat başlar; eski koşunun testnet pozisyonu asılı
+        kalmamalı). Fail-open: hata yalnız loglanır."""
+        if self.exec_ is None:
+            return
+        try:
+            for pos in self.exec_.get_open_positions():
+                side = "SELL" if pos["side"] == "long" else "BUY"
+                try:
+                    self.exec_.place_market_order(pos["symbol"], side,
+                                                  pos["contracts"],
+                                                  reduce_only=True)
+                    print(f"[kaos-exec] startup flatten: {pos['symbol']} "
+                          f"{pos['contracts']} kapatıldı", flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[kaos-exec] startup flatten FAILED "
+                          f"{pos['symbol']}: {exc}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[kaos-exec] startup position check FAILED: {exc}",
+                  flush=True)
+
     # ---- closed-trade pairing (harness math; s20 => no stop ratchet) -------
     def collect_closed(self) -> None:
         fills = self.ledger.fills
@@ -359,6 +418,12 @@ class LivePaper:
             fill, intent = fills[i]
             self.cursor += 1
             if getattr(intent, "value", intent) == "open":
+                # canlı giriş dolgusunu testnet'e aynala (yalnız canlı döngüde)
+                m_entry = self._mirror(
+                    fill.symbol,
+                    "BUY" if fill.side.value == "buy" else "SELL", fill.qty)
+                if m_entry is not None:
+                    self.open_mirror[fill.symbol] = m_entry
                 self.open_fills[fill.symbol] = (i, fill)
                 continue
             got = self.open_fills.pop(fill.symbol, None)
@@ -386,6 +451,9 @@ class LivePaper:
             rec = {
                 "symbol": fill.symbol.split(":", 1)[-1],
                 "side": "LONG" if is_long else "SHORT",
+                "qty": _f(qty),
+                "notional_usd": _f(qty * entry.price),
+                "fees_usd": _f(entry.fee + close_fee),
                 "entry_price": _f(entry.price),
                 "exit_price": _f(exit_px),
                 "pnl_usd": _f(pnl),
@@ -402,6 +470,34 @@ class LivePaper:
                 continue
             self._closed_keys.add(key)
             self.closed_all.append(rec)
+            # canlı kapanışı testnet'e aynala + borsa kanıtını kayda işle
+            # (yalnız aynalama açıksa alanlar eklenir; kapalıyken rec değişmez)
+            if self.exec_ is not None:
+                m_entry = self.open_mirror.pop(fill.symbol, None)
+                # giriş testnet'te min-notional için BÜYÜTÜLDÜYSE çıkış aynı
+                # boyutta olmalı (artık pozisyon kalmasın)
+                exit_qty = qty
+                if isinstance(m_entry, dict) and m_entry.get("bumped"):
+                    exit_qty = float(m_entry.get("qty_used") or qty)
+                m_exit = self._mirror(fill.symbol,
+                                      "SELL" if is_long else "BUY", exit_qty,
+                                      reduce_only=True)
+                rec["origin"] = "live"
+                rec["exchange_entry_order_id"] = (m_entry or {}).get("order_id")
+                rec["exchange_order_id"] = (m_exit or {}).get("order_id")
+                rec["exchange_verified"] = bool(
+                    (m_exit or {}).get("ok")) and bool(
+                    (m_entry or {}).get("ok"))
+                notes = []
+                if isinstance(m_entry, dict) and m_entry.get("bumped"):
+                    notes.append("testnet emri min notional için "
+                                 "%s→%s büyütüldü" % (_f(qty), _f(exit_qty)))
+                if not rec["exchange_verified"]:
+                    notes.append((m_entry or {}).get("error")
+                                 or (m_exit or {}).get("error")
+                                 or "mirror failed")
+                if notes:
+                    rec["exchange_note"] = "; ".join(notes)
 
     # ---- startup: 300 bars (100 warmup + 200 evaluated) --------------------
     def start(self) -> dict[str, list[list[Any]]]:
@@ -441,6 +537,12 @@ class LivePaper:
         # evaluated window only from here: cursor skips warmup + boundary fills
         self.cursor = len(self.ledger.fills)
         self.open_fills.clear()
+        # Aynalama yalnız BURADAN sonra (canlı poll döngüsü) açılır: startup
+        # replay dolguları geçmiş sinyallerdir, şimdi emre çevrilemez. Açılır
+        # açılmaz testnet kalıntısı pozisyonlar da sıfırlanır (paper flat başlar).
+        self._mirror_live = True
+        if self.exec_ is not None:
+            self._startup_flatten()
 
         print(f"[live-paper] evaluated: feeding {len(ev[self.order[0]])} bars ...", flush=True)
         ev_by_open = {r: self._bars_by_open(v) for r, v in ev.items()}
@@ -532,6 +634,9 @@ class LivePaper:
                     rec = {
                         "symbol": str(t["symbol"]),
                         "side": str(t["side"]),
+                        "qty": _f(t.get("qty", 0.0)),
+                        "notional_usd": _f(t.get("notional_usd", 0.0)),
+                        "fees_usd": _f(t.get("fees_usd", 0.0)),
                         "entry_price": _f(t["entry_price"]),
                         "exit_price": _f(t["exit_price"]),
                         "pnl_usd": _f(t["pnl_usd"]),
@@ -607,6 +712,32 @@ class LivePaper:
                     1 for t in dropped if t["exit_utc"][:10] == day)
             self._closed_keys = {_closed_key(t) for t in self.closed_all}
 
+    def _exchange_section(self) -> dict | None:
+        """state.json 'exchange' bölümü: aynalama durumu + 60 sn'de bir taze
+        bakiye. Fail-open: bakiye hatası bölümü bozmaz (None alanlar)."""
+        if self.exec_ is None:
+            return None
+        now = time.time()
+        if (self._last_balance_refresh is None
+                or now - self._last_balance_refresh >= 60.0):
+            self._last_balance_refresh = now
+            try:
+                self._exec_balance = self.exec_.get_balance()
+            except Exception as exc:  # noqa: BLE001
+                self._exec_balance = None
+                self.exec_stats["last_error"] = str(exc)[:200]
+        bal = self._exec_balance or {}
+        return {
+            "enabled": True,
+            "network": "futures_testnet",
+            "wallet_usdt": _f(bal.get("wallet")) if bal else None,
+            "available_usdt": _f(bal.get("available")) if bal else None,
+            "orders_sent": int(self.exec_stats["orders_sent"]),
+            "orders_failed": int(self.exec_stats["orders_failed"]),
+            "last_ok_utc": self.exec_stats["last_ok_utc"],
+            "last_error": self.exec_stats["last_error"],
+        }
+
     def build_state(self) -> dict[str, Any]:
         self.collect_closed()
         now_ms = int(time.time() * 1000)
@@ -659,6 +790,7 @@ class LivePaper:
                 else _f(min((e for _, e in self.equity_history), default=100.0))),
             "equity_history_note": self.equity_note,
             "closed_trades": self.closed_all[-CLOSED_TRADES_MAX:],
+            "exchange": self._exchange_section(),
         }
 
     # ---- run control (AYARLAR ile uzaktan yonetilen mod/zamanlama) --------
