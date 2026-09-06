@@ -263,6 +263,11 @@ class LivePaper:
                                            "last_ok_utc": None, "last_error": None}
         self._exec_balance: dict | None = None
         self._last_balance_refresh: float | None = None
+        # yetim-reconcile: mirror kapanış emri başarısız olan testnet
+        # pozisyonları paper tarafı kapandıktan sonra asılı kalıyordu
+        # (2026-09-06: XRP/BNB yetimleri). Periyodik düzeltme:
+        self._last_reconcile: float = 0.0
+        self.RECONCILE_EVERY_S = 900.0
         orig_evaluate = self.runner.risk.evaluate
         def _gated_evaluate(signal, portfolio, mark_px, ts_ns):
             from entropy.bot.signals import SignalAction as _SA
@@ -388,27 +393,66 @@ class LivePaper:
             return {"ok": False, "order_id": None, "status": "failed",
                     "avg_price": None, "error": msg}
 
-    def _startup_flatten(self) -> None:
-        """Aynalama açılırken testnet'te KALINTI pozisyon varsa sıfırla
-        (paper restart flat başlar; eski koşunun testnet pozisyonu asılı
-        kalmamalı). Fail-open: hata yalnız loglanır."""
-        if self.exec_ is None:
-            return
+    def _paper_open_symbols(self) -> set[str]:
+        """Şu an AÇIK kağıt pozisyonlarının sembolleri (restore dâhil;
+        open_fills restore'da temizlendiği için gerçek kaynak portfolio)."""
         try:
-            for pos in self.exec_.get_open_positions():
-                side = "SELL" if pos["side"] == "long" else "BUY"
-                try:
-                    self.exec_.place_market_order(pos["symbol"], side,
-                                                  pos["contracts"],
-                                                  reduce_only=True)
-                    print(f"[kaos-exec] startup flatten: {pos['symbol']} "
-                          f"{pos['contracts']} kapatıldı", flush=True)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[kaos-exec] startup flatten FAILED "
-                          f"{pos['symbol']}: {exc}", flush=True)
+            pos = self.runner.portfolio.positions
+            if isinstance(pos, dict):
+                return {str(s).upper() for s in pos.keys()}
+            if isinstance(pos, (list, tuple)):
+                out = set()
+                for p in pos:
+                    sym = getattr(p, "symbol", None)
+                    out.add(str(sym if sym is not None else p).upper())
+                return out
+        except Exception:  # noqa: BLE001 — fail-open, aynalamayı etkilemesin
+            return set()
+        return set()
+
+    def _flatten_orphans(self, tag: str) -> None:
+        """Testnet'te açık ama kağıt tarafında karşılığı OLMAYAN pozisyonları
+        kapat (reduce-only). Kağıda eşlik eden pozisyona DOKUNMAZ — aynalama
+        sapması yalnız yetimlerde düzeltilir. Fail-open: hata loglanır,
+        runner'a sıçramaz."""
+        if self.exec_ is None or not self._mirror_live:
+            return
+        paper = self._paper_open_symbols()
+        try:
+            positions = self.exec_.get_open_positions()
         except Exception as exc:  # noqa: BLE001
-            print(f"[kaos-exec] startup position check FAILED: {exc}",
-                  flush=True)
+            print(f"[kaos-exec] {tag} position check FAILED: {exc}", flush=True)
+            return
+        for pos in positions:
+            sym = str(pos.get("symbol") or "").upper()
+            if sym in paper:
+                continue  # canlı kağıt pozisyonunun aynası — bot yönetiyor
+            side = "SELL" if pos.get("side") == "long" else "BUY"
+            try:
+                self.exec_.place_market_order(sym, side,
+                                              pos.get("contracts") or 0.0,
+                                              reduce_only=True)
+                print(f"[kaos-exec] {tag} orphan flatten: {sym} "
+                      f"{pos.get('contracts')} kapatıldı (paper karşılığı yok)",
+                      flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[kaos-exec] {tag} orphan flatten FAILED {sym}: {exc}",
+                      flush=True)
+
+    def _startup_flatten(self) -> None:
+        """Aynalama açılırken testnet'te paper karşılığı olmayan KALINTI
+        pozisyonlar sıfırlanır (paper restart'ta restore edilen açık
+        pozisyonlarının aynalarına dokunulmaz)."""
+        self._flatten_orphans("startup")
+
+    def _reconcile_orphans(self) -> None:
+        """Periyodik yetim temizliği (RECONCILE_EVERY_S): mirror kapanışı
+        başarısız olan testnet pozisyonları bu düzeltmeyle kapanır."""
+        now = time.monotonic()
+        if now - self._last_reconcile < self.RECONCILE_EVERY_S:
+            return
+        self._last_reconcile = now
+        self._flatten_orphans("reconcile")
 
     # ---- closed-trade pairing (harness math; s20 => no stop ratchet) -------
     def collect_closed(self) -> None:
@@ -932,6 +976,7 @@ def main() -> None:
         while True:
             now_ms = int(time.time() * 1000)
             try:
+                lp._reconcile_orphans()
                 if lp.poll_bars(now_ms):
                     lp.write_state()
                     last_write = time.time()
