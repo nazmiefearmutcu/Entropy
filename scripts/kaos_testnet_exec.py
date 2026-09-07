@@ -116,7 +116,8 @@ class TestnetExecutor:
 
     def __init__(self, api_key: str, api_secret: str,
                  host: str = HOST_DEFAULT, leverage: int = 1,
-                 max_notional_usdt: float = 0.0) -> None:
+                 max_notional_usdt: float = 0.0,
+                 sizing_pct: float = 0.0) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
         self.host = host.rstrip("/")
@@ -124,6 +125,8 @@ class TestnetExecutor:
         # (varsayılan 1 = kapalı), pozisyon başına notional tavanı (0 = kapalı)
         self.leverage = max(1, min(20, int(leverage)))
         self.max_notional_usdt = float(max_notional_usdt or 0.0)
+        # GERCEK CUZDAN boyutlandirma (09-08): hedef notional = wallet * pct * lev
+        self.sizing_pct = float(sizing_pct or 0.0)
         self._lev_done: set[str] = set()      # kaldıraç/izole ayarlanan semboller
         self._stop_orders: dict[str, str] = {}  # symbol -> STOP_MARKET orderId
         self._lot_step: dict[str, float] = {}   # symbol -> LOT_SIZE stepSize
@@ -490,6 +493,12 @@ class TestnetExecutor:
             # ok=False -> paper muhasebe etkilenmez (fail-open sözleşme).
             self._ensure_lev_isolated(sym)
         used_qty, bumped = qty, False
+        _wallet = 0.0
+        if not reduce_only and self.sizing_pct > 0:
+            try:
+                _wallet = float((self.get_balance() or {}).get("wallet") or 0.0)
+            except Exception:
+                _wallet = 0.0
         try:
             self._load_lot_steps()
             # filtre okunamazsa bile testnet sert sınırının (-4164) altına
@@ -522,22 +531,31 @@ class TestnetExecutor:
         except Exception:
             pass  # fiyata erişilemezse paper qty ile dene (borsa reddederse
                   # MirrorResult ok=False olur — fail-open sözleşmesi)
-        if not reduce_only and self.max_notional_usdt > 0:
-            # GERCEK HESAP cap: bump'li/bump'siz HER girişte final notional
-            # tavanı aşılırsa emir HİÇ açılmaz (paper pozisyonu yine açılır,
-            # exchange_verified=False ile dürüstçe işaretlenir).
+        _cap_now = self.max_notional_usdt
+        if not reduce_only and self.sizing_pct > 0 and _wallet > 0:
+            _cap_now = max(_cap_now, _wallet * self.sizing_pct * self.leverage * 1.25)
+        if not reduce_only and _cap_now > 0:
+            # GERCEK HESAP cap + GERCEK CUZDAN olcekleme: hedef notional =
+            # wallet * pct * kaldıraç; tavan asılırsa emir HİÇ açılmaz.
             try:
                 _px = self.get_price(sym)
             except Exception:
                 _px = 0.0
-            if _px > 0 and used_qty * _px > self.max_notional_usdt:
+            if _px > 0 and self.sizing_pct > 0 and _wallet > 0:
+                _target = _wallet * self.sizing_pct * self.leverage
+                if _target > used_qty * _px:
+                    _step = self._lot_step.get(sym, 0.0)
+                    _raw = _target / _px
+                    used_qty = ((round(_raw / _step)) * _step
+                                if _step > 0 else _raw)
+            if _px > 0 and used_qty * _px > _cap_now:
                 print(f"[kaos-exec] NOTIONAL_CAP: {sym} notional "
                       f"{used_qty * _px:.2f} > tavan "
-                      f"{self.max_notional_usdt:.2f} USDT — emir açılmadı",
+                      f"{_cap_now:.2f} USDT — emir açılmadı",
                       flush=True)
                 self._remember_error(f"NOTIONAL_CAP {sym}: "
                                      f"{used_qty * _px:.2f} > "
-                                     f"{self.max_notional_usdt:.2f}")
+                                     f"{_cap_now:.2f}")
                 return {"ok": True, "order_id": None,
                         "status": "NOTIONAL_CAP_SKIPPED", "avg_price": None,
                         "qty_used": float(used_qty), "bumped": bumped,
@@ -636,9 +654,13 @@ def make_executor_from_env() -> TestnetExecutor | None:
         lev = 5
     lev = max(1, min(20, lev))
     try:
-        cap = float(str(os.environ.get("KAOS_EXCHANGE_MAX_NOTIONAL", "25")).strip() or 25)
+        cap = float(str(os.environ.get("KAOS_EXCHANGE_MAX_NOTIONAL", "0")).strip() or 0)
     except ValueError:
-        cap = 25.0
+        cap = 0.0
+    try:
+        sizing_pct = float(str(os.environ.get("KAOS_EXCHANGE_SIZING_PCT", "0")).strip() or 0) / 100.0
+    except ValueError:
+        sizing_pct = 0.0
     if network == "mainnet":
         print(f"[kaos-exec] *** GERCEK HESAP MIRROR ENABLED *** host={host} "
               f"leverage={lev}x (izole) max_notional={cap:.2f} USDT", flush=True)
@@ -646,4 +668,4 @@ def make_executor_from_env() -> TestnetExecutor | None:
         print(f"[kaos-exec] testnet mirror ENABLED (futures testnet, "
               f"yalnız testnet hostuna emir) leverage={lev}x", flush=True)
     return TestnetExecutor(key, secret, host=host, leverage=lev,
-                           max_notional_usdt=cap)
+                           max_notional_usdt=cap, sizing_pct=sizing_pct)

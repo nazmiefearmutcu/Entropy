@@ -685,7 +685,8 @@ class LivePaper:
                 # giriş testnet'te min-notional için BÜYÜTÜLDÜYSE çıkış aynı
                 # boyutta olmalı (artık pozisyon kalmasın)
                 exit_qty = qty
-                if isinstance(m_entry, dict) and m_entry.get("bumped"):
+                if isinstance(m_entry, dict) and m_entry.get("qty_used"):
+                    # bumped VEYA cuzdan-olcekli: cikis GERCEK acilan miktarla
                     exit_qty = float(m_entry.get("qty_used") or qty)
                 _bare_sym = self._bare(fill.symbol)
                 m_exit = None
