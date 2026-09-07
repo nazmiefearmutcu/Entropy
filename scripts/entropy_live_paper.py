@@ -319,6 +319,7 @@ class LivePaper:
         # Z4-8: tek yuvalık last_error yerine küçük hata halkası (son 5).
         self._exec_errors: deque[str] = deque(maxlen=5)
         self._exec_balance: dict | None = None
+        self._exec_real_positions: list = []   # GERCEK hesap positionRisk (09-07)
         self._last_balance_refresh: float | None = None
         self.BALANCE_REFRESH_S = BALANCE_REFRESH_S
         # yetim-reconcile: mirror kapanış emri başarısız olan testnet
@@ -681,9 +682,17 @@ class LivePaper:
                 exit_qty = qty
                 if isinstance(m_entry, dict) and m_entry.get("bumped"):
                     exit_qty = float(m_entry.get("qty_used") or qty)
-                m_exit = self._mirror(fill.symbol,
-                                      "SELL" if is_long else "BUY", exit_qty,
-                                      reduce_only=True)
+                _bare_sym = self._bare(fill.symbol)
+                m_exit = None
+                if self.exec_ is not None and _bare_sym in self.mirror_positions:
+                    m_exit = self._mirror(fill.symbol,
+                                          "SELL" if is_long else "BUY", exit_qty,
+                                          reduce_only=True)
+                elif self.exec_ is not None:
+                    # replay'den tureyen kagit pozisyon (girisi hic
+                    # aynalanmadi): cikis GERCEK hesaba gönderilmez
+                    self._exec_errors.append(
+                        f"EXIT_SKIP {fill.symbol}: girişi aynalanmamış (kağıt)")
                 rec["origin"] = "live"
                 rec["exchange_entry_order_id"] = (m_entry or {}).get("order_id")
                 rec["exchange_order_id"] = (m_exit or {}).get("order_id")
@@ -1023,6 +1032,12 @@ class LivePaper:
             except Exception as exc:  # noqa: BLE001
                 self._exec_balance = None
                 self._note_exec_error(str(exc))
+            try:
+                _gp = getattr(self.exec_, "get_open_positions", None)
+                if callable(_gp):
+                    self._exec_real_positions = _gp() or []
+            except Exception as exc:  # noqa: BLE001 — önceki liste kalır
+                self._note_exec_error(str(exc))
         bal = self._exec_balance or {}
         return {
             "enabled": True,
@@ -1033,6 +1048,7 @@ class LivePaper:
                         else "futures_testnet"),
             "wallet_usdt": _f(bal.get("wallet")) if bal else None,
             "available_usdt": _f(bal.get("available")) if bal else None,
+            "real_positions": list(self._exec_real_positions),
             "orders_sent": int(self.exec_stats["orders_sent"]),
             "orders_failed": int(self.exec_stats["orders_failed"]),
             "last_ok_utc": self.exec_stats["last_ok_utc"],

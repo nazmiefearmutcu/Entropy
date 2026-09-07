@@ -562,6 +562,14 @@ class TestnetExecutor:
                 "symbol": str(row.get("symbol")),
                 "contracts": abs(amt),
                 "side": "long" if amt > 0 else "short",
+                # GERCEK HESAP gorunurlugu (09-07): panel bu tabloyu gosterir
+                "qty": abs(amt),
+                "entry_price": float(row.get("entryPrice") or 0.0),
+                "mark_price": float(row.get("markPrice") or 0.0),
+                "unrealized": float(row.get("unrealizedProfit") or 0.0),
+                "notional": abs(float(row.get("notional") or 0.0)),
+                "leverage": float(row.get("leverage") or 0.0),
+                "isolated": str(row.get("marginType", "")).lower() == "isolated",
             })
         return out
 
