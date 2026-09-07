@@ -378,6 +378,12 @@ class TestnetExecutor:
         Süreç ölsem bile pozisyon borsada korunur. Best-effort: giriş doldu,
         yerleşemezsesi LOUD log + None (pozisyon orphan olmaz, bot içi SL
         da çalışmaya devam eder)."""
+        sym = clean_symbol(sym)   # ham kağıt sembolü (binance-spot:X) -1121 verir
+        try:
+            self._load_lot_steps()   # tick haritası (re-arm startup'ta erken
+                                     # çağrılabiliyor — yüklemeden tick=0 → -1111)
+        except Exception:
+            pass
         if not stop_price or float(stop_price) <= 0:
             return None
         trigger = self._round_stop(sym, pos_side, float(stop_price))
@@ -392,29 +398,57 @@ class TestnetExecutor:
             "newClientOrderId": f"kaoss{int(time.time() * 1000)}"
                                 f"{self._oid_seq % 10000:04d}",
         }
+        # Mainnet 2025-12-09 gecisi: STOP_MARKET artik /fapi/v1/algoOrder
+        # (algoType=CONDITIONAL) ile acilir; eski uca -4120 doner. Once algo,
+        # migrantsiz ortamlarda (testnet) legacy fallback.
         try:
-            resp = self._request("POST", "/fapi/v1/order", params)
-            oid = str(resp.get("orderId") or "")
-            if oid:
-                self._stop_orders[sym] = oid
-            print(f"[kaos-exec] venue stop yerlesti: {sym} {pos_side} "
-                  f"trigger={trigger} id={oid}", flush=True)
-            return oid or None
+            # algo servisi param adlari farkli: stopPrice -> triggerPrice
+            algo_params = {k: v for k, v in params.items()
+                           if k not in ("stopPrice",)}
+            algo_params["triggerPrice"] = params["stopPrice"]
+            resp = self._request("POST", "/fapi/v1/algoOrder",
+                                 dict(algo_params, algoType="CONDITIONAL"))
+            oid = str(resp.get("orderId") or resp.get("algoId") or "")
+            algo = True
         except Exception as exc:
-            msg = _mask_ip(str(exc))[:160]
-            self._remember_error(f"venue stop FAILED {sym}: {msg}")
-            print(f"[kaos-exec] venue stop YERLESTIRILEMEDI {sym}: {msg}",
-                  flush=True)
-            return None
+            msg = str(exc)
+            if "-4120" not in msg and "Algo" not in msg and "algo" not in msg:
+                self._remember_error(f"venue stop FAILED {sym}: "
+                                     f"{_mask_ip(msg)[:160]}")
+                print(f"[kaos-exec] venue stop YERLESTIRILEMEDI {sym}: "
+                      f"{_mask_ip(msg)[:160]}", flush=True)
+                return None
+            try:
+                resp = self._request("POST", "/fapi/v1/order", params)
+                oid = str(resp.get("orderId") or "")
+                algo = False
+            except Exception as exc2:
+                self._remember_error(f"venue stop FAILED {sym}: "
+                                     f"{_mask_ip(str(exc2))[:160]}")
+                print(f"[kaos-exec] venue stop YERLESTIRILEMEDI {sym}: "
+                      f"{_mask_ip(str(exc2))[:160]}", flush=True)
+                return None
+        if oid:
+            self._stop_orders[sym] = {"id": oid, "algo": algo}
+        print(f"[kaos-exec] venue stop yerlesti: {sym} {pos_side} "
+              f"trigger={trigger} id={oid} ({'algo' if algo else 'legacy'})",
+              flush=True)
+        return oid or None
 
     def cancel_venue_stop(self, sym: str) -> bool:
         """İzlenen STOP_MARKET'i iptal et (-2011 'zaten yok' tolere)."""
-        oid = self._stop_orders.pop(sym, None)
-        if not oid:
+        sym = clean_symbol(sym)
+        ent = self._stop_orders.pop(sym, None)
+        if not ent:
             return False
+        if isinstance(ent, dict) and ent.get("algo"):
+            del_path, del_params = "/fapi/v1/algoOrder", {"symbol": sym,
+                                                          "algoId": ent["id"]}
+        else:
+            del_path, del_params = "/fapi/v1/order", {"symbol": sym,
+                                                      "orderId": ent["id"]}
         try:
-            self._request("DELETE", "/fapi/v1/order",
-                          {"symbol": sym, "orderId": oid})
+            self._request("DELETE", del_path, del_params)
             return True
         except Exception as exc:
             msg = str(exc)

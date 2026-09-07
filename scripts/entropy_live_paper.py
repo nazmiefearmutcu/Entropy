@@ -790,6 +790,24 @@ class LivePaper:
         # aittir. Açılır açılmaz izlenen-kökü olmayan kalıntılar temizlenir
         # (yalnız Z4-2 provenans kümesindeki sembollere dokunulur).
         self._mirror_live = True
+        try:
+            # GERCEK HESAP: restart sonrasi mirror pozisyonlarinin borsa
+            # stoplarini yeniden kur (paper stop_px replay sonrasi olusur)
+            _rearm = getattr(self.exec_, "place_venue_stop", None)
+            if callable(_rearm):
+                for _sym in list(self.mirror_positions):
+                    _pp = None
+                    for _k, _v in (self.runner.portfolio.positions or {}).items():
+                        if self._bare(_k) == self._bare(_sym):
+                            _pp = _v
+                            break
+                    _sl = float(getattr(_pp, "stop_px", 0) or 0)
+                    if _sl > 0:
+                        _qty = float((self.mirror_positions.get(_sym) or {}).get("qty") or 0)
+                        _rearm(self._bare(_sym),
+                               "long" if _qty >= 0 else "short", _sl)
+        except Exception as _exc:
+            print(f"[kaos-exec] stop re-arm exc: {_exc}", flush=True)
         if self.exec_ is not None:
             self._startup_flatten()
         self.last_fed_open_ms = max(int(v[-1][0]) for v in ev.values())
