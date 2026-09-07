@@ -50,6 +50,7 @@ from collections import deque
 from typing import Any
 
 HOST_DEFAULT = "https://testnet.binancefuture.com"
+HOST_MAINNET = "https://fapi.binance.com"  # GERCEK HESAP (kullanici karari 09-07)
 _TIMEOUT_S = 5          # Z4-10: 8 -> 5 (tek emir döngü bloğu ~11.5 sn'a iner)
 _RECV_WINDOW = 10000
 _KEY_MASK = "****"
@@ -114,11 +115,19 @@ class TestnetExecutor:
     """Binance USDT-M futures TESTNET istemcisi (imzalı, market emir)."""
 
     def __init__(self, api_key: str, api_secret: str,
-                 host: str = HOST_DEFAULT) -> None:
+                 host: str = HOST_DEFAULT, leverage: int = 1,
+                 max_notional_usdt: float = 0.0) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
         self.host = host.rstrip("/")
+        # GERCEK HESAP korumalari (kullanici karari 09-07): kaldıraç 1..20
+        # (varsayılan 1 = kapalı), pozisyon başına notional tavanı (0 = kapalı)
+        self.leverage = max(1, min(20, int(leverage)))
+        self.max_notional_usdt = float(max_notional_usdt or 0.0)
+        self._lev_done: set[str] = set()      # kaldıraç/izole ayarlanan semboller
+        self._stop_orders: dict[str, str] = {}  # symbol -> STOP_MARKET orderId
         self._lot_step: dict[str, float] = {}   # symbol -> LOT_SIZE stepSize
+        self._tick_size: dict[str, float] = {}  # symbol -> PRICE_FILTER tickSize
         self._min_notional: dict[str, float] = {}  # symbol -> min notional USDT
         self._lot_loaded = False
         self._lot_fail_at = 0.0        # Z4-6b: son exchangeInfo hatası (monotonic benzeri epoch)
@@ -286,6 +295,10 @@ class TestnetExecutor:
                         step = float(f.get("stepSize") or 0.0)
                         if step > 0:
                             self._lot_step[str(s.get("symbol"))] = step
+                    elif ftype == "PRICE_FILTER":
+                        tick = float(f.get("tickSize") or 0.0)
+                        if tick > 0:
+                            self._tick_size[str(s.get("symbol"))] = tick
                     elif ftype in ("MIN_NOTIONAL", "MINNOTIONAL"):
                         self._min_notional[str(s.get("symbol"))] = float(
                             f.get("notional") or 0.0)
@@ -328,6 +341,98 @@ class TestnetExecutor:
             return f"{math.ceil(qty * 1000.0 - 1e-6) / 1000.0:.3f}"
         return f"{qty:.3f}"
 
+    # ---- GERCEK HESAP korumalari (kullanici karari 09-07) ----------------
+
+    def _ensure_lev_isolated(self, sym: str) -> None:
+        """Sembole KALDIRAC + IZOLE marj ayarla (semhol basina bir kez).
+        -4046 ('zaten bu modda') tolere edilir; DİĞER hata raise eder —
+        yanlış marj modunda (CROSS) gerçek pozisyon AÇILMAZ."""
+        if self.leverage <= 1 or sym in self._lev_done:
+            return
+        try:
+            self._request("POST", "/fapi/v1/marginType",
+                          {"symbol": sym, "marginType": "ISOLATED"})
+        except Exception as exc:
+            msg = str(exc)
+            if "-4046" not in msg and "No need" not in msg:
+                self._remember_error(f"marginType FAILED {sym}: "
+                                     f"{_mask_ip(msg)[:120]}")
+                raise
+        self._request("POST", "/fapi/v1/leverage",
+                      {"symbol": sym, "leverage": self.leverage})
+        self._lev_done.add(sym)
+
+    def _round_stop(self, sym: str, pos_side: str, price: float) -> float:
+        """SL tetik fiyatini tick gridine GUVENLI yuvarla: long SL ASAGI,
+        short SL YUKARI (tetikleme kural fiyatindan gec olmasin)."""
+        tick = self._tick_size.get(sym, 0.0)
+        price = float(price)
+        if not tick:
+            return price
+        n = price / tick
+        steps = math.floor(n + 1e-9) if pos_side == "long" else math.ceil(n - 1e-9)
+        return round(steps * tick, 12)
+
+    def place_venue_stop(self, sym: str, pos_side: str, stop_price: float) -> str | None:
+        """Borsa tarafında koruyucu STOP_MARKET (closePosition=true, MARK_PRICE).
+        Süreç ölsem bile pozisyon borsada korunur. Best-effort: giriş doldu,
+        yerleşemezsesi LOUD log + None (pozisyon orphan olmaz, bot içi SL
+        da çalışmaya devam eder)."""
+        if not stop_price or float(stop_price) <= 0:
+            return None
+        trigger = self._round_stop(sym, pos_side, float(stop_price))
+        params = {
+            "symbol": sym,
+            "side": "SELL" if pos_side == "long" else "BUY",
+            "type": "STOP_MARKET",
+            "stopPrice": trigger,
+            "closePosition": "true",
+            "workingType": "MARK_PRICE",
+            "newOrderRespType": "RESULT",
+            "newClientOrderId": f"kaoss{int(time.time() * 1000)}"
+                                f"{self._oid_seq % 10000:04d}",
+        }
+        try:
+            resp = self._request("POST", "/fapi/v1/order", params)
+            oid = str(resp.get("orderId") or "")
+            if oid:
+                self._stop_orders[sym] = oid
+            print(f"[kaos-exec] venue stop yerlesti: {sym} {pos_side} "
+                  f"trigger={trigger} id={oid}", flush=True)
+            return oid or None
+        except Exception as exc:
+            msg = _mask_ip(str(exc))[:160]
+            self._remember_error(f"venue stop FAILED {sym}: {msg}")
+            print(f"[kaos-exec] venue stop YERLESTIRILEMEDI {sym}: {msg}",
+                  flush=True)
+            return None
+
+    def cancel_venue_stop(self, sym: str) -> bool:
+        """İzlenen STOP_MARKET'i iptal et (-2011 'zaten yok' tolere)."""
+        oid = self._stop_orders.pop(sym, None)
+        if not oid:
+            return False
+        try:
+            self._request("DELETE", "/fapi/v1/order",
+                          {"symbol": sym, "orderId": oid})
+            return True
+        except Exception as exc:
+            msg = str(exc)
+            if "-2011" not in msg and "Unknown order" not in msg:
+                self._remember_error(f"venue stop cancel FAILED {sym}: "
+                                     f"{_mask_ip(msg)[:120]}")
+            return False
+
+    def cancel_stale_venue_stops(self, symbols=None) -> int:
+        """Başlangıç temizliği: izlenen sembollerdeki STOP_MARKET emirlerini
+        iptal et (pozisyon yoksa). Geriye kalan sayı."""
+        syms = list(symbols) if symbols else list(self._stop_orders)
+        n = 0
+        for sym in syms:
+            if self.cancel_venue_stop(sym):
+                n += 1
+        return n
+
     def place_market_order(self, symbol: str, side: str, qty: float,
                            reduce_only: bool = False) -> dict:
         """MARKET emir → {ok, order_id, status, avg_price, qty_used, bumped}.
@@ -337,6 +442,19 @@ class TestnetExecutor:
         Z4-6a: reduce-only kapanış notionalı min altındaysa (toz) emir
         HİÇ açılmaz — DUST_SKIPPED döner (retry gürültüsü biter)."""
         sym = clean_symbol(symbol)
+        used_qty, bumped = qty, False
+        if reduce_only:
+            # kapanista borsa-tarafı stopu ONCE çek (dust-skip olsa bile —
+            # pozisyon kapanamıyorsa stop kalmalı, kapanıyorsa gereksiz)
+            try:
+                self.cancel_venue_stop(sym)
+            except Exception:
+                pass
+        if not reduce_only:
+            # GERCEK HESAP: kaldıraç+izole ayarı BAŞARISIZSA emir HİÇ açılmaz
+            # (yanlış modda CROSS pozisyon açılmasın) — raise -> MirrorResult
+            # ok=False -> paper muhasebe etkilenmez (fail-open sözleşme).
+            self._ensure_lev_isolated(sym)
         used_qty, bumped = qty, False
         try:
             self._load_lot_steps()
@@ -365,22 +483,31 @@ class TestnetExecutor:
                     else:
                         used_qty = (min_notional / price) * 1.001
                     bumped = True
-            else:
-                # Z4-6a: toz kapanış tespiti — notional < min ise emir
-                # -4164 ile HER SEFERİNDE reddedilirdi (kalıcı toz + 900
-                # sn'de bir retry gürültüsü). Emri açma, marker döndür.
-                price = self.get_price(sym)
-                if price > 0 and used_qty * price < min_notional:
-                    print(f"[kaos-exec] DUST_SKIP: {sym} reduce-only "
-                          f"~{used_qty * price:.4f} USDT < min {min_notional} "
-                          f"— emir açılmadı (toz kapanamaz)", flush=True)
-                    return {"ok": True, "order_id": None,
-                            "status": "DUST_SKIPPED", "avg_price": None,
-                            "qty_used": float(used_qty), "bumped": False,
-                            "skipped": "dust"}
+            # KAPANIŞ: ön-dust-skip YOK (mainnet reduce-only min-notional'dan
+            # muaftır; testnette -4164 verirse aşağıda yakalanıp skip olur).
         except Exception:
             pass  # fiyata erişilemezse paper qty ile dene (borsa reddederse
                   # MirrorResult ok=False olur — fail-open sözleşmesi)
+        if not reduce_only and self.max_notional_usdt > 0:
+            # GERCEK HESAP cap: bump'li/bump'siz HER girişte final notional
+            # tavanı aşılırsa emir HİÇ açılmaz (paper pozisyonu yine açılır,
+            # exchange_verified=False ile dürüstçe işaretlenir).
+            try:
+                _px = self.get_price(sym)
+            except Exception:
+                _px = 0.0
+            if _px > 0 and used_qty * _px > self.max_notional_usdt:
+                print(f"[kaos-exec] NOTIONAL_CAP: {sym} notional "
+                      f"{used_qty * _px:.2f} > tavan "
+                      f"{self.max_notional_usdt:.2f} USDT — emir açılmadı",
+                      flush=True)
+                self._remember_error(f"NOTIONAL_CAP {sym}: "
+                                     f"{used_qty * _px:.2f} > "
+                                     f"{self.max_notional_usdt:.2f}")
+                return {"ok": True, "order_id": None,
+                        "status": "NOTIONAL_CAP_SKIPPED", "avg_price": None,
+                        "qty_used": float(used_qty), "bumped": bumped,
+                        "skipped": "notional_cap"}
         self._oid_seq += 1
         params: dict[str, Any] = {
             "symbol": sym,
@@ -397,7 +524,20 @@ class TestnetExecutor:
         }
         if reduce_only:
             params["reduceOnly"] = "true"
-        resp = self._request("POST", "/fapi/v1/order", params)
+        try:
+            resp = self._request("POST", "/fapi/v1/order", params)
+        except Exception as exc:
+            msg = str(exc)
+            if reduce_only and "-4164" in msg:
+                # testnet toz kapanış reddi: emri tekrar tekrar deneme
+                print(f"[kaos-exec] DUST_SKIP: {sym} reduce-only -4164 "
+                      f"(toz kapanamaz) — skip", flush=True)
+                self._remember_error(f"DUST_SKIP {sym}: -4164")
+                return {"ok": True, "order_id": None,
+                        "status": "DUST_SKIPPED", "avg_price": None,
+                        "qty_used": float(used_qty), "bumped": False,
+                        "skipped": "dust"}
+            raise
         avg = resp.get("avgPrice")
         return {
             "ok": True,
@@ -428,12 +568,40 @@ class TestnetExecutor:
 
 def make_executor_from_env() -> TestnetExecutor | None:
     """Env ayarlarına göre executor üretir; aynalama kapalıysa None.
-    Kapalıyken runner davranışı bit-özdeş kalır (hiçbir import yan etkisi yok)."""
-    enabled = str(os.environ.get("KAOS_EXCHANGE_TESTNET", "")).strip().lower() in ("1", "true")
+    Kapalıyken runner davranışı bit-özdeş kalır (hiçbir import yan etkisi yok).
+
+    Ağ seçimi (kullanıcı kararı 09-07: KAOS GERÇEK hesapta):
+      KAOS_EXCHANGE_NETWORK=mainnet           -> GERÇEK futures (fapi.binance.com)
+      KAOS_EXCHANGE_TESTNET=1                 -> testnet (eski davranış, geriye dönük)
+    Kaldıraç: KAOS_EXCHANGE_LEVERAGE (1..20, varsayılan 5; izole marj zorunlu).
+    Notional tavanı: KAOS_EXCHANGE_MAX_NOTIONAL (USDT; bumplı giriş bunu
+    aşarsa emir açılmaz — küçük gerçek hesapta büyütülmüş pozisyon koruması)."""
+    network = str(os.environ.get("KAOS_EXCHANGE_NETWORK", "")).strip().lower()
+    testnet_flag = str(os.environ.get("KAOS_EXCHANGE_TESTNET", "")).strip().lower() in ("1", "true")
     key = os.environ.get("BINANCE_API_KEY", "").strip()
     secret = os.environ.get("BINANCE_API_SECRET", "").strip()
+    if network == "mainnet":
+        enabled, host = True, HOST_MAINNET
+    elif testnet_flag:
+        enabled, host = True, HOST_DEFAULT
+    else:
+        return None
     if not (enabled and key and secret):
         return None
-    print("[kaos-exec] testnet mirror ENABLED (futures testnet, "
-          "yalnız testnet hostuna emir)", flush=True)
-    return TestnetExecutor(key, secret)
+    try:
+        lev = int(str(os.environ.get("KAOS_EXCHANGE_LEVERAGE", "5")).strip() or 5)
+    except ValueError:
+        lev = 5
+    lev = max(1, min(20, lev))
+    try:
+        cap = float(str(os.environ.get("KAOS_EXCHANGE_MAX_NOTIONAL", "25")).strip() or 25)
+    except ValueError:
+        cap = 25.0
+    if network == "mainnet":
+        print(f"[kaos-exec] *** GERCEK HESAP MIRROR ENABLED *** host={host} "
+              f"leverage={lev}x (izole) max_notional={cap:.2f} USDT", flush=True)
+    else:
+        print(f"[kaos-exec] testnet mirror ENABLED (futures testnet, "
+              f"yalnız testnet hostuna emir) leverage={lev}x", flush=True)
+    return TestnetExecutor(key, secret, host=host, leverage=lev,
+                           max_notional_usdt=cap)

@@ -603,6 +603,24 @@ class LivePaper:
                             "order_id": m_entry.get("order_id"),
                             "opened_utc": datetime.now(timezone.utc).isoformat(),
                         }
+                        # GERCEK HESAP koruması: borsa tarafı STOP_MARKET
+                        # (paper stop_px ile). Süreç ölsem bile pozisyon
+                        # borsada korunur. Best-effort: başarısızsa bot içi
+                        # SL çalışmaya devam eder; hata error ring'e düşer.
+                        _lv = (self.ledger.open_levels[i]
+                               if i < len(self.ledger.open_levels) else None)
+                        _sl = (float(_lv[0]) if _lv else
+                               float(getattr(
+                                   (self.portfolio.positions or {})
+                                   .get(fill.symbol), "stop_px", 0) or 0))
+                        _attach = getattr(self.exec_, "place_venue_stop", None)
+                        if _sl > 0 and callable(_attach):
+                            _pside = "long" if fill.side.value == "buy" else "short"
+                            try:
+                                _attach(fill.symbol, _pside, _sl)
+                            except Exception as _exc:
+                                print(f"[kaos-exec] venue stop exc: {_exc}",
+                                      flush=True)
                 self.open_fills[fill.symbol] = (i, fill)
                 continue
             got = self.open_fills.pop(fill.symbol, None)
@@ -1008,7 +1026,11 @@ class LivePaper:
         bal = self._exec_balance or {}
         return {
             "enabled": True,
-            "network": "futures_testnet",
+            # ag etiketi gercek host'tan turetilir (mainnet/ testnet karisikligi
+            # artik imkansiz — panel hangi agda oldugunu dogru gosterir)
+            "network": ("futures_mainnet"
+                        if "testnet" not in str(getattr(self.exec_, "host", ""))
+                        else "futures_testnet"),
             "wallet_usdt": _f(bal.get("wallet")) if bal else None,
             "available_usdt": _f(bal.get("available")) if bal else None,
             "orders_sent": int(self.exec_stats["orders_sent"]),
