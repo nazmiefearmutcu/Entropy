@@ -441,6 +441,11 @@ class LivePaper:
         try:
             res = self.exec_.place_market_order(symbol, side, qty,
                                                 reduce_only=reduce_only)
+            if res.get("skipped"):
+                # NOTIONAL_CAP / DUST: emir GONDERILMEDI — sayac şişirilmez
+                self.exec_stats["last_error"] = (
+                    f"{res.get('status')}: {symbol}")
+                return res
             self.exec_stats["orders_sent"] += 1
             self.exec_stats["last_ok_utc"] = datetime.now(timezone.utc).isoformat()
             return res
@@ -612,7 +617,7 @@ class LivePaper:
                                if i < len(self.ledger.open_levels) else None)
                         _sl = (float(_lv[0]) if _lv else
                                float(getattr(
-                                   (self.portfolio.positions or {})
+                                   (self.runner.portfolio.positions or {})
                                    .get(fill.symbol), "stop_px", 0) or 0))
                         _attach = getattr(self.exec_, "place_venue_stop", None)
                         if _sl > 0 and callable(_attach):
