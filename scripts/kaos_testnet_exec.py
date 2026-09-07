@@ -672,8 +672,12 @@ def make_executor_from_env() -> TestnetExecutor | None:
     except ValueError:
         sizing_pct = 0.0
     if network == "mainnet":
-        print(f"[kaos-exec] *** GERCEK HESAP MIRROR ENABLED *** host={host} "
-              f"leverage={lev}x (izole) max_notional={cap:.2f} USDT", flush=True)
+        _s = ("boyut=cuzdan*%d%%*%dx" % (round(sizing_pct * 100), lev)
+              if sizing_pct > 0 else "boyut=paper")
+        _tavan = ("%0.2f USDT" % cap) if cap > 0 else "dinamik"
+        print("[kaos-exec] *** GERCEK HESAP MIRROR ENABLED *** host=" + host
+              + " leverage=" + str(lev) + "x (izole) " + _s
+              + " tavan=" + _tavan, flush=True)
     else:
         print(f"[kaos-exec] testnet mirror ENABLED (futures testnet, "
               f"yalnız testnet hostuna emir) leverage={lev}x", flush=True)
