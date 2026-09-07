@@ -438,6 +438,16 @@ class TestnetExecutor:
               flush=True)
         return oid or None
 
+    def algo_order_alive(self, sym: str, algoid: str) -> bool:
+        """Algo stop hala kitapta mi? (restart sonrasi re-arm karari icin)"""
+        try:
+            r = self._request("GET", "/fapi/v1/algoOrder",
+                              {"symbol": clean_symbol(sym),
+                               "algoid": int(algoid)})
+            return str(r.get("algoStatus") or r.get("status") or "").upper() == "NEW"
+        except Exception:
+            return False
+
     def cancel_venue_stop(self, sym: str) -> bool:
         """İzlenen STOP_MARKET'i iptal et (-2011 'zaten yok' tolere)."""
         sym = clean_symbol(sym)

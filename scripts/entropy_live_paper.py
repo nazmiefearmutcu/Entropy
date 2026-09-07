@@ -795,6 +795,7 @@ class LivePaper:
             # GERCEK HESAP: restart sonrasi mirror pozisyonlarinin borsa
             # stoplarini yeniden kur (paper stop_px replay sonrasi olusur)
             _rearm = getattr(self.exec_, "place_venue_stop", None)
+            _alive = getattr(self.exec_, "algo_order_alive", None)
             if callable(_rearm):
                 for _sym in list(self.mirror_positions):
                     _pp = None
@@ -803,10 +804,17 @@ class LivePaper:
                             _pp = _v
                             break
                     _sl = float(getattr(_pp, "stop_px", 0) or 0)
+                    _mp = self.mirror_positions.get(_sym) or {}
+                    _sid = str(_mp.get("stop_id") or "")
+                    if _sid and callable(_alive) and _alive(_sym, _sid):
+                        continue   # stop hala kitapta — dokunma
                     if _sl > 0:
-                        _qty = float((self.mirror_positions.get(_sym) or {}).get("qty") or 0)
-                        _rearm(self._bare(_sym),
-                               "long" if _qty >= 0 else "short", _sl)
+                        _qty = float(_mp.get("qty") or 0)
+                        _nsid = _rearm(self._bare(_sym),
+                                       "long" if _qty >= 0 else "short", _sl)
+                        if _nsid:
+                            _mp["stop_id"] = _nsid
+                            self.mirror_positions[_sym] = _mp
         except Exception as _exc:
             print(f"[kaos-exec] stop re-arm exc: {_exc}", flush=True)
         if self.exec_ is not None:
