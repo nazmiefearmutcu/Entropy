@@ -113,7 +113,12 @@ def _mask_ip(text: str) -> str:
     state'e/log'a yazmadan önce maskele."""
     return _IP_RE.sub("IP(<masked>)", str(text))
 
-DEFAULT_SYMBOLS = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"
+# 2026-09-08: evren 5 -> 20 sıvı USD-M major (kullanıcı emri: daha çok işlem;
+# sinyal eşikleri AYNEN — fırsat sayısı büyütüldü, kaliteye dokunulmadı).
+# Risk kapıları değişmez: max_concurrent=4, exposure %40, slot-bölüşümlü boyut.
+DEFAULT_SYMBOLS = ("BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,"
+                   "LINKUSDT,AVAXUSDT,SUIUSDT,NEARUSDT,ENAUSDT,LTCUSDT,"
+                   "DOTUSDT,APTUSDT,ARBUSDT,OPUSDT,ATOMUSDT,FILUSDT,SEIUSDT")
 
 
 def _f(x: float) -> float:
@@ -331,16 +336,46 @@ class LivePaper:
         # (2026-09-06: XRP/BNB yetimleri). Periyodik düzeltme:
         self._last_reconcile: float = 0.0
         self.RECONCILE_EVERY_S = 900.0
+        # 2026-09-08 giriş telemetrisi: "neden işlem yok?" sorusu artık
+        # veriyle cevaplanır — beslenen bar sayısı, görülen ENTER sinyalleri
+        # ve hangi risk kapısının kaç kez reddettiği state'e yazılır.
+        self.entry_telemetry: dict[str, Any] = {
+            "bars_fed": 0,
+            "enter_signals_seen": 0,
+            "entries_allowed": 0,
+            "rejected": {},          # kapı-adı -> sayı
+            "last_enter_signal_utc": None,
+            "last_reject_utc": None,
+        }
         orig_evaluate = self.runner.risk.evaluate
         def _gated_evaluate(signal, portfolio, mark_px, ts_ns):
             from entropy.bot.signals import SignalAction as _SA
             from entropy.bot.risk.manager import RiskDecision as _RD
             if signal.action is not _SA.EXIT:
+                self.entry_telemetry["enter_signals_seen"] += 1
+                self.entry_telemetry["last_enter_signal_utc"] = (
+                    datetime.now(timezone.utc).isoformat())
                 eff = self._effective_run_mode()
                 if eff != "paper":
+                    self._telemetry_reject("run-control:" + eff)
                     return _RD(False, None, "run-control: " + eff)
-            return orig_evaluate(signal, portfolio, mark_px, ts_ns)
+            decision = orig_evaluate(signal, portfolio, mark_px, ts_ns)
+            if signal.action is not _SA.EXIT:
+                if getattr(decision, "approved", True):
+                    self.entry_telemetry["entries_allowed"] += 1
+                else:
+                    self._telemetry_reject(
+                        str(getattr(decision, "reason", "") or "unknown"))
+            return decision
         self.runner.risk.evaluate = _gated_evaluate  # type: ignore[assignment]
+
+    def _telemetry_reject(self, reason: str) -> None:
+        r = reason.split(":", 1)[0] if reason.startswith("run-control:") else reason
+        key = str(r)[:80]
+        self.entry_telemetry["rejected"][key] = (
+            self.entry_telemetry["rejected"].get(key, 0) + 1)
+        self.entry_telemetry["last_reject_utc"] = (
+            datetime.now(timezone.utc).isoformat())
 
     # ---- tick feeding (harness _feed logic, one bar at a time) -------------
     def _on(self, t: dict[str, Any]) -> None:
@@ -361,6 +396,7 @@ class LivePaper:
         into per-symbol slots inside the bar (symbol j gets j*spacing + 0..3 s)
         so global time stays monotonic across symbols (multi-symbol harness
         convention). Direction-aware stop-first L/H ordering per symbol."""
+        self.entry_telemetry["bars_fed"] += 1
         if bar_open_ms <= self.last_fed_open_ms:
             # Same-bar double-feed guard (process lifetime): a bar at or
             # before the last fed bar must never be re-fed. poll_bars already
@@ -1327,6 +1363,18 @@ class LivePaper:
                 _f(self.live_base_equity) if self.live_base_equity is not None
                 else _f(min((e for _, e in self.equity_history), default=100.0))),
             "equity_history_note": self.equity_note,
+            # 2026-09-08: "neden işlem yok?" telemetrisi (panel görünür alan)
+            "entry_telemetry": {
+                "bars_fed": int(self.entry_telemetry["bars_fed"]),
+                "enter_signals_seen": int(
+                    self.entry_telemetry["enter_signals_seen"]),
+                "entries_allowed": int(
+                    self.entry_telemetry["entries_allowed"]),
+                "rejected": dict(self.entry_telemetry["rejected"]),
+                "last_enter_signal_utc":
+                    self.entry_telemetry["last_enter_signal_utc"],
+                "last_reject_utc": self.entry_telemetry["last_reject_utc"],
+            },
             # Z3-1 denetim alanı: restart replay'inde equity'ye işlenmeyip
             # rebasetopla emilen fark (nötrleme sonrası replay etkisi = 0)
             "replay_rebase_usd": _f(self.replay_rebase_usd or 0.0),

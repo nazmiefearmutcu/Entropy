@@ -315,3 +315,22 @@ def test_place_venue_stop_sweeps_stale_first():
     assert oid == "999"
     deletes = [c for c in cap if c[0] == "DELETE"]
     assert len(deletes) == 1 and deletes[0][2]["algoId"] == 777
+
+
+# ---- giriş telemetrisi (2026-09-08 "neden işlem yok?" sorusuna veri) ---------
+
+def test_entry_telemetry_reject_contract():
+    """Redd kaydı: kapı-adı sayacı büyür, run-control ön-ek'i kapı adına
+    ayrışır, zaman damgası yazılır."""
+    import entropy_live_paper as _lp
+    obj = _lp.LivePaper.__new__(_lp.LivePaper)   # __init__'siz sözleşme testi
+    obj.entry_telemetry = {"bars_fed": 0, "enter_signals_seen": 0,
+                           "entries_allowed": 0, "rejected": {},
+                           "last_enter_signal_utc": None,
+                           "last_reject_utc": None}
+    _lp.LivePaper._telemetry_reject(obj, "cooldown")
+    _lp.LivePaper._telemetry_reject(obj, "cooldown")
+    _lp.LivePaper._telemetry_reject(obj, "run-control:paused")
+    assert obj.entry_telemetry["rejected"]["cooldown"] == 2
+    assert obj.entry_telemetry["rejected"]["run-control"] == 1
+    assert obj.entry_telemetry["last_reject_utc"] is not None
