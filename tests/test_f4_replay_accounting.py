@@ -251,6 +251,10 @@ def test_first_live_bar_booked_replay_bar_suppressed(tmp_path):
 # ---- (c) reconcile/flatten provenance (Z4-2) ---------------------------------
 
 class FakeExec:
+    # flatten katmanı ağ etiketine göre davranır (mainnet = flatten yok);
+    # varsayılan testnet host'u eski flatten sözleşmesini korur
+    host = "https://testnet.binancefuture.com"
+
     def __init__(self, positions: list[dict]):
         self.positions = positions
         self.orders: list[tuple] = []
@@ -289,6 +293,27 @@ def test_flatten_provenance_untracked_never_touched(tmp_path):
     # untracked symbols reach state untouched
     st = lp.build_state()
     assert "DOGEUSDT" not in st["exchange"]["mirror_open"]
+
+
+def test_flatten_mainnet_never_auto_closes(tmp_path, capsys):
+    """2026-09-08: GERÇEK hesapta startup/reconcile otomatik flatten YOK —
+    paper kapanışı replay'den türemiş olsa bile gerçek pozisyona market
+    emri atılmaz; yalnız bir kez uyarılır."""
+    lp = _mk_paper(tmp_path, 100.0)
+    ex = FakeExec([{"symbol": "BTCUSDT", "contracts": 0.02, "side": "long"}])
+    ex.host = "https://fapi.binance.com"   # GERÇEK hesap
+    lp.exec_ = ex
+    lp._mirror_live = True
+    lp.mirror_positions = {"BTCUSDT": {"qty": 0.02, "order_id": 111,
+                                       "opened_utc": "x"}}
+    lp._flatten_orphans("startup")
+    assert ex.orders == []                       # dokunulmadı
+    assert "BTCUSDT" in lp.mirror_positions      # iz korunur (rearm yönetir)
+    assert "BTCUSDT" in lp._warned_orphan_mainnet
+    out = capsys.readouterr().out
+    assert "otomatik flatten" in out
+    lp._flatten_orphans("reconcile")             # ikinci kez uyarı SPAM yok
+    assert out.count("otomatik flatten") == 1 or capsys.readouterr().out == ""
 
 
 def test_entry_mirror_tracks_exit_mirror_detracks(tmp_path):

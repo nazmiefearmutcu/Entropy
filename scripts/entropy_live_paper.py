@@ -314,6 +314,7 @@ class LivePaper:
         # pozisyonları dâhil) ASLA dokunulmaz — yalnız uyarı loglanır.
         self.mirror_positions: dict[str, dict[str, Any]] = {}
         self._warned_untracked: set[str] = set()
+        self._warned_orphan_mainnet: set[str] = set()
         self.exec_stats: dict[str, Any] = {"orders_sent": 0, "orders_failed": 0,
                                            "last_ok_utc": None, "last_error": None}
         # Z4-8: tek yuvalık last_error yerine küçük hata halkası (son 5).
@@ -553,8 +554,20 @@ class LivePaper:
                 # Z4-2: kökeni kanıtlanamayan pozisyona DOKUNULMAZ
                 if sym not in self._warned_untracked:
                     self._warned_untracked.add(sym)
-                    print(f"[kaos-exec] {tag}: {sym} izlenmeyen (kanitsiz) "
+                    print(f"[kaos-exec] {tag}: {sym} izlenmeyen (kanitsız) "
                           f"pozisyon — dokunulmuyor, yalniz uyarı", flush=True)
+                continue
+            if "testnet" not in str(getattr(self.exec_, "host", "")):
+                # GERÇEK HESAPTA otomatik kapatma YOK (2026-09-08): paper
+                # kapanışı replay'den türemiş olsa bile gerçek pozisyona
+                # market emri atılmaz — bracket'ı _venue_rearm yönetir,
+                # gerçek kapanış yalnız paper exit'lerin reduce-only aynasıdır.
+                if sym not in self._warned_orphan_mainnet:
+                    self._warned_orphan_mainnet.add(sym)
+                    print(f"[kaos-exec] {tag}: {sym} mirror izi var ama paper "
+                          f"karşılığı yok — GERÇEK hesapta otomatik flatten "
+                          f"kapalı (iz _venue_rearm ile senkron tutulur)",
+                          flush=True)
                 continue
             side = "SELL" if pos.get("side") == "long" else "BUY"
             try:
@@ -579,12 +592,141 @@ class LivePaper:
 
     def _reconcile_orphans(self) -> None:
         """Periyodik yetim temizliği (RECONCILE_EVERY_S): mirror kapanışı
-        başarısız olan testnet pozisyonları bu düzeltmeyle kapanır."""
+        başarısız olan testnet pozisyonları bu düzeltmeyle kapanır. 2026-09-08
+        sonrası aynı kadans venue bracket re-sync'i de yapar (stop/TP canlı
+        mı, mirror gerçek miktar senkron mu)."""
         now = time.monotonic()
         if now - self._last_reconcile < self.RECONCILE_EVERY_S:
             return
         self._last_reconcile = now
         self._flatten_orphans("reconcile")
+        try:
+            self._venue_rearm("reconcile")
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            self._note_exec_error(f"venue rearm: {exc}")
+
+    # ---- venue bracket re-sync (2026-09-08 restart-güvenli katman) --------
+    def _venue_rearm(self, tag: str) -> None:
+        """Mirror pozisyonları için borsa bracket'ını (STOP_MARKET +
+        reduce-only LIMIT TP) senkronla:
+          1. Pozisyon borsada yoksa → mirror izini temizle, kalan emirleri çek.
+          2. stop_id kayıtlı ve canlıysa → dokunma.
+          3. stop_id yok/ölü ise → kitaptaki açık STOP_MARKET'i SAHİPLEN
+             (çift stop kurma); kitapta hiç yoksa paper stop_px ile yeni kur.
+          4. TP için aynı üç adım (legacy reduce-only LIMIT).
+          5. Gerçek pozisyon miktarını provenansa yaz (exit qty doğruluğu).
+        Fail-open: hata loglanır, runner'a sıçramaz."""
+        if self.exec_ is None or not self._mirror_live:
+            return
+        _rearm = getattr(self.exec_, "place_venue_stop", None)
+        _tp_attach = getattr(self.exec_, "place_venue_tp", None)
+        _alive = getattr(self.exec_, "algo_order_alive", None)
+        _ord_alive = getattr(self.exec_, "order_alive", None)
+        _adopt_stop = getattr(self.exec_, "adopt_open_stop", None)
+        _adopt_tp = getattr(self.exec_, "adopt_open_tp", None)
+        if not callable(_rearm):
+            return
+        try:
+            real = {self._bare(p.get("symbol") or ""): p
+                    for p in (self.exec_.get_open_positions() or [])}
+        except Exception as exc:  # noqa: BLE001
+            self._note_exec_error(f"{tag} venue rearm positions: {exc}")
+            return
+        _ctp = getattr(self.exec_, "cancel_venue_tp", None)
+        for _sym in list(self.mirror_positions):
+            bare = self._bare(_sym)
+            rp = real.get(bare)
+            if rp is None:
+                try:
+                    self.exec_.cancel_venue_stop(bare)
+                    if callable(_ctp):
+                        _ctp(bare)
+                except Exception:  # noqa: BLE001
+                    pass
+                self.mirror_positions.pop(_sym, None)
+                print(f"[kaos-exec] {tag}: {bare} borsada yok — mirror izi "
+                      f"temizlendi (bracket çekildi)", flush=True)
+                continue
+            mp = self.mirror_positions.get(_sym) or {}
+            _pp = None
+            for _k, _v in (self.runner.portfolio.positions or {}).items():
+                if self._bare(_k) == bare:
+                    _pp = _v
+                    break
+            _sl = float(getattr(_pp, "stop_px", 0) or 0)
+            _tp = float(getattr(_pp, "tp_px", 0) or 0)
+            _pside = str(rp.get("side") or "long")
+            _rqty = float(rp.get("qty") or 0)
+            if _rqty and abs(_rqty - float(mp.get("qty") or 0)) > 1e-12:
+                mp["qty"] = _rqty   # gerçek miktar (bump/sizing farkı kapanır)
+            sid = str(mp.get("stop_id") or "")
+            if sid and callable(_alive) and _alive(bare, sid):
+                pass                          # stop hâlâ kitapta — dokunma
+            else:
+                _aid = _adopt_stop(bare) if callable(_adopt_stop) else None
+                if _aid:
+                    mp["stop_id"] = str(_aid)
+                    print(f"[kaos-exec] {tag}: {bare} açık stop SAHİPLENİLDİ "
+                          f"id={_aid} (çift stop önlendi)", flush=True)
+                elif _sl > 0:
+                    _nsid = _rearm(bare, _pside, _sl)
+                    if _nsid:
+                        mp["stop_id"] = str(_nsid)
+            tpid = str(mp.get("tp_id") or "")
+            if tpid and callable(_ord_alive) and _ord_alive(bare, tpid):
+                pass
+            else:
+                _atid = (_adopt_tp(bare, _pside)
+                         if callable(_adopt_tp) else None)
+                if _atid:
+                    mp["tp_id"] = str(_atid)
+                    print(f"[kaos-exec] {tag}: {bare} açık TP SAHİPLENİLDİ "
+                          f"id={_atid}", flush=True)
+                elif _tp > 0 and callable(_tp_attach):
+                    _ntid = _tp_attach(bare, _pside, _rqty, _tp)
+                    if _ntid:
+                        mp["tp_id"] = str(_ntid)
+            self.mirror_positions[_sym] = mp
+
+    def _shadow_exit_fantoms(self) -> None:
+        """Restart fantomları: replay'in yeniden türettiği ve GERÇEK hesapta
+        karşılığı OLMAYAN kâğıt pozisyonlar (testnet-mirror devri kalıntısı —
+        2026-09-08 sabahı XRP/SOL/ETH 4 slotun 3'ünü işgal ediyordu). Kâğıt
+        defterinde mark'tan kapatılır; GERÇEK hesaba HİÇBİR emir gitmez
+        (open-fill yok → collect_closed pairing'i kayıt da üretmez). Slot ve
+        exposure bütçesi gerçek girişlere açılır."""
+        if self.exec_ is None or not self._mirror_live:
+            return
+        try:
+            real = {self._bare(p.get("symbol") or "")
+                    for p in (self.exec_.get_open_positions() or [])}
+        except Exception as exc:  # noqa: BLE001
+            self._note_exec_error(f"shadow-exit positions: {exc}")
+            return
+        for symbol in list(self.runner.portfolio.positions):
+            bare = self._bare(symbol)
+            if bare in self.mirror_positions or bare in real:
+                continue   # gerçek karşılığı var — bot yönetiyor
+            pos = self.runner.portfolio.positions[symbol]
+            mark_px = self.runner.portfolio.mark_of(symbol)
+            resolved = self.runner.executor.cost_model.for_symbol(symbol)
+            fee_bps = resolved.fee_bps
+            slip_bps = resolved.slippage_bps
+            if fee_bps is None or slip_bps is None or mark_px <= 0:
+                continue
+            from entropy.bot.orders import OrderSide as _OS
+            close_side = (_OS.SELL if pos.side is PositionSide.LONG
+                          else _OS.BUY)
+            slip = mark_px * (slip_bps / 10_000.0)
+            fill_px = (mark_px - slip if close_side is _OS.SELL
+                       else mark_px + slip)
+            fee = abs(fill_px * pos.qty) * (fee_bps / 10_000.0)
+            ts_ns = int(time.time() * 1000) * 1_000_000
+            self.runner.portfolio.close(symbol, fill_px, ts_ns, fee=fee)
+            self.runner._notify_closed(symbol, "shadow_exit")
+            print(f"[live-paper] shadow-exit fantom: {bare} kâğıt pozisyon "
+                  f"mark'tan kapatıldı (slot serbest; gerçek emir YOK)",
+                  flush=True)
 
     # ---- closed-trade pairing (harness math; s20 => no stop ratchet) -------
     def collect_closed(self) -> None:
@@ -619,13 +761,41 @@ class LivePaper:
                                float(getattr(
                                    (self.runner.portfolio.positions or {})
                                    .get(fill.symbol), "stop_px", 0) or 0))
+                        _pside = ("long" if fill.side.value == "buy"
+                                  else "short")
                         _attach = getattr(self.exec_, "place_venue_stop", None)
                         if _sl > 0 and callable(_attach):
-                            _pside = "long" if fill.side.value == "buy" else "short"
                             try:
-                                _attach(fill.symbol, _pside, _sl)
+                                _sid = _attach(fill.symbol, _pside, _sl)
+                                if _sid:
+                                    # 2026-09-08: stop id ARTIK kalıcı —
+                                    # restart'ta adopt/dokunma kararı bununla
+                                    # verilir (eskiden discard → her restart
+                                    # çift stop kuruyordu)
+                                    self.mirror_positions[
+                                        self._bare(fill.symbol)][
+                                            "stop_id"] = str(_sid)
                             except Exception as _exc:
                                 print(f"[kaos-exec] venue stop exc: {_exc}",
+                                      flush=True)
+                        # Venue TP (2026-09-08): kar tarafı da borsada
+                        # KALICI — runner ölürse pozisyon stop-only çıplak
+                        # kalmıyordu artık (19 saatlik kesinti dersi).
+                        _tp_attach = getattr(self.exec_, "place_venue_tp",
+                                             None)
+                        if (callable(_tp_attach) and _lv is not None
+                                and float(_lv[1] or 0) > 0):
+                            try:
+                                _tqty = float((m_entry or {}).get("qty_used")
+                                              or fill.qty)
+                                _tid = _tp_attach(fill.symbol, _pside,
+                                                  _tqty, float(_lv[1]))
+                                if _tid:
+                                    self.mirror_positions[
+                                        self._bare(fill.symbol)][
+                                            "tp_id"] = str(_tid)
+                            except Exception as _exc:
+                                print(f"[kaos-exec] venue tp exc: {_exc}",
                                       flush=True)
                 self.open_fills[fill.symbol] = (i, fill)
                 continue
@@ -688,6 +858,15 @@ class LivePaper:
                 if isinstance(m_entry, dict) and m_entry.get("qty_used"):
                     # bumped VEYA cuzdan-olcekli: cikis GERCEK acilan miktarla
                     exit_qty = float(m_entry.get("qty_used") or qty)
+                elif _bare_sym in self.mirror_positions:
+                    # restart sonrası: giriş aynası bu süreçte yok; kapanış
+                    # GERÇEK açılan miktarla yapılır (provenans qty'si
+                    # _venue_rearm'da borsadan senkronize edilir) — eski kod
+                    # kâğıt qty'si ile kapatıyordu, gerçek taraf kalıntı
+                    # bırakıyordu (2026-09-08: 0.009 gerçek vs 0.004 kâğıt)
+                    exit_qty = float(
+                        (self.mirror_positions.get(_bare_sym) or {})
+                        .get("qty") or qty)
                 _bare_sym = self._bare(fill.symbol)
                 m_exit = None
                 if self.exec_ is not None and _bare_sym in self.mirror_positions:
@@ -724,6 +903,15 @@ class LivePaper:
                 if isinstance(m_exit, dict) and m_exit.get("ok"):
                     # başarılı kapanış: izden düş (reconcile tekrar dokunmasın)
                     self.mirror_positions.pop(self._bare(fill.symbol), None)
+                    # venue TP de gereksiz (executor kapanışta tracked
+                    # emirleri zaten çeker; bu, restart-sonrası adopt
+                    # edilmemiş kalan TP'yi de hedef alır — fail-open)
+                    _ctp = getattr(self.exec_, "cancel_venue_tp", None)
+                    if callable(_ctp):
+                        try:
+                            _ctp(fill.symbol)
+                        except Exception:  # noqa: BLE001
+                            pass
 
     # ---- startup: 300 bars (100 warmup + 200 evaluated) --------------------
     def start(self) -> dict[str, list[list[Any]]]:
@@ -792,33 +980,16 @@ class LivePaper:
         # (yalnız Z4-2 provenans kümesindeki sembollere dokunulur).
         self._mirror_live = True
         try:
-            # GERCEK HESAP: restart sonrasi mirror pozisyonlarinin borsa
-            # stoplarini yeniden kur (paper stop_px replay sonrasi olusur)
-            _rearm = getattr(self.exec_, "place_venue_stop", None)
-            _alive = getattr(self.exec_, "algo_order_alive", None)
-            if callable(_rearm):
-                for _sym in list(self.mirror_positions):
-                    _pp = None
-                    for _k, _v in (self.runner.portfolio.positions or {}).items():
-                        if self._bare(_k) == self._bare(_sym):
-                            _pp = _v
-                            break
-                    _sl = float(getattr(_pp, "stop_px", 0) or 0)
-                    _mp = self.mirror_positions.get(_sym) or {}
-                    _sid = str(_mp.get("stop_id") or "")
-                    if _sid and callable(_alive) and _alive(_sym, _sid):
-                        continue   # stop hala kitapta — dokunma
-                    if _sl > 0:
-                        _qty = float(_mp.get("qty") or 0)
-                        _nsid = _rearm(self._bare(_sym),
-                                       "long" if _qty >= 0 else "short", _sl)
-                        if _nsid:
-                            _mp["stop_id"] = _nsid
-                            self.mirror_positions[_sym] = _mp
+            # GERCEK HESAP: restart sonrasi venue bracket senkronu (stop
+            # adopt/dokunma karari + reduce-only LIMIT TP + gerçek-miktar
+            # senkronu) — 2026-09-08: eski blok stop_id'siz pozisyona KÖRCE
+            # yeni stop kuruyordu (çift stop), TP'yi hiç kurmuyordu.
+            self._venue_rearm("startup")
         except Exception as _exc:
-            print(f"[kaos-exec] stop re-arm exc: {_exc}", flush=True)
+            print(f"[kaos-exec] venue re-arm exc: {_exc}", flush=True)
         if self.exec_ is not None:
             self._startup_flatten()
+            self._shadow_exit_fantoms()
         self.last_fed_open_ms = max(int(v[-1][0]) for v in ev.values())
         return ev
 
