@@ -202,7 +202,10 @@ def build_cfg(raws: list[str], cash: float, out_dir: Path) -> BotConfig:
             confirm_bars=2,
             trail_pct=0.3,
             max_hold_bars=192,
-            long_only=True,
+            # 2026-09-08 KULLANICI EMRİ: short yönü AÇIK. Aşağı akış
+            # (risk/exits/mirror/venue stop+TP) taraf-farkındadır; bu bayrak
+            # yalnızca ENTER_SHORT emisyonunu kapatan kapıydı (consensus).
+            long_only=False,
         ),
         risk_overrides=RiskOverrides(
             per_trade_pct=10.0,
@@ -663,7 +666,8 @@ class LivePaper:
             if sid and callable(_alive) and _alive(bare, sid):
                 pass                          # stop hâlâ kitapta — dokunma
             else:
-                _aid = _adopt_stop(bare) if callable(_adopt_stop) else None
+                _aid = (_adopt_stop(bare, _pside)
+                        if callable(_adopt_stop) else None)
                 if _aid:
                     mp["stop_id"] = str(_aid)
                     print(f"[kaos-exec] {tag}: {bare} açık stop SAHİPLENİLDİ "
@@ -1450,6 +1454,8 @@ def main() -> None:
     lp = LivePaper(raws, base_cash, out_dir)
     print(f"[live-paper] s20 live paper: symbols={','.join(raws)} cash=${base_cash:.2f} "
           f"state={lp.state_path}", flush=True)
+    print(f"[live-paper] yön modu: LONG+SHORT (kullanıcı emri 2026-09-08; "
+          f"long_only=KAPALI)", flush=True)
     if prev is not None:
         lp.restore_from(prev)
     try:

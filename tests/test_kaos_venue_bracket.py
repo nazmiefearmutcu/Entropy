@@ -275,3 +275,43 @@ def test_make_executor_slots_env(monkeypatch):
     monkeypatch.setenv("KAOS_EXCHANGE_SLOTS", "garbage")
     ex2 = kx.make_executor_from_env()
     assert ex2 is not None and ex2.slots == 1
+
+
+# ---- short-açılımı: taraf-farkında adopt + karşı-taraf süpürme ---------------
+
+def test_adopt_open_stop_is_side_aware():
+    """SELL stopu LONG pozisyona adopt edilir ama SHORT'a EDİLMEZ — aksi halde
+    short stopsuz kalırdı (2026-09-08 shorts-on)."""
+    ex, _ = _ex({("GET", "/fapi/v1/openAlgoOrders"): [STOP_ROW]})  # SELL stop
+    assert ex.adopt_open_stop("ETHUSDT", "long") == "3000002180929115"
+    ex2, _ = _ex({("GET", "/fapi/v1/openAlgoOrders"): [STOP_ROW]})
+    assert ex2.adopt_open_stop("ETHUSDT", "short") is None
+    assert "ETHUSDT" not in ex2._stop_orders
+
+
+BUY_STOP_ROW = {"algoId": 777, "orderType": "STOP_MARKET", "side": "BUY",
+                "algoStatus": "NEW", "triggerPrice": "2600.0"}
+
+
+def test_sweep_stale_stops_cancels_opposite_side_only():
+    """Long girişi öncesi eski SHORT'un BUY stopları silinir; SELL stoplara
+    dokunulmaz."""
+    ex, cap = _ex({("GET", "/fapi/v1/openAlgoOrders"):
+                   [BUY_STOP_ROW, STOP_ROW]})
+    n = ex.sweep_stale_stops("ETHUSDT", "long")
+    assert n == 1
+    deletes = [c for c in cap if c[0] == "DELETE"]
+    assert len(deletes) == 1
+    assert deletes[0][2]["algoId"] == 777
+
+
+def test_place_venue_stop_sweeps_stale_first():
+    ex, cap = _ex({("POST", "/fapi/v1/algoOrder"):
+                   {"orderId": 999, "algoId": 999},
+                   ("GET", "/fapi/v1/openAlgoOrders"): [BUY_STOP_ROW]})
+    ex._lot_loaded = True
+    ex._tick_size = {"ETHUSDT": 0.01}
+    oid = ex.place_venue_stop("ETHUSDT", "long", 2419.14)
+    assert oid == "999"
+    deletes = [c for c in cap if c[0] == "DELETE"]
+    assert len(deletes) == 1 and deletes[0][2]["algoId"] == 777

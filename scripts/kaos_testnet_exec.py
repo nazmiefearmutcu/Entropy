@@ -393,6 +393,15 @@ class TestnetExecutor:
             pass
         if not stop_price or float(stop_price) <= 0:
             return None
+        # short-açılımı: sembolde eski yönden kalan stop varsa süpür
+        # (closePosition=true stopu yeni pozisyona yanlış dokunur)
+        try:
+            _swp = self.sweep_stale_stops(sym, pos_side)
+            if _swp:
+                print(f"[kaos-exec] eski stop süpürüldü: {sym} "
+                      f"({_swp} karşı-taraf)", flush=True)
+        except Exception:
+            pass
         trigger = self._round_stop(sym, pos_side, float(stop_price))
         params = {
             "symbol": sym,
@@ -452,10 +461,13 @@ class TestnetExecutor:
         except Exception:
             return False
 
-    def adopt_open_stop(self, sym: str) -> str | None:
+    def adopt_open_stop(self, sym: str, pos_side: str = "long") -> str | None:
         """Kitaptaki SAHİPLENİLMEMİŞ açık STOP_MARKET'i izlemeye al (2026-09-08:
         stop_id kaybolmuş restart'larda YENİ stop kurup ÇİFT stop üretmek
-        yerine kitaptakı emir adopt edilir). ID döner; yoksa None."""
+        yerine kitaptakı emir adopt edilir). SADECE POZİSYON YÖNÜYLE UYUAN
+        taraf adopt edilir (short açıldıktan sonra eski long'un SELL stopu
+        sahiplenilirse yeni pozisyon stopsuz kalırdı). ID döner; yoksa None."""
+        want = "SELL" if pos_side == "long" else "BUY"
         try:
             rows = self._request("GET", "/fapi/v1/openAlgoOrders",
                                  {"symbol": clean_symbol(sym)})
@@ -464,6 +476,8 @@ class TestnetExecutor:
                     continue
                 if str(r.get("orderType") or "").upper() != "STOP_MARKET":
                     continue
+                if str(r.get("side") or "").upper() != want:
+                    continue   # karşı taraf = eski pozisyonun ölü emri
                 aid = str(r.get("algoId") or "")
                 if aid:
                     self._stop_orders[clean_symbol(sym)] = {"id": aid,
@@ -473,6 +487,38 @@ class TestnetExecutor:
             self._remember_error(f"adopt stop {sym}: "
                                  f"{_mask_ip(str(exc))[:120]}")
         return None
+
+    def sweep_stale_stops(self, sym: str, pos_side: str) -> int:
+        """Yeni giriş öncesi semboldeki KARŞI-TARAF stopları süpür (2026-09-08
+        short-açılımı: long→short dönüşte eski SELL stopu closePosition=true
+        olduğu için yeni pozisyona yanlış dokunuş yapar). Sayaç döner."""
+        want_cancel = "BUY" if pos_side == "long" else "SELL"
+        n = 0
+        try:
+            rows = self._request("GET", "/fapi/v1/openAlgoOrders",
+                                 {"symbol": clean_symbol(sym)})
+            for r in rows if isinstance(rows, list) else []:
+                if not isinstance(r, dict):
+                    continue
+                if str(r.get("orderType") or "").upper() != "STOP_MARKET":
+                    continue
+                if str(r.get("side") or "").upper() != want_cancel:
+                    continue
+                aid = str(r.get("algoId") or "")
+                if not aid:
+                    continue
+                try:
+                    self._request("DELETE", "/fapi/v1/algoOrder",
+                                  {"symbol": clean_symbol(sym),
+                                   "algoId": int(aid)})
+                    n += 1
+                except Exception as exc:  # noqa: BLE001 — tek emir fail-open
+                    self._remember_error(f"sweep stop {sym} {aid}: "
+                                         f"{_mask_ip(str(exc))[:120]}")
+        except Exception as exc:  # noqa: BLE001
+            self._remember_error(f"sweep stops {sym}: "
+                                 f"{_mask_ip(str(exc))[:120]}")
+        return n
 
     def order_alive(self, sym: str, order_id: str) -> bool:
         """Legacy (normal) emir kitapta mi? (TP LIMIT re-sync kararı için)"""
