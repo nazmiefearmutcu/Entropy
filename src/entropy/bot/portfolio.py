@@ -32,6 +32,7 @@ class PositionView(msgspec.Struct, frozen=True):
     unrealized_pnl: float
     stop_px: float
     tp_px: float
+    entry_ts_ns: int = 0
 
 
 class PortfolioSnapshot(msgspec.Struct, frozen=True):
@@ -111,6 +112,7 @@ class Portfolio:
                     p.side, p.entry_px, self._marks.get(p.symbol, p.entry_px), p.qty
                 ),
                 stop_px=p.stop_px, tp_px=p.tp_px,
+                entry_ts_ns=p.entry_ts_ns,  # Z-J B9: snapshot artık açilis zamanini tasiyor
             )
             for p in self.positions.values()
         )

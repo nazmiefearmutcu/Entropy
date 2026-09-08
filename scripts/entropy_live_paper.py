@@ -1116,7 +1116,7 @@ class LivePaper:
             roe = (upnl / notional * 100.0) if notional else None
             stop_px = float(getattr(v, "stop_px", 0) or 0)
             tp_px = float(getattr(v, "tp_px", 0) or 0)
-            entry_ts = getattr(v, "entry_ts_ns", None)
+            entry_ts = getattr(v, "entry_ts_ns", None) or 0
             bars = int(max(0, (now_ms * 10**6 - entry_ts) // (900 * 10**9))) if entry_ts else 0
             positions.append({
                 "symbol": raw,
@@ -1131,6 +1131,9 @@ class LivePaper:
                 "sl_price": _f(stop_px),
                 "tp_price": _f(tp_px),
                 "bars_held": bars,
+                # Z-J B9: girişin KANITLANABILIR zamanı (ilk gerçek emir denetimi)
+                "entry_ts_utc": (datetime.fromtimestamp(entry_ts / 1e9, tz=timezone.utc)
+                                 .isoformat() if entry_ts else None),
             })
         return {
             "ts_utc": datetime.now(timezone.utc).isoformat(),
