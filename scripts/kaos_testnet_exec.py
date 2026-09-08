@@ -320,6 +320,18 @@ class TestnetExecutor:
                             {"symbol": sym})
         return float(row.get("price") or 0.0)
 
+    def get_funding_rate(self, symbol: str) -> dict:
+        """Public premiumIndex: {last_funding_rate (kesir), mark_price,
+        next_funding_ms}. İmzalı istek public uçta geçerlidir (get_price
+        önceli); ban gate + hata halkası _request'ten devralınır."""
+        sym = clean_symbol(symbol)
+        row = self._request("GET", "/fapi/v1/premiumIndex", {"symbol": sym})
+        return {
+            "last_funding_rate": float(row.get("lastFundingRate") or 0.0),
+            "mark_price": float(row.get("markPrice") or 0.0),
+            "next_funding_ms": int(float(row.get("nextFundingTime") or 0)),
+        }
+
     @staticmethod
     def _step_count(qty: float, step: float, direction: str) -> int:
         """qty'nin step kat sayısı. Float artefaktına dayanıklı: oran bir
@@ -574,6 +586,23 @@ class TestnetExecutor:
             if "-2011" not in msg and "Unknown order" not in msg:
                 self._remember_error(f"venue stop cancel FAILED {sym}: "
                                      f"{_mask_ip(msg)[:120]}")
+            return False
+
+    def cancel_stop_by_id(self, sym: str, order_id: str) -> bool:
+        """Algo stopu ID ile iptal et (BE ratchet NEW-then-OLD siralamasi icin;
+        cancel_venue_stop yalniz SON yerlestirilen id'yi bilir — ratchet'te
+        yeni stop zaten haritayi ezmis olur). -2011 = zaten yok = basari."""
+        sym = clean_symbol(sym)
+        try:
+            self._request("DELETE", "/fapi/v1/algoOrder",
+                          {"symbol": sym, "algoId": int(order_id)})
+            return True
+        except Exception as exc:
+            msg = str(exc)
+            if "-2011" in msg or "Unknown order" in msg:
+                return True
+            self._remember_error(f"cancel_stop_by_id {sym} {order_id}: "
+                                 f"{_mask_ip(msg)[:120]}")
             return False
 
     def cancel_stale_venue_stops(self, symbols=None) -> int:

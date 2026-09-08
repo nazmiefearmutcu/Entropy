@@ -120,6 +120,24 @@ DEFAULT_SYMBOLS = ("BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,"
                    "LINKUSDT,AVAXUSDT,SUIUSDT,NEARUSDT,ENAUSDT,LTCUSDT,"
                    "DOTUSDT,APTUSDT,ARBUSDT,OPUSDT,ATOMUSDT,FILUSDT,SEIUSDT")
 
+# ---- 2026-09-09 mekanizma kampanyası (B/C ajan tasarımı) -------------------
+# M1 yön-küme koruması: 4 slotun tamamı tek yöne gitmesin — majörler yüksek
+# korelasyonlu, bir BTC wick'i tüm kitabı aynı anda stoplayabilir.
+MAX_PER_SIDE = 3               # aynı yönde en fazla 3 pozisyon
+MAX_SIDE_EXPOSURE_PCT = 75.0   # aynı yön notionalı <= gerçek bütçenin %75'i
+# M3 üst üste stop kesici: 24 saatte 3 borsa-stop dolgusu -> giriş 6s durur.
+STOP_STREAK_MAX = 3
+STOP_STREAK_HALT_H = 6.0
+# B: venue BE ratchet (+ops. trail) sabitleri
+BE_ARM_FRAC = 0.5              # hareket >= 0.5*tp_dist (= +2σ) -> BE arm
+TRAIL_DEADBAND_FRAC = 0.1      # yeniden yerleşim için min sıkılaşma
+RATCHET_MIN_EVERY_S = 1800.0   # trail kadansı: en fazla 30 dk'da bir
+_TRAIL_ENV = "KAOS_TRAIL"
+_IMM_GUARD = 0.001             # anında-tetik klempi: son markın %0.1 içi
+# M2 funding kapısı
+FUNDING_TTL_S = 300.0
+FUNDING_ABS_GATE = 0.0005      # |rate| >= %0.05 -> ödeyen tarafın girişi kesilir
+
 
 def _f(x: float) -> float:
     """Sanitize a float for the state JSON (no NaN/Inf — a watcher must never
@@ -218,7 +236,9 @@ def build_cfg(raws: list[str], cash: float, out_dir: Path) -> BotConfig:
             stop_loss_pct=1.5,
             take_profit_pct=1.2,
             max_total_exposure_pct=40.0,
-            max_daily_loss_pct=40.0,
+            # M3 ölçümü (2026-09-09): bir 20σ stop = cüzdanın ~%4-10'u;
+            # %40 halt gerçek cüzdanı korumada kör kalır -> %15.
+            max_daily_loss_pct=15.0,
             cooldown_s=180.0,
             min_volatility_pct=0.05,
             vol_window_s=900.0,
@@ -347,6 +367,13 @@ class LivePaper:
             "last_enter_signal_utc": None,
             "last_reject_utc": None,
         }
+        # 2026-09-09 kampanyası: ratchet/trail + funding + stop-breaker
+        self.trail_on = os.environ.get(_TRAIL_ENV, "0").strip().lower() in (
+            "1", "true")
+        self._last_ratchet_place: float = 0.0
+        self.breaker_stops: list[float] = []   # borsa-stop dolgu epoch'ları
+        self.breaker_until: float = 0.0        # 0 = duraklama yok
+        self._funding_cache: dict[str, tuple[float, float]] = {}
         orig_evaluate = self.runner.risk.evaluate
         def _gated_evaluate(signal, portfolio, mark_px, ts_ns):
             from entropy.bot.signals import SignalAction as _SA
@@ -359,6 +386,49 @@ class LivePaper:
                 if eff != "paper":
                     self._telemetry_reject("run-control:" + eff)
                     return _RD(False, None, "run-control: " + eff)
+                # M1 yön-küme koruması: aynı yönde slot yığını yasak
+                want_side = ("long" if signal.action is _SA.ENTER_LONG
+                             else "short")
+                cnt = self._direction_counts()
+                if cnt.get(want_side, 0) >= MAX_PER_SIDE:
+                    self._telemetry_reject("direction cap")
+                    return _RD(False, None,
+                               f"direction cap: {cnt.get(want_side, 0)}x "
+                               f"{want_side} (max {MAX_PER_SIDE})")
+                _tot = cnt.get("long", 0) + cnt.get("short", 0)
+                if _tot > 0:
+                    _bal = self._exec_balance or {}
+                    _w = float(_bal.get("wallet") or 0.0)
+                    if _w > 0:
+                        _bud = (_w
+                                * (getattr(self.exec_, "sizing_pct", 0.0) or 0.0)
+                                * (getattr(self.exec_, "leverage", 1) or 1)
+                                * (MAX_SIDE_EXPOSURE_PCT / 100.0))
+                        if _bud > 0:
+                            _side_not = 0.0
+                            for _s, _p in (self.runner.portfolio.positions
+                                           or {}).items():
+                                _ps = ("long" if getattr(_p, "side", None)
+                                       is PositionSide.LONG else "short")
+                                if _ps == want_side:
+                                    _side_not += (
+                                        self.runner.portfolio.mark_of(_s)
+                                        * getattr(_p, "qty", 0.0))
+                            if _side_not >= _bud:
+                                self._telemetry_reject("direction cap")
+                                return _RD(False, None,
+                                           f"direction cap: {want_side} "
+                                           f"notional {_side_not:.0f} >= "
+                                           f"budget {_bud:.0f}")
+                # M2 funding kapısı: ödeyen tarafın girişi kesilir (fail-open)
+                _fg = self._funding_gate(signal)
+                if _fg is not None:
+                    self._telemetry_reject("funding_gate")
+                    return _RD(False, None, _fg)
+                # M3 stop-streak kesici: 24h/3 borsa-stop -> 6h giriş molası
+                if time.time() < self.breaker_until:
+                    self._telemetry_reject("breaker")
+                    return _RD(False, None, "breaker: stop-streak halt")
             decision = orig_evaluate(signal, portfolio, mark_px, ts_ns)
             if signal.action is not _SA.EXIT:
                 if getattr(decision, "approved", True):
@@ -376,6 +446,71 @@ class LivePaper:
             self.entry_telemetry["rejected"].get(key, 0) + 1)
         self.entry_telemetry["last_reject_utc"] = (
             datetime.now(timezone.utc).isoformat())
+
+    def _direction_counts(self) -> dict[str, int]:
+        """Açık pozisyonların yön dağılımı: kâğıt defteri + mirror izi BİRLİĞİ
+        (restart'ta kâğıt FLAT başlar; gerçek kitap yalnız mirror_positions'ta
+        yaşar — borsa gerçeği 'side' alanı kâğıdı ezer). Fail-open."""
+        sides: dict[str, str] = {}
+        try:
+            for sym, pos in (self.runner.portfolio.positions or {}).items():
+                sides[self._bare(sym)] = (
+                    "long" if pos.side is PositionSide.LONG else "short")
+        except Exception:  # noqa: BLE001
+            pass
+        for sym, mp in (self.mirror_positions or {}).items():
+            s = str(mp.get("side") or "")
+            if s in ("long", "short"):
+                sides[self._bare(sym)] = s
+        out = {"long": 0, "short": 0}
+        for s in sides.values():
+            out[s] = out.get(s, 0) + 1
+        return out
+
+    def _funding_gate(self, signal) -> str | None:
+        """Funding-farkındalıklı giriş kapısı (fail-open). None = serbest.
+        Pozitif fundingde long ÖDER, negatifte short ÖDER — ödeyen tarafı kes.
+        exec yok / aynalama kapalıyken (replay) tamamen sessiz."""
+        if self.exec_ is None or not self._mirror_live:
+            return None
+        action_v = str(getattr(signal.action, "value", signal.action))
+        want = "long" if "long" in action_v and "short" not in action_v else "short"
+        bare = self._bare(getattr(signal, "symbol", ""))
+        if not bare:
+            return None
+        now = time.time()
+        hit = self._funding_cache.get(bare)
+        if hit is None or now - hit[1] >= FUNDING_TTL_S:
+            try:
+                fr = float((self.exec_.get_funding_rate(bare) or {})
+                           .get("last_funding_rate") or 0.0)
+            except Exception:  # noqa: BLE001 — fetch hatası = izin
+                return None
+            self._funding_cache[bare] = (fr, now)
+            hit = (fr, now)
+        rate = hit[0]
+        if want == "short" and rate <= -FUNDING_ABS_GATE:
+            return (f"funding_gate: {bare} SHORT rate={rate * 100:.3f}% "
+                    f"(short öder)")
+        if want == "long" and rate >= FUNDING_ABS_GATE:
+            return (f"funding_gate: {bare} LONG rate={rate * 100:.3f}% "
+                    f"(long öder)")
+        return None
+
+    def _note_venue_stop_fill(self, bare: str) -> None:
+        """Borsa-stop dolgu kanıtı (vekil: pozisyon borsada kayboldu + fiyat
+        stop tarafında). 24h pencerede >= STOP_STREAK_MAX dolgu -> yeni
+        girişler STOP_STREAK_HALT_H saat duraklar. Exits ASLA dokunulmaz."""
+        now = time.time()
+        self.breaker_stops = [t for t in self.breaker_stops
+                              if now - t < 86400.0]
+        self.breaker_stops.append(now)
+        if (len(self.breaker_stops) >= STOP_STREAK_MAX
+                and now >= self.breaker_until):
+            self.breaker_until = now + STOP_STREAK_HALT_H * 3600.0
+            print(f"[live-paper] RISK BREAKER: {len(self.breaker_stops)} "
+                  f"borsa-stop dolgusu/24h (son: {bare}) — yeni girişler "
+                  f"{STOP_STREAK_HALT_H:.0f} saat duraklatıldı", flush=True)
 
     # ---- tick feeding (harness _feed logic, one bar at a time) -------------
     def _on(self, t: dict[str, Any]) -> None:
@@ -676,6 +811,17 @@ class LivePaper:
             bare = self._bare(_sym)
             rp = real.get(bare)
             if rp is None:
+                # M3: pozisyon borsada kayboldu + fiyat stop tarafındaysa bu
+                # bir borsa-stop dolgusudur (streak sayacı; fail-closed yönü
+                # güvenli: en kötü durum gereksiz 6s giriş molası)
+                _mp0 = self.mirror_positions.get(_sym) or {}
+                _s0 = str(_mp0.get("side") or "")
+                _sl0 = float(_mp0.get("sl_px") or 0.0)
+                _px0 = _f(self.last_close.get(bare, 0.0))
+                if _s0 and _sl0 > 0 and _px0 > 0 and (
+                        (_s0 == "long" and _px0 <= _sl0 * 1.001)
+                        or (_s0 == "short" and _px0 >= _sl0 * 0.999)):
+                    self._note_venue_stop_fill(bare)
                 try:
                     self.exec_.cancel_venue_stop(bare)
                     if callable(_ctp):
@@ -698,6 +844,12 @@ class LivePaper:
             _rqty = float(rp.get("qty") or 0)
             if _rqty and abs(_rqty - float(mp.get("qty") or 0)) > 1e-12:
                 mp["qty"] = _rqty   # gerçek miktar (bump/sizing farkı kapanır)
+            # M1/M3: yön + bariyer gerçeği provenansa (restart-dayanıklı sayaç)
+            mp["side"] = _pside
+            if _sl > 0:
+                mp["sl_px"] = _sl
+            if _tp > 0:
+                mp["tp_px"] = _tp
             sid = str(mp.get("stop_id") or "")
             if sid and callable(_alive) and _alive(bare, sid):
                 pass                          # stop hâlâ kitapta — dokunma
@@ -727,6 +879,82 @@ class LivePaper:
                     if _ntid:
                         mp["tp_id"] = str(_ntid)
             self.mirror_positions[_sym] = mp
+
+    def _venue_ratchet(self, tag: str) -> None:
+        """Venue BE ratchet (+ops. KAOS_TRAIL=1 ile σ-trail). Ratchet-only:
+        stop yalnız SIKILIR. Sıralama: YENİ stop ÖNCE, eski id SONRA
+        (cancel-first = çıplak pencere — yasak). Pozisyon başına fire-once
+        (mirror.be_done); trail modunda 30 dk kadans + ölü bant. Fail-open."""
+        if self.exec_ is None or not self._mirror_live or not self.mirror_positions:
+            return
+        # 0) askidaki eski-stop iptallerini bitir (idempotent)
+        for _sym, mp in list(self.mirror_positions.items()):
+            old = str(mp.get("old_stop_id") or "")
+            if old and self.exec_.cancel_stop_by_id(_sym, old):
+                mp.pop("old_stop_id", None)
+        try:
+            real = {self._bare(p.get("symbol") or ""): p
+                    for p in (self.exec_.get_open_positions() or [])}
+        except Exception as exc:  # noqa: BLE001
+            self._note_exec_error(f"{tag} ratchet positions: {exc}")
+            return
+        for _sym, mp in list(self.mirror_positions.items()):
+            bare = self._bare(_sym)
+            rp = real.get(bare)
+            if rp is None:
+                continue   # flat -> temizlik _venue_rearm'ın işi
+            _pp = None
+            for _k, _v in (self.runner.portfolio.positions or {}).items():
+                if self._bare(_k) == bare:
+                    _pp = _v
+                    break
+            if _pp is None:
+                continue   # kâğıt yok -> rearm'ın izi üzerinde çalışır
+            pside = ("long" if _pp.side is PositionSide.LONG else "short")
+            entry = (float(rp.get("entry_price") or 0)
+                     or float(getattr(_pp, "entry_px", 0) or 0))
+            tp_dist = abs(float(getattr(_pp, "tp_px", 0) or 0)
+                          - float(getattr(_pp, "entry_px", 0) or 0))
+            mark = float(self.last_close.get(bare, 0) or 0)
+            if entry <= 0 or tp_dist <= 0 or mark <= 0:
+                continue
+            move = (mark - entry) if pside == "long" else (entry - mark)
+            if move < BE_ARM_FRAC * tp_dist:
+                continue   # eşik geçmedi
+            if mp.get("be_done"):
+                if not self.trail_on:
+                    continue   # fire-once (trail kapalıyken dokunma)
+                if time.time() - self._last_ratchet_place < RATCHET_MIN_EVERY_S:
+                    continue   # trail kadansı
+            fee_bps, slip_bps = self._costs.get(
+                _pp.symbol, (self.cfg.fee_bps, self.cfg.slippage_bps))
+            rt = 2.0 * (fee_bps + slip_bps) / 10_000.0
+            cur = float(mp.get("trail_px") or getattr(_pp, "stop_px", 0) or 0)
+            if pside == "long":
+                level = max(entry * (1.0 + rt), mark - BE_ARM_FRAC * tp_dist)
+                level = min(level, mark * (1.0 - _IMM_GUARD))
+                tighten = level > cur + TRAIL_DEADBAND_FRAC * tp_dist
+            else:
+                level = min(entry * (1.0 - rt), mark + BE_ARM_FRAC * tp_dist)
+                level = max(level, mark * (1.0 + _IMM_GUARD))
+                tighten = level < cur - TRAIL_DEADBAND_FRAC * tp_dist
+            if not tighten:
+                if not mp.get("be_done"):
+                    mp["be_done"] = True   # zaten BE içinde/altında
+                continue
+            old_id = str(mp.get("stop_id") or "")
+            new_id = self.exec_.place_venue_stop(bare, pside, level)  # YENİ ÖNCE
+            if not new_id:
+                continue   # eski stop yerinde; sonraki barda yeniden dene
+            mp["stop_id"] = str(new_id)
+            if old_id:
+                mp["old_stop_id"] = old_id   # sonraki pass'in 0. adımı siler
+            mp["trail_px"] = float(level)
+            mp["be_done"] = True
+            mp["last_trail_utc"] = datetime.now(timezone.utc).isoformat()
+            self._last_ratchet_place = time.time()
+            print(f"[kaos-exec] {tag}: {bare} venue stop RATCHET -> "
+                  f"{level:.6g} (eski id={old_id}, be_done=True)", flush=True)
 
     def _shadow_exit_fantoms(self) -> None:
         """Restart fantomları: replay'in yeniden türettiği ve GERÇEK hesapta
@@ -790,6 +1018,9 @@ class LivePaper:
                             "qty": _f(fill.qty),
                             "order_id": m_entry.get("order_id"),
                             "opened_utc": datetime.now(timezone.utc).isoformat(),
+                            # M1: yön gerçeği (restart sonrası yön sayacı için)
+                            "side": ("long" if fill.side.value == "buy"
+                                     else "short"),
                         }
                         # GERCEK HESAP koruması: borsa tarafı STOP_MARKET
                         # (paper stop_px ile). Süreç ölsem bile pozisyon
@@ -892,6 +1123,10 @@ class LivePaper:
             # (yalnız aynalama açıksa alanlar eklenir; kapalıyken rec değişmez)
             if self.exec_ is not None and self._mirror_live:
                 m_entry = self.open_mirror.pop(fill.symbol, None)
+                # 2026-09-09 MUST-FIX: _bare_sym TANIMDAN ÖNCE okunuyordu
+                # (ilk restart-sonrası çıkışta NameError -> işlem kaydı ve
+                # gerçek kapanış aynası kayboluyordu)
+                _bare_sym = self._bare(fill.symbol)
                 # giriş testnet'te min-notional için BÜYÜTÜLDÜYSE çıkış aynı
                 # boyutta olmalı (artık pozisyon kalmasın)
                 exit_qty = qty
@@ -907,7 +1142,6 @@ class LivePaper:
                     exit_qty = float(
                         (self.mirror_positions.get(_bare_sym) or {})
                         .get("qty") or qty)
-                _bare_sym = self._bare(fill.symbol)
                 m_exit = None
                 if self.exec_ is not None and _bare_sym in self.mirror_positions:
                     m_exit = self._mirror(fill.symbol,
@@ -941,6 +1175,11 @@ class LivePaper:
                 if notes:
                     rec["exchange_note"] = "; ".join(notes)
                 if isinstance(m_exit, dict) and m_exit.get("ok"):
+                    # M3: borsa stopu bizim aynamadan ÖNCE doldurduysa
+                    # (ALREADY_CLOSED + kâğıt stop niyeti) stop-streak sayacı
+                    if (m_exit.get("status") == "ALREADY_CLOSED"
+                            and intent.value == "stop"):
+                        self._note_venue_stop_fill(_bare_sym)
                     # başarılı kapanış: izden düş (reconcile tekrar dokunmasın)
                     self.mirror_positions.pop(self._bare(fill.symbol), None)
                     # venue TP de gereksiz (executor kapanışta tracked
@@ -1107,6 +1346,11 @@ class LivePaper:
             print(f"[live-paper] fed {fed} bar(s), last fed open {last_fed_open} "
                   f"({datetime.fromtimestamp(target_open / 1000, tz=timezone.utc):%Y-%m-%d %H:%M} UTC)",
                   flush=True)
+            # B: venue BE ratchet (+ops. trail) — bar başına, fail-open
+            try:
+                self._venue_ratchet("bar")
+            except Exception as exc:  # noqa: BLE001
+                self._note_exec_error(f"venue ratchet: {exc}")
         return fed > 0
 
     # ---- restart persistence -----------------------------------------------
@@ -1212,6 +1456,29 @@ class LivePaper:
                 if self.mirror_positions:
                     print(f"[live-paper] mirror provenance restored: "
                           f"{sorted(self.mirror_positions)}", flush=True)
+        # M3: stop-streak kesici durumu restore (halt süresi restart'ı aşar)
+        rb = st.get("risk_breaker")
+        if isinstance(rb, dict):
+            now = time.time()
+            for s in (rb.get("stop_fills_utc") or [])[-10:]:
+                try:
+                    t = datetime.fromisoformat(str(s)).timestamp()
+                except (ValueError, TypeError):
+                    continue
+                if now - t < 86400.0:
+                    self.breaker_stops.append(t)
+            hu = str(rb.get("halt_until_utc") or "")
+            if hu:
+                try:
+                    self.breaker_until = max(
+                        self.breaker_until,
+                        datetime.fromisoformat(hu).timestamp())
+                except (ValueError, TypeError):
+                    pass
+            if self.breaker_stops or self.breaker_until > now:
+                print(f"[live-paper] risk breaker restored: "
+                      f"{len(self.breaker_stops)} stop/24h, halt_until="
+                      f"{rb.get('halt_until_utc')}", flush=True)
         print(f"[live-paper] state restored: equity base ${eq0:.2f}, "
               f"{len(self.closed_all)} closed trades, "
               f"{len(self.equity_history)} equity points, "
@@ -1304,6 +1571,11 @@ class LivePaper:
                 datetime.fromtimestamp(banned_ms / 1000.0, tz=timezone.utc).isoformat()
                 if banned_ms else None),
             "balance_refresh_s": self.BALANCE_REFRESH_S,
+            # M2: funding kapısı önbelleği (panel görünürlüğü; restore edilmez)
+            "funding_gate": {
+                bare: {"rate": _f(r), "age_s": int(time.time() - t)}
+                for bare, (r, t) in self._funding_cache.items()
+            },
             # Z4-2: bizim mirror girişlerimizle açtığımız pozisyonların izi
             # (restart'ta restore edilir; reconcile/flatten yalnız buna dokunur)
             "mirror_open": {k: dict(v) for k, v in self.mirror_positions.items()},
@@ -1363,6 +1635,15 @@ class LivePaper:
                 _f(self.live_base_equity) if self.live_base_equity is not None
                 else _f(min((e for _, e in self.equity_history), default=100.0))),
             "equity_history_note": self.equity_note,
+            # M3: stop-streak kesici durumu (restart-dayanıklı)
+            "risk_breaker": {
+                "stop_fills_utc": [
+                    datetime.fromtimestamp(t, tz=timezone.utc).isoformat()
+                    for t in self.breaker_stops[-10:]],
+                "halt_until_utc": (
+                    datetime.fromtimestamp(self.breaker_until, tz=timezone.utc)
+                    .isoformat() if self.breaker_until > time.time() else None),
+            },
             # 2026-09-08: "neden işlem yok?" telemetrisi (panel görünür alan)
             "entry_telemetry": {
                 "bars_fed": int(self.entry_telemetry["bars_fed"]),
