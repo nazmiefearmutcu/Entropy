@@ -249,17 +249,18 @@ def test_min_notional_bump(monkeypatch):
     assert out["bumped"] is True
     assert out["order_id"] == "99"
 
-    # F5 Z4-6a: reduceOnly cikista bump yok; $10 < $50 min oldugu icin
-    # bu kapanis artik TOZ sayilir ve emir hic acilmaz (DUST_SKIPPED).
+    # 2026-09-08 (kasitli degisiklik): kapanista ön-dust-skip KALDIRILDI —
+    # mainnet reduce-only min-notional'dan muaftir; bump da YOK. Kapanis
+    # dogrudan emre gider (fiyat sorgusu yapilmaz).
     out2 = ex.place_market_order("BTCUSDT", "sell", 0.0002, reduce_only=True)
     assert out2["bumped"] is False
-    assert out2["status"] == "DUST_SKIPPED"
+    assert out2["ok"] is True
+    assert captured[-1][1] == "/fapi/v1/order"
 
 
 def test_reduce_only_exit_skips_bump():
-    """F5 Z4-6a notu: reduce-only kapanış artık toz tespiti için fiyat
-    sorgular; notional >= min ise (burada 25 x $1 = $25 >= $20) bump
-    YOK, emir normal açılır. Toz altı kapanış ayrı testte."""
+    """2026-09-08: reduce-only kapanışta fiyat sorgusu KALDIRILDI (mainnet
+    reduce-only min-notional muafı) — bump yok, emir dogrudan açılır."""
     ex = TestnetExecutor("k", "s")
     ex._lot_loaded = True
     paths = []
@@ -273,7 +274,7 @@ def test_reduce_only_exit_skips_bump():
     ex._request = fake_request  # type: ignore[assignment]
     out = ex.place_market_order("BTCUSDT", "sell", 25.0, reduce_only=True)
     assert out["bumped"] is False
-    assert paths == ["/fapi/v1/ticker/price", "/fapi/v1/order"]
+    assert paths == ["/fapi/v1/order"]   # kapanista fiyat sorgusu yok (2026-09-08)
 
 
 # ---- F5 fix testleri (Z4-4/5/6/3/9/8) — hepsi offline stub --------------------
@@ -463,9 +464,9 @@ def test_bump_truncation_class_review_example():
     assert out["bumped"] is True
 
 
-def test_dust_close_skips_order():
-    """Z4-6a: <$min toz reduce-only kapanış emri HİÇ açılmaz; DUST_SKIPPED
-    marker'ı döner (retry gürültüsü biter). Toz üstü kapanış normal akar."""
+def test_dust_close_goes_through_on_mainnet():
+    """2026-09-08: kapanista ön-dust-skip KALDIRILDI (mainnet reduce-only
+    min-notional muafı) — toz kapanis dahil her kapanis emre gider."""
     ex = TestnetExecutor("k", "s")
     paths = []
 
@@ -479,9 +480,8 @@ def test_dust_close_skips_order():
     ex._lot_loaded = True
     ex._lot_step = {"XRPUSDT": 0.1}
     out = ex.place_market_order("XRPUSDT", "SELL", 1.0, reduce_only=True)
-    assert out["ok"] is True and out["status"] == "DUST_SKIPPED"
-    assert out["order_id"] is None and out.get("skipped") == "dust"
-    assert paths == ["/fapi/v1/ticker/price"]      # emir endpoint'ine gidilmedi
+    assert out["ok"] is True and out["order_id"] == "9"
+    assert paths == ["/fapi/v1/order"]             # fiyatsiz, dogrudan emir
 
     out2 = ex.place_market_order("XRPUSDT", "SELL", 100.0, reduce_only=True)
     assert out2["ok"] is True and out2["order_id"] == "9"   # $50 >= $20: normal
