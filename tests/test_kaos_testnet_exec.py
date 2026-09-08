@@ -144,8 +144,12 @@ def test_open_positions_filters_zero():
         {"symbol": "SOLUSDT", "positionAmt": "-5"},
     ])
     pos = ex.get_open_positions()
-    assert pos == [{"symbol": "BTCUSDT", "contracts": 0.002, "side": "long"},
-                   {"symbol": "SOLUSDT", "contracts": 5.0, "side": "short"}]
+    # 6074b94 panel icin satirlari zenginlestirdi (positionRisk detayi) — niyet
+    # korunsun diye sekil yerine ANAHTAR ALT-KUMESI karsilastir:
+    assert [(p2["symbol"], p2["contracts"], p2["side"]) for p2 in pos] == [
+        ("BTCUSDT", 0.002, "long"),
+        ("SOLUSDT", 5.0, "short"),
+    ]
 
 
 def test_request_masks_key_in_http_error(monkeypatch):
