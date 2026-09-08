@@ -890,7 +890,10 @@ class LivePaper:
         if fed_opens:
             self.last_fed_open_ms = max(fed_opens)
         if fed:
-            print(f"[live-paper] fed {fed} bar(s) up to open {target_open} "
+            # Z-J B11: "up to open T" yanilticiydi — T hedef barin ACILISI,
+            # beslenen SON bar degil. Gercek beslenen son barin acilisini yaz.
+            last_fed_open = max(fed_opens)
+            print(f"[live-paper] fed {fed} bar(s), last fed open {last_fed_open} "
                   f"({datetime.fromtimestamp(target_open / 1000, tz=timezone.utc):%Y-%m-%d %H:%M} UTC)",
                   flush=True)
         return fed > 0
