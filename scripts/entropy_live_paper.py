@@ -846,10 +846,20 @@ class LivePaper:
                 mp["qty"] = _rqty   # gerçek miktar (bump/sizing farkı kapanır)
             # M1/M3: yön + bariyer gerçeği provenansa (restart-dayanıklı sayaç)
             mp["side"] = _pside
-            if _sl > 0:
-                mp["sl_px"] = _sl
-            if _tp > 0:
-                mp["tp_px"] = _tp
+            _paper_side = ("long" if (_pp is not None
+                                      and _pp.side is PositionSide.LONG)
+                           else "short")
+            if _pp is not None and _paper_side == _pside:
+                # kâğıt ve borsa AYNI yönde: kâğıt bariyerleri güvenilirdir
+                if _sl > 0:
+                    mp["sl_px"] = _sl
+                if _tp > 0:
+                    mp["tp_px"] = _tp
+            else:
+                # taraf uyuşmazlığı (replay türemesi): kâğıt bariyerleri GERÇEK
+                # pozisyonu tarif etmez — stop-tespit proxy'sini kirletmesin
+                mp.pop("sl_px", None)
+                mp.pop("tp_px", None)
             sid = str(mp.get("stop_id") or "")
             if sid and callable(_alive) and _alive(bare, sid):
                 pass                          # stop hâlâ kitapta — dokunma
@@ -910,7 +920,14 @@ class LivePaper:
                     break
             if _pp is None:
                 continue   # kâğıt yok -> rearm'ın izi üzerinde çalışır
-            pside = ("long" if _pp.side is PositionSide.LONG else "short")
+            pside = str(rp.get("side") or "long")   # BORSA gerçeği esas
+            paper_side = ("long" if _pp.side is PositionSide.LONG
+                          else "short")
+            if paper_side != pside:
+                # taraf uyuşmazlığı (replay türemesi): kâğıt bariyerleri gerçek
+                # pozisyonu tarif etmez — ratchet DOKUNMAZ (eski yönün stopunu
+                # süpürme riski, 2026-09-09 FIL kâğıt-LONG/gerçek-SHORT vakası)
+                continue
             entry = (float(rp.get("entry_price") or 0)
                      or float(getattr(_pp, "entry_px", 0) or 0))
             tp_dist = abs(float(getattr(_pp, "tp_px", 0) or 0)

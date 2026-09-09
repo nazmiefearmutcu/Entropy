@@ -247,3 +247,21 @@ def test_ratchet_fires_once_without_trail(tmp_path):
         calls.__setitem__("n", calls["n"] + 1) or "NEWID2")
     lp._venue_ratchet("test")   # be_done=True, KAOS_TRAIL yok -> sessiz
     assert calls["n"] == 0
+
+
+def test_ratchet_skips_paper_venue_side_mismatch(tmp_path):
+    """Kâğıt LONG / gerçek SHORT uyuşmazlığında ratchet DOKUNMAZ — aksi halde
+    gerçek short'un stopunu süpürüp yanlış yönde stop koyabilirdi."""
+    lp, mp = _ratchet_lp(tmp_path, "r3")
+    # kâğıt pozisyonu LONG'a çevir (replay türemesi simülasyonu)
+    sym = "binance-spot:ENAUSDT"
+    lp.runner.portfolio.close(sym, 0.15, int(time.time() * 1e9), fee=0.0)
+    lp.runner.portfolio.open(sym, lp_mod.PositionSide.LONG, 387.0, 0.16,
+                             0.14, 0.18, int(time.time() * 1e9), fee=0.0)
+    lp.last_close = {"ENAUSDT": 0.19}   # kâğıt long için +2σ üzeri
+    calls = {"n": 0}
+    lp.exec_.place_venue_stop = lambda s, side, px: (  # type: ignore[method-assign]
+        calls.__setitem__("n", calls["n"] + 1) or "X")
+    lp._venue_ratchet("test")
+    assert calls["n"] == 0
+    assert mp.get("be_done") is None   # dokunulmadı
