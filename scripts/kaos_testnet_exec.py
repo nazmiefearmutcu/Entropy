@@ -415,6 +415,49 @@ class TestnetExecutor:
         except Exception:
             pass
         trigger = self._round_stop(sym, pos_side, float(stop_price))
+        # LIQ-CLAMP (2026-09-10, sahip emri): SL asla likidasyon fiyatını
+        # aşamaz — tetiklenemeden borsa pozisyonu likide ederdi (canlı kanıt:
+        # 5 pozisyondan 4'ünde 20σ stopu liq ötesindeydi). Borsanın KENDİ
+        # liquidationPrice'ı ile sıkıştır: long SL >= liq*(1+buf), short
+        # SL <= liq*(1-buf). TP'ye dokunulmaz. Buffer: KAOS_LIQ_STOP_BUFFER
+        # (oran, varsayılan %1). Yuvarlama liq'ten UZAK tarafa: long floor
+        # için yukarı (short-yuvarlama), short ceil için aşağı (long-yuvarlama)
+        # — tick gridine otururken klempi delmesin.
+        try:
+            _buf = float(os.environ.get("KAOS_LIQ_STOP_BUFFER", "0.01") or 0.01)
+        except ValueError:
+            _buf = 0.01
+        if _buf < 0:
+            _buf = 0.0
+        try:
+            _rows = self._request("GET", "/fapi/v2/positionRisk",
+                                  {"symbol": sym})
+            _row = next((r for r in (_rows if isinstance(_rows, list) else [])
+                         if isinstance(r, dict)
+                         and float(r.get("positionAmt") or 0.0) != 0.0), None)
+            _liq = float((_row or {}).get("liquidationPrice") or 0.0)
+            if _liq > 0:
+                if pos_side == "long":
+                    _floor = self._round_stop(sym, "short",
+                                              _liq * (1.0 + _buf))
+                    if trigger < _floor:
+                        print(f"[kaos-exec] venue stop LIQ-CLAMP {sym}: "
+                              f"{trigger} -> {_floor} (likidasyon {_liq}; "
+                              f"eski stop liq ötesindeydi)", flush=True)
+                        trigger = _floor
+                else:
+                    _ceil = self._round_stop(sym, "long",
+                                             _liq * (1.0 - _buf))
+                    if trigger > _ceil:
+                        print(f"[kaos-exec] venue stop LIQ-CLAMP {sym}: "
+                              f"{trigger} -> {_ceil} (likidasyon {_liq}; "
+                              f"eski stop liq ötesindeydi)", flush=True)
+                        trigger = _ceil
+        except Exception as _exc:
+            # fail-open: liq sorgusu düşerse stop yine de kurulur (koruma
+            # hiç olmamasından iyidir); hata ring'e düşer.
+            self._remember_error(f"liq-clamp {sym}: "
+                                 f"{_mask_ip(str(_exc))[:120]}")
         params = {
             "symbol": sym,
             "side": "SELL" if pos_side == "long" else "BUY",
@@ -902,6 +945,8 @@ class TestnetExecutor:
                 "notional": abs(float(row.get("notional") or 0.0)),
                 "leverage": float(row.get("leverage") or 0.0),
                 "isolated": str(row.get("marginType", "")).lower() == "isolated",
+                # LIQ-CLAMP görünürlüğü (2026-09-10): panel/teşhis için
+                "liquidation_price": float(row.get("liquidationPrice") or 0.0),
             })
         return out
 

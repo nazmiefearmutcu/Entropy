@@ -334,3 +334,92 @@ def test_entry_telemetry_reject_contract():
     assert obj.entry_telemetry["rejected"]["cooldown"] == 2
     assert obj.entry_telemetry["rejected"]["run-control"] == 1
     assert obj.entry_telemetry["last_reject_utc"] is not None
+
+
+# ---- LIQ-CLAMP (2026-09-10: SL asla likidasyon fiyatını aşamaz) --------------
+
+def _posrisk_row(sym: str, side: str, liq: float) -> dict:
+    return {"symbol": sym, "positionAmt": 1.0 if side == "long" else -1.0,
+            "liquidationPrice": liq, "entryPrice": 100.0,
+            "markPrice": 100.0}
+
+
+def _stop_post(cap: list) -> dict:
+    posts = [c for c in cap
+             if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+    assert posts, "no algoOrder POST captured"
+    return posts[0][2]
+
+
+def test_place_venue_stop_liq_clamps_long_beyond_liq():
+    ex, cap = _ex({("POST", "/fapi/v1/algoOrder"):
+                   {"orderId": 1, "algoId": 1},
+                   ("GET", "/fapi/v1/openAlgoOrders"): [],
+                   ("GET", "/fapi/v2/positionRisk"):
+                   [_posrisk_row("ETHUSDT", "long", 2200.0)]})
+    ex._lot_loaded = True
+    oid = ex.place_venue_stop("ETHUSDT", "long", 2000.0)   # 20σ stopu liq altında
+    assert oid == "1"
+    assert float(_stop_post(cap)["triggerPrice"]) == pytest.approx(2222.0)
+
+
+def test_place_venue_stop_liq_clamps_short_beyond_liq():
+    ex, cap = _ex({("POST", "/fapi/v1/algoOrder"):
+                   {"orderId": 2, "algoId": 2},
+                   ("GET", "/fapi/v1/openAlgoOrders"): [],
+                   ("GET", "/fapi/v2/positionRisk"):
+                   [_posrisk_row("ETHUSDT", "short", 100.0)]})
+    ex._lot_loaded = True
+    oid = ex.place_venue_stop("ETHUSDT", "short", 105.0)   # short stopu liq üstünde
+    assert oid == "2"
+    assert float(_stop_post(cap)["triggerPrice"]) == pytest.approx(99.0)
+
+
+def test_place_venue_stop_untouched_when_inside_liq():
+    ex, cap = _ex({("POST", "/fapi/v1/algoOrder"):
+                   {"orderId": 3, "algoId": 3},
+                   ("GET", "/fapi/v1/openAlgoOrders"): [],
+                   ("GET", "/fapi/v2/positionRisk"):
+                   [_posrisk_row("ETHUSDT", "long", 2200.0)]})
+    ex._lot_loaded = True
+    ex._tick_size = {"ETHUSDT": 0.01}
+    ex.place_venue_stop("ETHUSDT", "long", 2300.0)   # liq'in üstünde = güvenli
+    assert float(_stop_post(cap)["triggerPrice"]) == pytest.approx(2300.0)
+
+
+def test_place_venue_stop_liq_fetch_fails_open():
+    """Liq sorgusu düşse bile stop kurulur (koruma yokluktan iyidir)."""
+    ex, cap = _ex({("POST", "/fapi/v1/algoOrder"):
+                   {"orderId": 4, "algoId": 4},
+                   ("GET", "/fapi/v1/openAlgoOrders"): [],
+                   ("GET", "/fapi/v2/positionRisk"): ExecutorError(-1, "net down")})
+    ex._lot_loaded = True
+    oid = ex.place_venue_stop("ETHUSDT", "long", 2419.14)
+    assert oid == "4"
+    assert float(_stop_post(cap)["triggerPrice"]) == pytest.approx(2419.14)
+
+
+def test_place_venue_stop_clamp_rounds_away_from_liq():
+    """Klemp sonrası tick yuvarlaması liq buffer'ını DELMEMELİ: long floor
+    tick'e YUKARI yuvarlanır (ETH tick 0.01 → 2218.862 → 2218.87)."""
+    ex, cap = _ex({("POST", "/fapi/v1/algoOrder"):
+                   {"orderId": 5, "algoId": 5},
+                   ("GET", "/fapi/v1/openAlgoOrders"): [],
+                   ("GET", "/fapi/v2/positionRisk"):
+                   [_posrisk_row("ETHUSDT", "long", 2196.9)]})
+    ex._lot_loaded = True
+    ex._tick_size = {"ETHUSDT": 0.01}
+    ex.place_venue_stop("ETHUSDT", "long", 2000.0)
+    # 2196.9*1.01 = 2218.869 → tick'e yukarı 2218.87 (asla aşağı değil)
+    assert float(_stop_post(cap)["triggerPrice"]) == pytest.approx(2218.87)
+
+
+def test_get_open_positions_exposes_liquidation_price():
+    ex, _ = _ex({("GET", "/fapi/v2/positionRisk"):
+                 [{"symbol": "ETHUSDT", "positionAmt": "2.0",
+                   "liquidationPrice": "2100.5", "entryPrice": "2500",
+                   "markPrice": "2450", "unrealizedProfit": "-1.0",
+                   "notional": "500", "leverage": "10",
+                   "marginType": "isolated"}]})
+    rows = ex.get_open_positions()
+    assert rows and rows[0]["liquidation_price"] == pytest.approx(2100.5)
