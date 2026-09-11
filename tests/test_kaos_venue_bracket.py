@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import kaos_testnet_exec as kx  # noqa: E402
+import entropy_live_paper as _lp  # noqa: E402
+from entropy.bot.portfolio import PositionSide  # noqa: E402
 from kaos_testnet_exec import ExecutorError, TestnetExecutor  # noqa: E402
 
 
@@ -423,3 +426,279 @@ def test_get_open_positions_exposes_liquidation_price():
                    "marginType": "isolated"}]})
     rows = ex.get_open_positions()
     assert rows and rows[0]["liquidation_price"] == pytest.approx(2100.5)
+
+
+# ---- 2026-09-11 CANLI FIX: marginType -4067 quirk (giriş kaybı) --------------
+# Kanıt: NEARUSDT/FILUSDT/APTUSDT flat + isolated; Binance setMarginType bu
+# durumda -4067 (mesaj 'position side...') dönebiliyor; eski kod ölümcül
+# sayıp mirror girişini iptal ediyordu (kâğıtta short, gerçek hesapta yok).
+
+def test_ensure_lev_isolated_skips_post_when_already_isolated():
+    ex, cap = _ex({
+        ("GET", "/fapi/v2/positionRisk"):
+        [{"symbol": "NEARUSDT", "positionAmt": "0.0",
+          "marginType": "isolated"}],
+        ("POST", "/fapi/v1/leverage"): {"leverage": 10},
+    })
+    ex.leverage = 10
+    ex._ensure_lev_isolated("NEARUSDT")
+    assert not [c for c in cap if c[1] == "/fapi/v1/marginType"]
+    assert [c for c in cap if c[1] == "/fapi/v1/leverage"]
+    assert "NEARUSDT" in ex._lev_done
+
+
+def test_ensure_lev_isolated_4067_verified_isolated_is_ok():
+    ex, cap = _ex()
+    state = {"reads": 0}
+
+    def fake(m, p, params, tries=2, _resynced=False):
+        cap.append((m, p, dict(params)))
+        if p == "/fapi/v2/positionRisk":
+            state["reads"] += 1
+            mt = "cross" if state["reads"] == 1 else "isolated"
+            return [{"symbol": "NEARUSDT", "positionAmt": "0.0",
+                     "marginType": mt}]
+        if p == "/fapi/v1/marginType":
+            raise ExecutorError(
+                -4067, "Position side cannot be changed if there exists "
+                       "open orders.")
+        if p == "/fapi/v1/leverage":
+            return {"leverage": 10}
+        return {}
+
+    ex._request = fake  # type: ignore[assignment]
+    ex.leverage = 10
+    ex._ensure_lev_isolated("NEARUSDT")      # raise ETMEMELİ (quirk)
+    assert "NEARUSDT" in ex._lev_done
+
+
+def test_ensure_lev_isolated_4067_still_cross_raises():
+    ex, cap = _ex()
+
+    def fake(m, p, params, tries=2, _resynced=False):
+        cap.append((m, p, dict(params)))
+        if p == "/fapi/v2/positionRisk":
+            return [{"symbol": "NEARUSDT", "positionAmt": "0.0",
+                     "marginType": "cross"}]
+        if p == "/fapi/v1/marginType":
+            raise ExecutorError(-4067, "Position side cannot be changed")
+        return {}
+
+    ex._request = fake  # type: ignore[assignment]
+    ex.leverage = 10
+    with pytest.raises(ExecutorError):
+        ex._ensure_lev_isolated("NEARUSDT")
+    assert "NEARUSDT" not in ex._lev_done
+
+
+# ---- 2026-09-11 venue çıkış kanıtı (LINK yanlış 'mirror failed' vakası) ------
+# Kanıt: LINK girişi 9.79@11.449 doldu, TP 11.400'den kapandı (+$0.48);
+# reconcile izi temizlediği için eski kod kaydı 'mirror failed' sanıyordu.
+
+def test_order_status_and_algo_order_filled():
+    ex, _ = _ex({("GET", "/fapi/v1/order"): {"status": "FILLED"}})
+    assert ex.order_status("LINKUSDT", "123") == "FILLED"
+    ex2, _ = _ex({("GET", "/fapi/v1/algoOrder"):
+                  {"algoStatus": "FINISHED", "actualOrderId": "999"}})
+    assert ex2.algo_order_filled("LINKUSDT", "123") is True
+    ex3, _ = _ex({("GET", "/fapi/v1/algoOrder"):
+                  {"algoStatus": "CANCELED", "actualOrderId": ""}})
+    assert ex3.algo_order_filled("LINKUSDT", "123") is False
+    ex4, _ = _ex({("GET", "/fapi/v1/order"):
+                  ExecutorError(None, "network")})
+    assert ex4.order_status("LINKUSDT", "123") is None
+
+
+def test_venue_close_evidence_tp_filled():
+    class X:
+        def order_status(self, sym, oid):
+            return "FILLED"
+
+        def algo_order_filled(self, sym, oid):
+            return False
+
+    obj = _lp.LivePaper.__new__(_lp.LivePaper)
+    obj.exec_ = X()
+    ev = _lp.LivePaper._venue_close_evidence(
+        obj, "LINKUSDT", {"tp_id": "51982023383"})
+    assert ev == {"how": "take_profit", "order_id": "51982023383"}
+
+
+def test_venue_close_evidence_stop_filled():
+    class X:
+        def order_status(self, sym, oid):
+            return "NEW"
+
+        def algo_order_filled(self, sym, oid):
+            return True
+
+    obj = _lp.LivePaper.__new__(_lp.LivePaper)
+    obj.exec_ = X()
+    ev = _lp.LivePaper._venue_close_evidence(
+        obj, "ETHUSDT", {"tp_id": "1", "stop_id": "2"})
+    assert ev == {"how": "stop", "order_id": "2"}
+
+
+def test_venue_close_evidence_none_when_unproven():
+    class X:
+        def order_status(self, sym, oid):
+            return "NEW"
+
+        def algo_order_filled(self, sym, oid):
+            return False
+
+    obj = _lp.LivePaper.__new__(_lp.LivePaper)
+    obj.exec_ = X()
+    assert _lp.LivePaper._venue_close_evidence(
+        obj, "ETHUSDT", {"tp_id": "1", "stop_id": "2"}) is None
+
+
+# ---- 2026-09-11 BE-ratchet closePosition tekliliği (sessiz churn biter) ------
+
+def _ratchet_fixture() -> tuple:
+    class X:
+        def __init__(self):
+            self.placed = 0
+
+        def cancel_stop_by_id(self, sym, oid):
+            return False
+
+        def get_open_positions(self):
+            return [{"symbol": "ARBUSDT", "side": "short",
+                     "contracts": 10.0, "qty": 10.0,
+                     "entry_price": 0.14288}]
+
+        def place_venue_stop(self, sym, side, px):
+            self.placed += 1
+            return None          # -4130: closePosition stop zaten var
+
+        def adopt_open_stop(self, sym, side):
+            return "111"
+
+    obj = _lp.LivePaper.__new__(_lp.LivePaper)
+    obj.exec_ = X()
+    obj._mirror_live = True
+    obj.mirror_positions = {"ARBUSDT": {
+        "side": "short", "qty": 10.0, "stop_id": "111", "sl_px": 0.16304}}
+    obj.trail_on = False
+    obj._last_ratchet_place = 0.0
+    obj.last_close = {"ARBUSDT": 0.1390}
+    obj._costs = {}
+    obj.cfg = SimpleNamespace(fee_bps=10.0, slippage_bps=3.0)
+    pos = SimpleNamespace(side=PositionSide.SHORT, entry_px=0.14288,
+                          tp_px=0.13774, stop_px=0.16304,
+                          symbol="binance-spot:ARBUSDT")
+    obj.runner = SimpleNamespace(
+        portfolio=SimpleNamespace(positions={"binance-spot:ARBUSDT": pos}))
+    return obj, obj.mirror_positions["ARBUSDT"]
+
+
+def test_venue_ratchet_marks_unsupported_and_adopts():
+    obj, mp = _ratchet_fixture()
+    _lp.LivePaper._venue_ratchet(obj, "bar")
+    assert obj.exec_.placed == 1           # tek deneme
+    assert mp.get("be_unsupported") is True
+    assert mp.get("be_done") is True
+    assert mp.get("stop_id") == "111"      # mevcut stop adopt edildi
+
+    # ikinci pass: be_unsupported -> hiç deneme yok (churn bitti)
+    _lp.LivePaper._venue_ratchet(obj, "bar")
+    assert obj.exec_.placed == 1
+
+
+# ---- 2026-09-11 collect_closed dürüst kanıt etiketi (integration) ------------
+
+def _stage_round_trip(lp, sym, entry_ts_ns: int) -> None:
+    lp.runner.portfolio.open(sym, PositionSide.LONG, 0.1, 100.0,
+                             99.5, 101.5, entry_ts_ns, fee=0.01)
+    entry = SimpleNamespace(symbol=sym, side=SimpleNamespace(value="buy"),
+                            price=100.0, qty=0.1, fee=0.01,
+                            ts_ns=entry_ts_ns)
+    lp.ledger.fills.append((entry, SimpleNamespace(value="open")))
+    lp.ledger.open_levels.append((99.5, 101.5))
+    idx = len(lp.ledger.fills) - 1
+    lp.open_fills[sym] = (idx, entry)
+    lp.cursor = idx + 1
+    exitf = SimpleNamespace(symbol=sym, side=SimpleNamespace(value="sell"),
+                            price=101.5, qty=0.1, fee=0.01,
+                            ts_ns=entry_ts_ns + 60_000_000_000)
+    lp.ledger.fills.append((exitf, SimpleNamespace(value="take_profit")))
+    lp.ledger.open_levels.append(None)
+
+
+def test_collect_closed_venue_tp_fill_marks_verified(tmp_path):
+    lp = _lp.LivePaper(["BTCUSDT"], 100.0, tmp_path)
+    sym = lp.syms["BTCUSDT"]
+    lp.exec_ = object()          # mirror katmanı açık; _mirror burada çağrılmaz
+    lp._mirror_live = True
+    lp.open_mirror[sym] = {"ok": True, "order_id": "51982023119",
+                           "qty_used": 9.79, "bumped": True}
+    _stage_round_trip(lp, sym, 1_789_082_000_000 * 1_000_000)
+    lp._venue_closed["BTCUSDT"] = {"how": "take_profit",
+                                   "order_id": "51982023383"}
+    lp.collect_closed()
+    rec = lp.closed_all[-1]
+    assert rec["origin"] == "live"
+    assert rec["exchange_verified"] is True
+    assert rec["exchange_order_id"] == "51982023383"
+    assert rec["exchange_exit_venue"] == "take_profit"
+    assert "borsa tarafında" in rec["exchange_note"]
+    assert not any("EXIT_SKIP" in e for e in lp._exec_errors)
+
+
+def test_collect_closed_unproven_vanish_is_honest(tmp_path):
+    lp = _lp.LivePaper(["BTCUSDT"], 100.0, tmp_path)
+    sym = lp.syms["BTCUSDT"]
+    lp.exec_ = object()
+    lp._mirror_live = True
+    lp.open_mirror[sym] = {"ok": True, "order_id": "111"}
+    _stage_round_trip(lp, sym, 1_789_082_000_000 * 1_000_000)
+    lp.collect_closed()
+    rec = lp.closed_all[-1]
+    assert rec["exchange_verified"] is False
+    assert "çıkış aynası atlandı" in rec["exchange_note"]
+    assert any("EXIT_SKIP" in e for e in lp._exec_errors)
+
+
+def test_collect_closed_exit_rejected_but_venue_tp_filled(tmp_path):
+    """2026-09-11: -2022 (pozisyon borsada zaten kapalı) alınsa bile venue TP
+    doldu kanıtı varsa kayıt 'failed' değil 'borsada kapandı' olur (canlı
+    ETHUSDT vakası: giriş 0.036@2500.53 → TP 0.036@2548.18, +$1.72)."""
+    lp = _lp.LivePaper(["BTCUSDT"], 100.0, tmp_path)
+    sym = lp.syms["BTCUSDT"]
+
+    class X:
+        stopped = False
+        tped = False
+
+        def place_market_order(self, symbol, side, qty, reduce_only=False):
+            raise ExecutorError(-2022, "ReduceOnly Order is rejected.")
+
+        def order_status(self, s, oid):
+            return "FILLED"
+
+        def algo_order_filled(self, s, oid):
+            return False
+
+        def cancel_venue_stop(self, s):
+            self.stopped = True
+            return True
+
+        def cancel_venue_tp(self, s):
+            self.tped = True
+            return True
+
+    ex = X()
+    lp.exec_ = ex
+    lp._mirror_live = True
+    lp.open_mirror[sym] = {"ok": True, "order_id": "111", "qty_used": 0.1}
+    lp.mirror_positions["BTCUSDT"] = {"qty": 0.1, "order_id": "111",
+                                      "stop_id": "222", "tp_id": "333"}
+    _stage_round_trip(lp, sym, 1_789_082_000_000 * 1_000_000)
+    lp.collect_closed()
+    rec = lp.closed_all[-1]
+    assert rec["exchange_verified"] is True
+    assert rec["exchange_exit_venue"] == "take_profit"
+    assert "borsa tarafında" in rec["exchange_note"]
+    assert "BTCUSDT" not in lp.mirror_positions
+    assert ex.stopped is True and ex.tped is True

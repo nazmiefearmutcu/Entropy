@@ -343,6 +343,11 @@ class LivePaper:
         self.mirror_positions: dict[str, dict[str, Any]] = {}
         self._warned_untracked: set[str] = set()
         self._warned_orphan_mainnet: set[str] = set()
+        # 2026-09-11: borsa tarafında bizim exit aynamız OLMADAN kapanan
+        # mirror pozisyonlarının kapanış kanıtı (reconcile tespit eder,
+        # paper kapanışı işlem kaydına dürüstçe yazar — LINK yanlış
+        # 'mirror failed' etiketi vakası).
+        self._venue_closed: dict[str, dict[str, Any]] = {}
         self.exec_stats: dict[str, Any] = {"orders_sent": 0, "orders_failed": 0,
                                            "last_ok_utc": None, "last_error": None}
         # Z4-8: tek yuvalık last_error yerine küçük hata halkası (son 5).
@@ -780,6 +785,30 @@ class LivePaper:
             self._note_exec_error(f"venue rearm: {exc}")
 
     # ---- venue bracket re-sync (2026-09-08 restart-güvenli katman) --------
+    def _venue_close_evidence(self, bare: str,
+                              mp: dict[str, Any]) -> dict[str, Any] | None:
+        """Pozisyon bizim exit aynamız olmadan borsadan kaybolduğunda kapanış
+        kanıtı ara: venue TP LIMIT dolduysa / algo stop tetiklendiyse
+        {how, order_id} döner; kanıt yoksa None (manuel kapanış olabilir —
+        iddia etme). Tüm okumalar fail-open: hata = kanıtsız."""
+        tp_id = str(mp.get("tp_id") or "")
+        _st = getattr(self.exec_, "order_status", None)
+        if tp_id and callable(_st):
+            try:
+                if _st(bare, tp_id) == "FILLED":
+                    return {"how": "take_profit", "order_id": tp_id}
+            except Exception:  # noqa: BLE001 — kanıt katmanı asla patlamaz
+                pass
+        sid = str(mp.get("stop_id") or "")
+        _af = getattr(self.exec_, "algo_order_filled", None)
+        if sid and callable(_af):
+            try:
+                if _af(bare, sid):
+                    return {"how": "stop", "order_id": sid}
+            except Exception:  # noqa: BLE001
+                pass
+        return None
+
     def _venue_rearm(self, tag: str) -> None:
         """Mirror pozisyonları için borsa bracket'ını (STOP_MARKET +
         reduce-only LIMIT TP) senkronla:
@@ -811,14 +840,23 @@ class LivePaper:
             bare = self._bare(_sym)
             rp = real.get(bare)
             if rp is None:
+                _mp0 = self.mirror_positions.get(_sym) or {}
+                # 2026-09-11: kapanış KANITI (venue TP/stop dolgusu) — varsa
+                # paper kapanışına taşınır; yanlış 'mirror failed' etiketi ve
+                # gereksiz reduce-only ayna atlanır (LINK vakası).
+                _ev = self._venue_close_evidence(bare, _mp0)
+                if _ev:
+                    self._venue_closed[bare] = _ev
                 # M3: pozisyon borsada kayboldu + fiyat stop tarafındaysa bu
                 # bir borsa-stop dolgusudur (streak sayacı; fail-closed yönü
-                # güvenli: en kötü durum gereksiz 6s giriş molası)
-                _mp0 = self.mirror_positions.get(_sym) or {}
+                # güvenli: en kötü durum gereksiz 6s giriş molası). Gerçek
+                # kanıt varsa o kazanır (çift sayım yok).
                 _s0 = str(_mp0.get("side") or "")
                 _sl0 = float(_mp0.get("sl_px") or 0.0)
                 _px0 = _f(self.last_close.get(bare, 0.0))
-                if _s0 and _sl0 > 0 and _px0 > 0 and (
+                if _ev and _ev.get("how") == "stop":
+                    self._note_venue_stop_fill(bare)
+                elif _s0 and _sl0 > 0 and _px0 > 0 and (
                         (_s0 == "long" and _px0 <= _sl0 * 1.001)
                         or (_s0 == "short" and _px0 >= _sl0 * 0.999)):
                     self._note_venue_stop_fill(bare)
@@ -920,6 +958,8 @@ class LivePaper:
                     break
             if _pp is None:
                 continue   # kâğıt yok -> rearm'ın izi üzerinde çalışır
+            if mp.get("be_unsupported"):
+                continue   # closePosition stop tekilliği: ratchet kapalı
             pside = str(rp.get("side") or "long")   # BORSA gerçeği esas
             paper_side = ("long" if _pp.side is PositionSide.LONG
                           else "short")
@@ -962,7 +1002,23 @@ class LivePaper:
             old_id = str(mp.get("stop_id") or "")
             new_id = self.exec_.place_venue_stop(bare, pside, level)  # YENİ ÖNCE
             if not new_id:
-                continue   # eski stop yerinde; sonraki barda yeniden dene
+                # Binance closePosition STOP_MARKET TEKİLLİĞİ: mevcut
+                # closePosition stop varken ikincisi -4130 ile reddedilir →
+                # NEW-first ratchet bu emir tipiyle MÜMKÜN DEĞİL (canlı kanıt
+                # 2026-09-09/11: 'venue stop YERLESTIRILEMEDI -4130' churn'ü).
+                # Mevcut (daha geniş) stop korumaya devam eder; mevcut stopu
+                # ADOPT edip ratchet'i bu pozisyon için kapat (sessiz churn yok).
+                _adopt = getattr(self.exec_, "adopt_open_stop", None)
+                _has = _adopt(bare, pside) if callable(_adopt) else None
+                if _has:
+                    mp["stop_id"] = str(_has)
+                    if not mp.get("be_unsupported"):
+                        mp["be_unsupported"] = True
+                        print(f"[kaos-exec] {tag}: {bare} venue BE-ratchet "
+                              f"desteklenmiyor (closePosition stop tekilliği) "
+                              f"— mevcut stop korunuyor", flush=True)
+                    mp["be_done"] = True
+                continue
             mp["stop_id"] = str(new_id)
             if old_id:
                 mp["old_stop_id"] = old_id   # sonraki pass'in 0. adımı siler
@@ -1160,35 +1216,83 @@ class LivePaper:
                         (self.mirror_positions.get(_bare_sym) or {})
                         .get("qty") or qty)
                 m_exit = None
+                _vc = None
                 if self.exec_ is not None and _bare_sym in self.mirror_positions:
                     m_exit = self._mirror(fill.symbol,
                                           "SELL" if is_long else "BUY", exit_qty,
                                           reduce_only=True)
+                    if not (isinstance(m_exit, dict) and m_exit.get("ok")):
+                        # 2026-09-11: çıkış aynası reddedildiyse (-2022
+                        # ReduceOnly: pozisyon borsada ZATEN kapalı) venue
+                        # TP/stop kanıtını SOR — reconcile'dan ÖNCE dolan TP
+                        # yüzünden gerçekleşmiş bir çıkış yanlış 'failed'
+                        # damgalanmasın (canlı kanıt: ETHUSDT +$1.72 venue TP,
+                        # kayıt -2022 'failed' sanıyordu).
+                        _mp1 = self.mirror_positions.get(_bare_sym) or {}
+                        _vc = self._venue_close_evidence(_bare_sym, _mp1)
+                        if _vc:
+                            self.mirror_positions.pop(_bare_sym, None)
+                            for _cx in ("cancel_venue_stop",
+                                        "cancel_venue_tp"):
+                                _c = getattr(self.exec_, _cx, None)
+                                if callable(_c):
+                                    try:
+                                        _c(_bare_sym)
+                                    except Exception:  # noqa: BLE001
+                                        pass
                 elif self.exec_ is not None:
-                    # replay'den tureyen kagit pozisyon (girisi hic
-                    # aynalanmadi): cikis GERCEK hesaba gönderilmez
-                    self._exec_errors.append(
-                        f"EXIT_SKIP {fill.symbol}: girişi aynalanmamış (kağıt)")
+                    # 2026-09-11: pozisyon borsada bizim exit aynamız OLMADAN
+                    # kaybolduysa reconcile kanıt bırakır (venue TP/stop
+                    # dolgusu). Kanıt varsa çıkış aynası GEREKMEZ (pozisyon
+                    # zaten kapalı) ve kayıt dürüstçe 'borsada kapandı'
+                    # işaretlenir — eski kod LINK'te gerçekleşmiş bir TP
+                    # çıkışını 'girişi aynalanmamış / mirror failed' sanıyordu.
+                    if isinstance(getattr(self, "_venue_closed", None), dict):
+                        _vc = self._venue_closed.pop(_bare_sym, None)
+                    if _vc is None:
+                        # replay'den tureyen kagit pozisyon (girisi hic
+                        # aynalanmadi) veya kanıtsız kayboluş: cikis GERCEK
+                        # hesaba gönderilmez
+                        self._exec_errors.append(
+                            f"EXIT_SKIP {fill.symbol}: pozisyon borsada yok "
+                            f"(çıkış aynası atlandı)")
                 rec["origin"] = "live"
                 rec["exchange_entry_order_id"] = (m_entry or {}).get("order_id")
-                rec["exchange_order_id"] = (m_exit or {}).get("order_id")
+                rec["exchange_order_id"] = (
+                    _vc.get("order_id") if _vc
+                    else (m_exit or {}).get("order_id"))
+                if _vc:
+                    rec["exchange_exit_venue"] = str(_vc.get("how") or "")
                 # giriş kanıtı bu süreçte yoksa (pozisyon restart öncesinde
                 # açıldıysa) doğrulamayı çıkış emri taşır — yanlış "failed"
                 # etiketi yerine dürüst ayrım:
                 entry_ok = None if m_entry is None else bool(m_entry.get("ok"))
-                rec["exchange_verified"] = bool(
-                    (m_exit or {}).get("ok")) and entry_ok is not False
+                if _vc:
+                    # borsa emri durumu (TP FILLED / algo stop FINISHED)
+                    # kanıtıyla doğrulandı: giriş aynası başarısız değilse ok
+                    rec["exchange_verified"] = entry_ok is not False
+                else:
+                    rec["exchange_verified"] = bool(
+                        (m_exit or {}).get("ok")) and entry_ok is not False
                 notes = []
                 if m_entry is None:
                     notes.append("giriş aynası önceki süreçte (restart) — bu "
                                  "kayıtta giriş kanıtı yok")
                 if isinstance(m_entry, dict) and m_entry.get("bumped"):
-                    notes.append("testnet emri min notional için "
-                                 "%s→%s büyütüldü" % (_f(qty), _f(exit_qty)))
-                if not rec["exchange_verified"]:
-                    notes.append((m_entry or {}).get("error")
-                                 or (m_exit or {}).get("error")
-                                 or "mirror failed")
+                    notes.append("borsa emri boyutu min notional/bütçe için "
+                                 "ayarlandı: %s→%s" % (_f(qty), _f(exit_qty)))
+                if _vc:
+                    notes.append("çıkış borsa tarafında gerçekleşti (%s "
+                                 "dolgusu; reduce-only ayna gerekmedi)"
+                                 % _vc.get("how"))
+                elif not rec["exchange_verified"]:
+                    if entry_ok is True and m_exit is None:
+                        notes.append("çıkış aynası atlandı — pozisyon borsada "
+                                     "zaten yoktu (kapanış kanıtı bulunamadı)")
+                    else:
+                        notes.append((m_entry or {}).get("error")
+                                     or (m_exit or {}).get("error")
+                                     or "mirror failed")
                 if notes:
                     rec["exchange_note"] = "; ".join(notes)
                 if isinstance(m_exit, dict) and m_exit.get("ok"):

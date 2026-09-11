@@ -362,21 +362,55 @@ class TestnetExecutor:
 
     # ---- GERCEK HESAP korumalari (kullanici karari 09-07) ----------------
 
+    def _margin_type(self, sym: str) -> str | None:
+        """Sembolün güncel marj tipi ('isolated'/'cross') veya okunamadıysa
+        None (fail-safe: karar çağırana ait)."""
+        try:
+            rows = self._request("GET", "/fapi/v2/positionRisk",
+                                 {"symbol": sym})
+        except Exception:
+            return None
+        for r in rows if isinstance(rows, list) else []:
+            if not isinstance(r, dict):
+                continue
+            if clean_symbol(str(r.get("symbol") or "")) != sym:
+                continue
+            mt = str(r.get("marginType") or "").lower()
+            if mt:
+                return mt
+        return None
+
     def _ensure_lev_isolated(self, sym: str) -> None:
-        """Sembole KALDIRAC + IZOLE marj ayarla (semhol basina bir kez).
+        """Sembole KALDIRAC + IZOLE marj ayarla (sembol basina bir kez).
         -4046 ('zaten bu modda') tolere edilir; DİĞER hata raise eder —
-        yanlış marj modunda (CROSS) gerçek pozisyon AÇILMAZ."""
+        yanlış marj modunda (CROSS) gerçek pozisyon AÇILMAZ.
+
+        2026-09-11 CANLI BUG FIX: Binance `POST /fapi/v1/marginType`, marj
+        tipi ZATEN hedefteyken -4046 yerine -4067 ('Position side cannot be
+        changed...') dönebiliyor (bilinen Binance quirk'i — dev.binance.vision
+        #37516). Eski kod bunu ölümcül sayıp MIRROR GİRİŞİNİ iptal ediyordu
+        (canlı kanıt: NEARUSDT short kâğıtta açıldı, gerçek hesaba hiç
+        gitmedi; FIL/APT aynı sınıf). Artık: (1) tip zaten ISOLATED ise POST
+        hiç atılmaz; (2) -4067 gelirse ikinci bir OKUMA ile doğrulanır —
+        gerçekten isolated ise devam, CROSS ise yine raise (güvenlik kuralı
+        korunur)."""
         if self.leverage <= 1 or sym in self._lev_done:
             return
-        try:
-            self._request("POST", "/fapi/v1/marginType",
-                          {"symbol": sym, "marginType": "ISOLATED"})
-        except Exception as exc:
-            msg = str(exc)
-            if "-4046" not in msg and "No need" not in msg:
-                self._remember_error(f"marginType FAILED {sym}: "
-                                     f"{_mask_ip(msg)[:120]}")
-                raise
+        if self._margin_type(sym) != "isolated":
+            try:
+                self._request("POST", "/fapi/v1/marginType",
+                              {"symbol": sym, "marginType": "ISOLATED"})
+            except Exception as exc:
+                msg = str(exc)
+                ok = ("-4046" in msg or "No need" in msg)
+                if not ok and "-4067" in msg:
+                    # quirk: mesaj 'position side' der ama marj değişikliğiyle
+                    # ilgilidir — ikinci okumayla doğrula (yanlış modda açma).
+                    ok = (self._margin_type(sym) == "isolated")
+                if not ok:
+                    self._remember_error(f"marginType FAILED {sym}: "
+                                         f"{_mask_ip(msg)[:120]}")
+                    raise
         self._request("POST", "/fapi/v1/leverage",
                       {"symbol": sym, "leverage": self.leverage})
         self._lev_done.add(sym)
@@ -583,6 +617,33 @@ class TestnetExecutor:
                                "orderId": int(order_id)})
             return str(r.get("status") or "").upper() in ("NEW",
                                                           "PARTIALLY_FILLED")
+        except Exception:
+            return False
+
+    def order_status(self, sym: str, order_id: str) -> str | None:
+        """Legacy emrin DURUMU ('FILLED'/'NEW'/'CANCELED'/...) veya None.
+        order_alive yalnız canlılık verir; bu accessor kapanış KANITI içindir
+        (venue TP doldu mu? — 2026-09-11 LINK yanlış 'mirror failed' vakası)."""
+        try:
+            r = self._request("GET", "/fapi/v1/order",
+                              {"symbol": clean_symbol(sym),
+                               "orderId": int(order_id)})
+            st = str(r.get("status") or "").upper()
+            return st or None
+        except Exception:
+            return None
+
+    def algo_order_filled(self, sym: str, algoid: str) -> bool:
+        """Algo stop GERÇEKTEN doldu mu? (algoStatus FINISHED/FILLED VE
+        actualOrderId dolu). Manuel iptal (CANCELED) veya sorgu hatası False
+        döner — eksik kanıt 'doldu' sayılmaz (dürüstlük)."""
+        try:
+            r = self._request("GET", "/fapi/v1/algoOrder",
+                              {"symbol": clean_symbol(sym),
+                               "algoid": int(algoid)})
+            st = str(r.get("algoStatus") or r.get("status") or "").upper()
+            return bool(r.get("actualOrderId")) and st in ("FINISHED",
+                                                           "FILLED")
         except Exception:
             return False
 
