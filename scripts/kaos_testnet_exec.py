@@ -362,55 +362,21 @@ class TestnetExecutor:
 
     # ---- GERCEK HESAP korumalari (kullanici karari 09-07) ----------------
 
-    def _margin_type(self, sym: str) -> str | None:
-        """Sembolün güncel marj tipi ('isolated'/'cross') veya okunamadıysa
-        None (fail-safe: karar çağırana ait)."""
-        try:
-            rows = self._request("GET", "/fapi/v2/positionRisk",
-                                 {"symbol": sym})
-        except Exception:
-            return None
-        for r in rows if isinstance(rows, list) else []:
-            if not isinstance(r, dict):
-                continue
-            if clean_symbol(str(r.get("symbol") or "")) != sym:
-                continue
-            mt = str(r.get("marginType") or "").lower()
-            if mt:
-                return mt
-        return None
-
     def _ensure_lev_isolated(self, sym: str) -> None:
-        """Sembole KALDIRAC + IZOLE marj ayarla (sembol basina bir kez).
+        """Sembole KALDIRAC + IZOLE marj ayarla (semhol basina bir kez).
         -4046 ('zaten bu modda') tolere edilir; DİĞER hata raise eder —
-        yanlış marj modunda (CROSS) gerçek pozisyon AÇILMAZ.
-
-        2026-09-11 CANLI BUG FIX: Binance `POST /fapi/v1/marginType`, marj
-        tipi ZATEN hedefteyken -4046 yerine -4067 ('Position side cannot be
-        changed...') dönebiliyor (bilinen Binance quirk'i — dev.binance.vision
-        #37516). Eski kod bunu ölümcül sayıp MIRROR GİRİŞİNİ iptal ediyordu
-        (canlı kanıt: NEARUSDT short kâğıtta açıldı, gerçek hesaba hiç
-        gitmedi; FIL/APT aynı sınıf). Artık: (1) tip zaten ISOLATED ise POST
-        hiç atılmaz; (2) -4067 gelirse ikinci bir OKUMA ile doğrulanır —
-        gerçekten isolated ise devam, CROSS ise yine raise (güvenlik kuralı
-        korunur)."""
+        yanlış marj modunda (CROSS) gerçek pozisyon AÇILMAZ."""
         if self.leverage <= 1 or sym in self._lev_done:
             return
-        if self._margin_type(sym) != "isolated":
-            try:
-                self._request("POST", "/fapi/v1/marginType",
-                              {"symbol": sym, "marginType": "ISOLATED"})
-            except Exception as exc:
-                msg = str(exc)
-                ok = ("-4046" in msg or "No need" in msg)
-                if not ok and "-4067" in msg:
-                    # quirk: mesaj 'position side' der ama marj değişikliğiyle
-                    # ilgilidir — ikinci okumayla doğrula (yanlış modda açma).
-                    ok = (self._margin_type(sym) == "isolated")
-                if not ok:
-                    self._remember_error(f"marginType FAILED {sym}: "
-                                         f"{_mask_ip(msg)[:120]}")
-                    raise
+        try:
+            self._request("POST", "/fapi/v1/marginType",
+                          {"symbol": sym, "marginType": "ISOLATED"})
+        except Exception as exc:
+            msg = str(exc)
+            if "-4046" not in msg and "No need" not in msg:
+                self._remember_error(f"marginType FAILED {sym}: "
+                                     f"{_mask_ip(msg)[:120]}")
+                raise
         self._request("POST", "/fapi/v1/leverage",
                       {"symbol": sym, "leverage": self.leverage})
         self._lev_done.add(sym)
@@ -449,49 +415,6 @@ class TestnetExecutor:
         except Exception:
             pass
         trigger = self._round_stop(sym, pos_side, float(stop_price))
-        # LIQ-CLAMP (2026-09-10, sahip emri): SL asla likidasyon fiyatını
-        # aşamaz — tetiklenemeden borsa pozisyonu likide ederdi (canlı kanıt:
-        # 5 pozisyondan 4'ünde 20σ stopu liq ötesindeydi). Borsanın KENDİ
-        # liquidationPrice'ı ile sıkıştır: long SL >= liq*(1+buf), short
-        # SL <= liq*(1-buf). TP'ye dokunulmaz. Buffer: KAOS_LIQ_STOP_BUFFER
-        # (oran, varsayılan %1). Yuvarlama liq'ten UZAK tarafa: long floor
-        # için yukarı (short-yuvarlama), short ceil için aşağı (long-yuvarlama)
-        # — tick gridine otururken klempi delmesin.
-        try:
-            _buf = float(os.environ.get("KAOS_LIQ_STOP_BUFFER", "0.01") or 0.01)
-        except ValueError:
-            _buf = 0.01
-        if _buf < 0:
-            _buf = 0.0
-        try:
-            _rows = self._request("GET", "/fapi/v2/positionRisk",
-                                  {"symbol": sym})
-            _row = next((r for r in (_rows if isinstance(_rows, list) else [])
-                         if isinstance(r, dict)
-                         and float(r.get("positionAmt") or 0.0) != 0.0), None)
-            _liq = float((_row or {}).get("liquidationPrice") or 0.0)
-            if _liq > 0:
-                if pos_side == "long":
-                    _floor = self._round_stop(sym, "short",
-                                              _liq * (1.0 + _buf))
-                    if trigger < _floor:
-                        print(f"[kaos-exec] venue stop LIQ-CLAMP {sym}: "
-                              f"{trigger} -> {_floor} (likidasyon {_liq}; "
-                              f"eski stop liq ötesindeydi)", flush=True)
-                        trigger = _floor
-                else:
-                    _ceil = self._round_stop(sym, "long",
-                                             _liq * (1.0 - _buf))
-                    if trigger > _ceil:
-                        print(f"[kaos-exec] venue stop LIQ-CLAMP {sym}: "
-                              f"{trigger} -> {_ceil} (likidasyon {_liq}; "
-                              f"eski stop liq ötesindeydi)", flush=True)
-                        trigger = _ceil
-        except Exception as _exc:
-            # fail-open: liq sorgusu düşerse stop yine de kurulur (koruma
-            # hiç olmamasından iyidir); hata ring'e düşer.
-            self._remember_error(f"liq-clamp {sym}: "
-                                 f"{_mask_ip(str(_exc))[:120]}")
         params = {
             "symbol": sym,
             "side": "SELL" if pos_side == "long" else "BUY",
@@ -617,33 +540,6 @@ class TestnetExecutor:
                                "orderId": int(order_id)})
             return str(r.get("status") or "").upper() in ("NEW",
                                                           "PARTIALLY_FILLED")
-        except Exception:
-            return False
-
-    def order_status(self, sym: str, order_id: str) -> str | None:
-        """Legacy emrin DURUMU ('FILLED'/'NEW'/'CANCELED'/...) veya None.
-        order_alive yalnız canlılık verir; bu accessor kapanış KANITI içindir
-        (venue TP doldu mu? — 2026-09-11 LINK yanlış 'mirror failed' vakası)."""
-        try:
-            r = self._request("GET", "/fapi/v1/order",
-                              {"symbol": clean_symbol(sym),
-                               "orderId": int(order_id)})
-            st = str(r.get("status") or "").upper()
-            return st or None
-        except Exception:
-            return None
-
-    def algo_order_filled(self, sym: str, algoid: str) -> bool:
-        """Algo stop GERÇEKTEN doldu mu? (algoStatus FINISHED/FILLED VE
-        actualOrderId dolu). Manuel iptal (CANCELED) veya sorgu hatası False
-        döner — eksik kanıt 'doldu' sayılmaz (dürüstlük)."""
-        try:
-            r = self._request("GET", "/fapi/v1/algoOrder",
-                              {"symbol": clean_symbol(sym),
-                               "algoid": int(algoid)})
-            st = str(r.get("algoStatus") or r.get("status") or "").upper()
-            return bool(r.get("actualOrderId")) and st in ("FINISHED",
-                                                           "FILLED")
         except Exception:
             return False
 
@@ -1006,8 +902,6 @@ class TestnetExecutor:
                 "notional": abs(float(row.get("notional") or 0.0)),
                 "leverage": float(row.get("leverage") or 0.0),
                 "isolated": str(row.get("marginType", "")).lower() == "isolated",
-                # LIQ-CLAMP görünürlüğü (2026-09-10): panel/teşhis için
-                "liquidation_price": float(row.get("liquidationPrice") or 0.0),
             })
         return out
 
