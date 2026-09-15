@@ -19,7 +19,7 @@ import kaos_testnet_exec as kx  # noqa: E402
 from kaos_testnet_exec import TestnetExecutor  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_f4_replay_accounting import _mk_paper  # noqa: E402
+from test_f4_replay_accounting import _mk_paper, _push_fill  # noqa: E402
 
 import entropy_live_paper as lp_mod  # noqa: E402
 from entropy.bot.signals import Signal, SignalAction  # noqa: E402
@@ -265,3 +265,175 @@ def test_ratchet_skips_paper_venue_side_mismatch(tmp_path):
     lp._venue_ratchet("test")
     assert calls["n"] == 0
     assert mp.get("be_done") is None   # dokunulmadı
+
+
+# ---- 2026-09-14: giriş aynası telafi kuyruğu (retry) ------------------------
+
+class _MirrorExec:
+    """place_market_order sonuçlarını senaryo listesinden oynatır."""
+
+    def __init__(self, results=None, positions=None):
+        self.results = list(results or [])
+        self.positions = list(positions or [])
+        self.calls: list[tuple] = []
+        self.host = "https://fapi.binance.com"
+        self.sizing_pct = 0.30
+        self.leverage = 10
+
+    def place_market_order(self, symbol, side, qty, reduce_only=False):
+        self.calls.append((symbol, side, qty, reduce_only))
+        r = (self.results.pop(0) if self.results
+             else {"ok": False, "error": "stub tükendi"})
+        if isinstance(r, Exception):
+            raise r
+        return dict(r)
+
+    def get_open_positions(self):
+        return [dict(p) for p in self.positions]
+
+    def place_venue_stop(self, sym, side, px):
+        return "SID"
+
+    def place_venue_tp(self, sym, side, qty, px):
+        return "TID"
+
+
+def _pending_lp(tmp_path, sub: str):
+    lp = _mk_paper(tmp_path / sub, 100.0)
+    sym = "binance-spot:BTCUSDT"
+    lp.runner.portfolio.open(sym, lp_mod.PositionSide.LONG, 0.1, 100.0,
+                             95.0, 110.0, int(time.time() * 1e9), fee=0.0)
+    lp._mirror_live = True
+    return lp, sym
+
+
+def _backdate(lp, sym, sec: float = 901.0) -> None:
+    lp._pending_mirror[sym]["last_try"] = time.time() - sec
+
+
+def test_mirror_retry_kaydeder_ve_basarir(tmp_path):
+    lp, sym = _pending_lp(tmp_path, "mr1")
+    ex = _MirrorExec([
+        {"ok": False, "error": "-2019: Margin is insufficient."},
+        {"ok": True, "order_id": 7, "qty_used": 0.1},
+    ])
+    lp.exec_ = ex
+    lp._register_pending_mirror(sym, "buy", 0.1,
+                                {"ok": False, "error": "-2019: x"})
+    # kadans: kayıttan hemen sonra deneme YOK
+    lp._retry_pending_mirrors()
+    assert ex.calls == [] and sym in lp._pending_mirror
+    # deneme 1: -2019 -> kuyrukta kalır, provenans yazılmaz
+    _backdate(lp, sym)
+    lp._retry_pending_mirrors()
+    assert len(ex.calls) == 1 and sym in lp._pending_mirror
+    assert "BTCUSDT" not in lp.mirror_positions
+    # deneme 2: başarı -> provenans + venue bracket
+    _backdate(lp, sym)
+    lp._retry_pending_mirrors()
+    assert sym not in lp._pending_mirror
+    mp = lp.mirror_positions["BTCUSDT"]
+    assert mp["order_id"] == 7 and mp["side"] == "long"
+    assert mp["stop_id"] == "SID" and mp["tp_id"] == "TID"
+    assert lp.open_mirror[sym]["order_id"] == 7
+    assert len(ex.calls) == 2
+
+
+def test_mirror_skip_fantom_kayit_yok(tmp_path):
+    """MARGIN_SKIPPED (ok=True + skipped) başarı SAYILMAZ: provenansa
+    yazılmaz, telafi kuyruğunda kalır (eski kod fantom bracket kuruyordu)."""
+    lp, sym = _pending_lp(tmp_path, "mr2")
+    ex = _MirrorExec([{"ok": True, "order_id": None,
+                       "status": "MARGIN_SKIPPED", "skipped": "margin"}])
+    lp.exec_ = ex
+    lp._register_pending_mirror(sym, "buy", 0.1, {"ok": False})
+    _backdate(lp, sym)
+    lp._retry_pending_mirrors()
+    assert sym in lp._pending_mirror
+    assert "BTCUSDT" not in lp.mirror_positions
+    assert ex.calls and ex.calls[0][3] is False   # gerçek giriş denemesi
+
+
+def test_mirror_retry_kullanici_pozisyonunda_kalicı_atlanir(tmp_path):
+    """Borsada KAOS'a ait olmayan pozisyon varsa (kullanıcı işlemi) giriş
+    aynası kalıcı atlanır — -4067 döngüsü sonsuza kadar dönmez."""
+    lp, sym = _pending_lp(tmp_path, "mr3")
+    ex = _MirrorExec([], positions=[{"symbol": "BTCUSDT", "side": "long"}])
+    lp.exec_ = ex
+    lp._register_pending_mirror(sym, "buy", 0.1, {"ok": False})
+    _backdate(lp, sym)
+    lp._retry_pending_mirrors()
+    assert "BTCUSDT" in lp._mirror_conflict
+    assert sym not in lp._pending_mirror and ex.calls == []
+
+
+def test_mirror_retry_4067_kalici_atlanir(tmp_path):
+    lp, sym = _pending_lp(tmp_path, "mr4")
+    ex = _MirrorExec([{"ok": False,
+                       "error": "-4067: Position side cannot be changed"}])
+    lp.exec_ = ex
+    lp._register_pending_mirror(sym, "buy", 0.1, {"ok": False})
+    _backdate(lp, sym)
+    lp._retry_pending_mirrors()
+    assert "BTCUSDT" in lp._mirror_conflict
+    assert sym not in lp._pending_mirror
+
+
+def test_mirror_retry_penceresi_dolar(tmp_path):
+    lp, sym = _pending_lp(tmp_path, "mr5")
+    ex = _MirrorExec([])
+    lp.exec_ = ex
+    lp._register_pending_mirror(sym, "buy", 0.1, {"ok": False})
+    lp._pending_mirror[sym]["ts"] = time.time() - (
+        lp_mod.MIRROR_RETRY_WINDOW_S + 1.0)
+    _backdate(lp, sym)
+    lp._retry_pending_mirrors()
+    assert sym not in lp._pending_mirror and ex.calls == []
+
+
+def test_mirror_retry_stop_otesinde_iptal(tmp_path):
+    """Geç giriş mark'ı kâğıt stop'un ters tarafındaysa aynalama iptal
+    (anında stop olurdu)."""
+    lp, sym = _pending_lp(tmp_path, "mr6")
+    ex = _MirrorExec([])
+    lp.exec_ = ex
+    lp._register_pending_mirror(sym, "buy", 0.1, {"ok": False})
+    _backdate(lp, sym)
+    lp.runner.portfolio.mark(sym, 94.0)   # kâğıt stop 95'in altı
+    lp._retry_pending_mirrors()
+    assert sym not in lp._pending_mirror and ex.calls == []
+
+
+def test_collect_closed_skip_telafi_kuyruguna_yazar(tmp_path):
+    """Uçtan uca: canlı giriş dolgusunun aynası MARGIN_SKIPPED dönerse
+    provenans YAZILMAZ, telafi kuyruğuna girer (fantom fix)."""
+    lp, sym = _pending_lp(tmp_path, "mr7")
+    ex = _MirrorExec([{"ok": True, "order_id": None,
+                       "status": "MARGIN_SKIPPED", "skipped": "margin"}])
+    lp.exec_ = ex
+    entry = SimpleNamespace(symbol=sym, side=SimpleNamespace(value="buy"),
+                            price=100.0, qty=0.1, fee=0.01,
+                            ts_ns=int(time.time() * 1e9))
+    _push_fill(lp, entry, "open", (95.0, 110.0))
+    lp.cursor = 0
+    lp.collect_closed()
+    assert sym in lp._pending_mirror
+    assert "BTCUSDT" not in lp.mirror_positions
+
+
+def test_collect_closed_basari_provenans_yazar(tmp_path):
+    """Refactor regresyonu: başarılı giriş aynası hâlâ provenans + bracket
+    yazar (ortak başarı yolu)."""
+    lp, sym = _pending_lp(tmp_path, "mr8")
+    ex = _MirrorExec([{"ok": True, "order_id": 11, "qty_used": 0.1}])
+    lp.exec_ = ex
+    entry = SimpleNamespace(symbol=sym, side=SimpleNamespace(value="buy"),
+                            price=100.0, qty=0.1, fee=0.01,
+                            ts_ns=int(time.time() * 1e9))
+    _push_fill(lp, entry, "open", (95.0, 110.0))
+    lp.cursor = 0
+    lp.collect_closed()
+    mp = lp.mirror_positions["BTCUSDT"]
+    assert mp["order_id"] == 11 and mp["stop_id"] == "SID"
+    assert mp["tp_id"] == "TID"
+    assert sym not in lp._pending_mirror

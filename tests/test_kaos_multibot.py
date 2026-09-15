@@ -356,7 +356,7 @@ def test_crypto_child_config_object_equals_standalone_build_cfg(tmp_path):
     assert cfg.consensus.max_hold_bars == 192
     ro = cfg.risk_overrides
     assert ro.per_trade_pct == 10.0 and ro.max_concurrent == 4
-    assert ro.max_total_exposure_pct == 40.0
+    assert ro.max_total_exposure_pct == 45.0   # 2026-09-14: 40 -> 45 (4x%10)
     assert ro.max_daily_loss_pct == 15.0
     assert ro.stop_mode == "sigma"
     assert ro.stop_sigma_mult == 20.0 and ro.tp_sigma_mult == 4.0

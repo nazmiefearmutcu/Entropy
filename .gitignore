@@ -30,3 +30,7 @@ native/sidecar/build/
 native/sidecar/dist/
 native/frontend/dist/
 native/frontend/node_modules/
+
+# live-paper runtime state + rr grid kline caches (2026-09-16)
+reports/live-paper/
+reports/rr-grid-cache/*.json

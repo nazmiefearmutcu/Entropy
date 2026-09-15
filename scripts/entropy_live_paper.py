@@ -103,6 +103,12 @@ HEARTBEAT_S = 3600.0             # hourly "[heartbeat] ..." log cadence
 BALANCE_REFRESH_S = 300.0        # testnet bakiye tazeleme (Z3-5: 60s -> 300s;
                                  # bakiye bilgilendirme amaçlıdır ve 60s poll
                                  # IP banına (-1003) katkı vermişti)
+# 2026-09-14: giriş aynası TELAFİ kuyruğu — marj/geçici hata yüzünden
+# borsaya açılamayan kâğıt girişler pencerede tekrar denenir (kullanıcı
+# raporu: "kaç saattir yeni işlem açmıyor" — -2019/-4067/MARGIN_SKIP
+# sonrası hiç retry yoktu, işlem kalıcı kâğıt-only kalıyordu).
+MIRROR_RETRY_WINDOW_S = 4 * 3600.0   # ilk denemeden sonra 4 saat boyunca
+MIRROR_RETRY_MIN_GAP_S = 900.0       # sembol başına 15 dk arayla
 
 _BAN_UNTIL_RE = re.compile(r"banned until (\d{10,16})")
 _IP_RE = re.compile(r"IP\s*\(?\s*\d{1,3}(?:\.\d{1,3}){3}\s*\)?")
@@ -115,7 +121,7 @@ def _mask_ip(text: str) -> str:
 
 # 2026-09-08: evren 5 -> 20 sıvı USD-M major (kullanıcı emri: daha çok işlem;
 # sinyal eşikleri AYNEN — fırsat sayısı büyütüldü, kaliteye dokunulmadı).
-# Risk kapıları değişmez: max_concurrent=4, exposure %40, slot-bölüşümlü boyut.
+# Risk kapıları değişmez: max_concurrent=4, exposure %45, slot-bölüşümlü boyut.
 DEFAULT_SYMBOLS = ("BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,"
                    "LINKUSDT,AVAXUSDT,SUIUSDT,NEARUSDT,ENAUSDT,LTCUSDT,"
                    "DOTUSDT,APTUSDT,ARBUSDT,OPUSDT,ATOMUSDT,FILUSDT,SEIUSDT")
@@ -235,7 +241,10 @@ def build_cfg(raws: list[str], cash: float, out_dir: Path) -> BotConfig:
             max_concurrent=4,
             stop_loss_pct=1.5,
             take_profit_pct=1.2,
-            max_total_exposure_pct=40.0,
+            max_total_exposure_pct=45.0,   # 2026-09-14: 40 -> 45; 4 slot x
+            # %10 = tam %40 olduğu için 4. pozisyon (yuvarlama/fee farkıyla)
+            # sistematik reddediliyordu (22x 'exposure cap exceeded') —
+            # max_concurrent=4 ile tutarlı hale getirildi.
             # M3 ölçümü (2026-09-09): bir 20σ stop = cüzdanın ~%4-10'u;
             # %40 halt gerçek cüzdanı korumada kör kalır -> %15.
             max_daily_loss_pct=15.0,
@@ -343,6 +352,11 @@ class LivePaper:
         self.mirror_positions: dict[str, dict[str, Any]] = {}
         self._warned_untracked: set[str] = set()
         self._warned_orphan_mainnet: set[str] = set()
+        # 2026-09-14: başarısız/atlanan giriş aynaları için telafi kuyruğu
+        # ve kalıcı çakışma kümesi (kullanıcı pozisyonu olan semboller
+        # kâğıt-only; -4067 döngüsü sonsuza kadar denenmez).
+        self._pending_mirror: dict[str, dict[str, Any]] = {}
+        self._mirror_conflict: set[str] = set()
         # 2026-09-11: borsa tarafında bizim exit aynamız OLMADAN kapanan
         # mirror pozisyonlarının kapanış kanıtı (reconcile tespit eder,
         # paper kapanışı işlem kaydına dürüstçe yazar — LINK yanlış
@@ -639,6 +653,150 @@ class LivePaper:
             print(f"[kaos-exec] mirror FAILED: {msg}", flush=True)
             return {"ok": False, "order_id": None, "status": "failed",
                     "avg_price": None, "error": msg}
+
+    # ---- 2026-09-14: giriş aynası telafi (retry) katmanı -------------------
+    def _register_pending_mirror(self, symbol: str, fill_side_value: str,
+                                 qty: float,
+                                 m_entry: dict | None) -> None:
+        """Giriş aynası başarısız/atlandı -> telafi kuyruğuna al. Kuyruk
+        in-memory'dir; pencere MIRROR_RETRY_WINDOW_S, sembol başına kadans
+        MIRROR_RETRY_MIN_GAP_S. Kullanıcı raporu (14 Eyl): -2019/-4067 ve
+        MARGIN_SKIP sonrası HİÇ retry yoktu — işlem kalıcı kâğıt-only
+        kalıyordu; kuyruk bunu kapatır."""
+        if m_entry is None:
+            return
+        now = time.time()
+        err = ""
+        if isinstance(m_entry, dict):
+            err = str(m_entry.get("error") or m_entry.get("status") or "")
+        self._pending_mirror[symbol] = {
+            "side": str(fill_side_value or ""),
+            "qty": float(qty or 0.0),
+            "ts": now,
+            "last_try": now,
+            "attempts": 1,
+            "last_error": err[:160],
+        }
+        print(f"[kaos-exec] mirror askıda: {self._bare(symbol)} "
+              f"({err[:80] or 'başarısız'}) — telafi kuyruğunda", flush=True)
+
+    def _record_mirror_success(self, symbol: str, fill_side_value: str,
+                               qty: float, stop_px: float, tp_px: float,
+                               m_entry: dict | None) -> None:
+        """Başarılı giriş aynasını provenansa yaz + venue STOP/TP bracket
+        kur (collect_closed ilk deneme + _retry_pending_mirrors ortak yolu)."""
+        bare = self._bare(symbol)
+        side = "long" if fill_side_value == "buy" else "short"
+        self.mirror_positions[bare] = {
+            "qty": _f(qty),
+            "order_id": (m_entry or {}).get("order_id"),
+            "opened_utc": datetime.now(timezone.utc).isoformat(),
+            # M1: yön gerçeği (restart sonrası yön sayacı için)
+            "side": side,
+        }
+        # GERCEK HESAP koruması: borsa tarafı STOP_MARKET (paper stop_px
+        # ile). Süreç ölse bile pozisyon borsada korunur. Best-effort:
+        # başarısızsa bot içi SL çalışmaya devam eder; hata ring'e düşer.
+        _attach = getattr(self.exec_, "place_venue_stop", None)
+        if float(stop_px or 0) > 0 and callable(_attach):
+            try:
+                _sid = _attach(symbol, side, float(stop_px))
+                if _sid:
+                    # 2026-09-08: stop id ARTIK kalıcı — restart'ta
+                    # adopt/dokunma kararı bununla verilir (eskiden discard
+                    # → her restart çift stop kuruyordu)
+                    self.mirror_positions[bare]["stop_id"] = str(_sid)
+            except Exception as _exc:  # noqa: BLE001 — fail-open
+                print(f"[kaos-exec] venue stop exc: {_exc}", flush=True)
+        # Venue TP (2026-09-08): kar tarafı da borsada KALICI — runner
+        # ölürse pozisyon stop-only çıplak kalmıyordu (19 saat dersi).
+        _tp_attach = getattr(self.exec_, "place_venue_tp", None)
+        if callable(_tp_attach) and float(tp_px or 0) > 0:
+            try:
+                _tqty = float((m_entry or {}).get("qty_used") or qty)
+                _tid = _tp_attach(symbol, side, _tqty, float(tp_px))
+                if _tid:
+                    self.mirror_positions[bare]["tp_id"] = str(_tid)
+            except Exception as _exc:  # noqa: BLE001
+                print(f"[kaos-exec] venue tp exc: {_exc}", flush=True)
+
+    def _retry_pending_mirrors(self) -> None:
+        """Askıdaki giriş aynalarını telafi et (fail-open): marj/geçici
+        hatalar pencerede tekrar denenir; borsa çakışması (-4067 veya
+        KAOS'a ait olmayan pozisyon) kalıcı atlanır; mark kâğıt stop'un
+        ters tarafındaysa (geç giriş anında stop olurdu) iptal edilir."""
+        if self.exec_ is None or not self._mirror_live or not self._pending_mirror:
+            return
+        now = time.time()
+        real: dict | None = None
+        for symbol in list(self._pending_mirror):
+            pend = self._pending_mirror.get(symbol)
+            if not isinstance(pend, dict):
+                self._pending_mirror.pop(symbol, None)
+                continue
+            bare = self._bare(symbol)
+            pos = (self.runner.portfolio.positions or {}).get(symbol)
+            if pos is None:
+                self._pending_mirror.pop(symbol, None)   # pozisyon kapandı
+                continue
+            if bare in self._mirror_conflict:
+                self._pending_mirror.pop(symbol, None)
+                continue
+            if now - float(pend.get("ts") or now) > MIRROR_RETRY_WINDOW_S:
+                self._pending_mirror.pop(symbol, None)
+                print(f"[kaos-exec] mirror telafi penceresi doldu: {bare} "
+                      f"— kâğıt-only", flush=True)
+                continue
+            if now - float(pend.get("last_try") or 0.0) < MIRROR_RETRY_MIN_GAP_S:
+                continue
+            if real is None:
+                try:
+                    real = {self._bare(p.get("symbol") or ""):
+                            p for p in (self.exec_.get_open_positions() or [])}
+                except Exception:  # noqa: BLE001 — ön-kontrol fail-open
+                    real = {}
+            if bare in real and bare not in self.mirror_positions:
+                self._mirror_conflict.add(bare)
+                self._pending_mirror.pop(symbol, None)
+                print(f"[kaos-exec] mirror atlandı: {bare} borsada KAOS'a "
+                      f"ait olmayan pozisyon var (kullanıcı işlemi) — "
+                      f"kâğıt-only", flush=True)
+                continue
+            _stop = float(getattr(pos, "stop_px", 0) or 0)
+            _tp = float(getattr(pos, "tp_px", 0) or 0)
+            _mark = float(self.runner.portfolio.mark_of(symbol) or 0)
+            if _stop > 0 and _mark > 0:
+                _is_long = (getattr(pos, "side", None) is PositionSide.LONG)
+                if (_is_long and _mark <= _stop) or (
+                        (not _is_long) and _mark >= _stop):
+                    self._pending_mirror.pop(symbol, None)
+                    print(f"[kaos-exec] mirror telafi iptal: {bare} mark "
+                          f"{_mark} kâğıt stop {_stop} ötesinde — kâğıt-only",
+                          flush=True)
+                    continue
+            pend["last_try"] = now
+            pend["attempts"] = int(pend.get("attempts") or 0) + 1
+            res = self._mirror(symbol,
+                               "BUY" if pend.get("side") == "buy" else "SELL",
+                               float(pend.get("qty") or 0.0))
+            if res is None:
+                continue
+            if res.get("ok") and not res.get("skipped"):
+                self.open_mirror[symbol] = res
+                self._record_mirror_success(
+                    symbol, str(pend.get("side") or ""),
+                    float(pend.get("qty") or 0.0), _stop, _tp, res)
+                self._pending_mirror.pop(symbol, None)
+                print(f"[kaos-exec] mirror telafi BAŞARILI: {bare} "
+                      f"(deneme {pend['attempts']})", flush=True)
+                continue
+            err = str(res.get("error") or res.get("status") or "")
+            pend["last_error"] = err[:160]
+            if "-4067" in err:
+                self._mirror_conflict.add(bare)
+                self._pending_mirror.pop(symbol, None)
+                print(f"[kaos-exec] mirror atlandı: {bare} borsa çakışması "
+                      f"({err[:80]}) — kâğıt-only", flush=True)
 
     # ---- mirror yardımcıları (Z4-2 provenans + Z3-5 ban bilinci) -----------
     @staticmethod
@@ -1085,62 +1243,27 @@ class LivePaper:
                     "BUY" if fill.side.value == "buy" else "SELL", fill.qty)
                 if m_entry is not None:
                     self.open_mirror[fill.symbol] = m_entry
-                    if m_entry.get("ok"):
-                        # Z4-2 provenans: BU emirle açtığımızı izle (kalıcı)
-                        self.mirror_positions[self._bare(fill.symbol)] = {
-                            "qty": _f(fill.qty),
-                            "order_id": m_entry.get("order_id"),
-                            "opened_utc": datetime.now(timezone.utc).isoformat(),
-                            # M1: yön gerçeği (restart sonrası yön sayacı için)
-                            "side": ("long" if fill.side.value == "buy"
-                                     else "short"),
-                        }
-                        # GERCEK HESAP koruması: borsa tarafı STOP_MARKET
-                        # (paper stop_px ile). Süreç ölsem bile pozisyon
-                        # borsada korunur. Best-effort: başarısızsa bot içi
-                        # SL çalışmaya devam eder; hata error ring'e düşer.
+                    if m_entry.get("ok") and not m_entry.get("skipped"):
+                        # Z4-2 provenans + venue bracket (ortak başarı yolu)
                         _lv = (self.ledger.open_levels[i]
                                if i < len(self.ledger.open_levels) else None)
+                        _pos = ((self.runner.portfolio.positions or {})
+                                .get(fill.symbol))
                         _sl = (float(_lv[0]) if _lv else
-                               float(getattr(
-                                   (self.runner.portfolio.positions or {})
-                                   .get(fill.symbol), "stop_px", 0) or 0))
-                        _pside = ("long" if fill.side.value == "buy"
-                                  else "short")
-                        _attach = getattr(self.exec_, "place_venue_stop", None)
-                        if _sl > 0 and callable(_attach):
-                            try:
-                                _sid = _attach(fill.symbol, _pside, _sl)
-                                if _sid:
-                                    # 2026-09-08: stop id ARTIK kalıcı —
-                                    # restart'ta adopt/dokunma kararı bununla
-                                    # verilir (eskiden discard → her restart
-                                    # çift stop kuruyordu)
-                                    self.mirror_positions[
-                                        self._bare(fill.symbol)][
-                                            "stop_id"] = str(_sid)
-                            except Exception as _exc:
-                                print(f"[kaos-exec] venue stop exc: {_exc}",
-                                      flush=True)
-                        # Venue TP (2026-09-08): kar tarafı da borsada
-                        # KALICI — runner ölürse pozisyon stop-only çıplak
-                        # kalmıyordu artık (19 saatlik kesinti dersi).
-                        _tp_attach = getattr(self.exec_, "place_venue_tp",
-                                             None)
-                        if (callable(_tp_attach) and _lv is not None
-                                and float(_lv[1] or 0) > 0):
-                            try:
-                                _tqty = float((m_entry or {}).get("qty_used")
-                                              or fill.qty)
-                                _tid = _tp_attach(fill.symbol, _pside,
-                                                  _tqty, float(_lv[1]))
-                                if _tid:
-                                    self.mirror_positions[
-                                        self._bare(fill.symbol)][
-                                            "tp_id"] = str(_tid)
-                            except Exception as _exc:
-                                print(f"[kaos-exec] venue tp exc: {_exc}",
-                                      flush=True)
+                               float(getattr(_pos, "stop_px", 0) or 0))
+                        _tp = (float(_lv[1]) if _lv else
+                               float(getattr(_pos, "tp_px", 0) or 0))
+                        self._record_mirror_success(
+                            fill.symbol, fill.side.value, fill.qty,
+                            _sl, _tp, m_entry)
+                        self._pending_mirror.pop(fill.symbol, None)
+                    else:
+                        # 2026-09-14: başarısız/atlanan giriş -> telafi
+                        # kuyruğu (eski kod MARGIN_SKIPPED'i ok=True sanıp
+                        # fantom bracket kuruyor ve -2019'ları hiç tekrar
+                        # denemiyordu).
+                        self._register_pending_mirror(
+                            fill.symbol, fill.side.value, fill.qty, m_entry)
                 self.open_fills[fill.symbol] = (i, fill)
                 continue
             got = self.open_fills.pop(fill.symbol, None)
@@ -1196,6 +1319,7 @@ class LivePaper:
             # (yalnız aynalama açıksa alanlar eklenir; kapalıyken rec değişmez)
             if self.exec_ is not None and self._mirror_live:
                 m_entry = self.open_mirror.pop(fill.symbol, None)
+                self._pending_mirror.pop(fill.symbol, None)   # telafi kuyruğu
                 # 2026-09-09 MUST-FIX: _bare_sym TANIMDAN ÖNCE okunuyordu
                 # (ilk restart-sonrası çıkışta NameError -> işlem kaydı ve
                 # gerçek kapanış aynası kayboluyordu)
@@ -1430,6 +1554,11 @@ class LivePaper:
 
     # ---- live: feed every newly closed bar (catch-up gaps in order) --------
     def poll_bars(self, now_ms: int) -> bool:
+        try:
+            self._retry_pending_mirrors()
+        except Exception as exc:  # noqa: BLE001 — telafi ana döngüyü düşürmez
+            print(f"[kaos-exec] mirror telafi hatası (yok sayılır): {exc}",
+                  flush=True)
         target_open = ((now_ms - POST_CLOSE_DELAY_MS) // BAR_MS) * BAR_MS
         need = (target_open - self.last_fed_open_ms) // BAR_MS
         if need <= 0:
@@ -1700,6 +1829,15 @@ class LivePaper:
             # Z4-2: bizim mirror girişlerimizle açtığımız pozisyonların izi
             # (restart'ta restore edilir; reconcile/flatten yalnız buna dokunur)
             "mirror_open": {k: dict(v) for k, v in self.mirror_positions.items()},
+            # 2026-09-14: telafi kuyruğu görünürlüğü (panel + canlı doğrulama)
+            "mirror_pending": {
+                self._bare(s): {
+                    "side": p.get("side"), "qty": p.get("qty"),
+                    "age_s": round(time.time() - float(p.get("ts") or 0.0), 1),
+                    "attempts": p.get("attempts"),
+                    "last_error": p.get("last_error"),
+                } for s, p in self._pending_mirror.items()
+                if isinstance(p, dict)},
         }
 
     def build_state(self) -> dict[str, Any]:

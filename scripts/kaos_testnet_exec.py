@@ -786,7 +786,11 @@ class TestnetExecutor:
                 except Exception:
                     _avail = 0.0
                 if _avail > 0:
-                    _target = min(_target, _avail * self.leverage * 0.95)
+                    # 2026-09-14: 0.95 -> 0.90 tampon (canlı kanıt: tampon
+                    # sınırındaki emirler -2019 'Margin is insufficient' ile
+                    # sekiyordu; telafi katmanı da mevcut ama ilk denemede
+                    # başarı oranını yükseltir).
+                    _target = min(_target, _avail * self.leverage * 0.90)
                 _minn = max(self._min_notional.get(sym, 0.0),
                             _MIN_NOTIONAL_FLOOR)
                 if _target < _minn:

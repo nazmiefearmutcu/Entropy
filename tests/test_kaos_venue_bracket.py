@@ -226,7 +226,8 @@ def test_margin_clamp_shrinks_to_available():
     ex = TestnetExecutor("k", "s", leverage=10, sizing_pct=0.25, slots=1)
     ex._lot_loaded = True
     ex._lot_step = {"ETHUSDT": 0.001}
-    # wallet 100 → hedef 250 USDT; available 5 → klemp 5*10*0.95 = 47.5 USDT
+    # wallet 100 → hedef 250 USDT; available 5 → klemp 5*10*0.90 = 45.0
+    # USDT (2026-09-14: tampon 0.95 -> 0.90)
     ex.get_balance = lambda: {"wallet": 100.0, "available": 5.0,
                               "unrealized": 0.0}  # type: ignore[method-assign]
     ex.get_price = lambda sym: 2500.0  # type: ignore[method-assign]
@@ -239,7 +240,7 @@ def test_margin_clamp_shrinks_to_available():
     ex._request = fake_req  # type: ignore[assignment]
     out = ex.place_market_order("ETHUSDT", "BUY", 0.001)
     assert out["ok"] is True
-    assert out["qty_used"] == pytest.approx(0.019)  # 47.5/2500, step'e yuvarlu
+    assert out["qty_used"] == pytest.approx(0.018)  # 45.0/2500, step'e yuvarlu
 
 
 def test_margin_skip_when_below_min_notional():
