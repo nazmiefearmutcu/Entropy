@@ -123,4 +123,4 @@ Native sidecar and frontend checks are documented in [`native/README.md`](native
 
 [Apache License 2.0](LICENSE). Market analysis and paper-trading outputs are not investment advice.
 
-Created By Nazmi Efe Armutcu (Aylin)
+Created By Aylin (Nazmi Efe Armutcu)
